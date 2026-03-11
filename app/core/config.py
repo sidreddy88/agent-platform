@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     anthropic_api_key: str = ""
+    github_token: str = ""
     app_name: str = "Agent Platform"
     debug: bool = False
 
