@@ -1,4 +1,7 @@
+import gzip
+import re
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -152,6 +155,126 @@ class GitHubService:
             )
             await self._raise_for_status(response)
             return response.json()
+
+    # ------------------------------------------------------------------
+    # CI/CD — workflow runs & logs
+    # ------------------------------------------------------------------
+
+    async def get_workflow_runs(
+        self,
+        owner: str,
+        repo: str,
+        limit: int = 10,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent workflow runs for a repo.
+
+        Args:
+            limit:  Max runs to return (capped at 100).
+            status: Optional filter — "failure", "success", "in_progress", etc.
+        """
+        params: dict[str, Any] = {"per_page": min(limit, 100)}
+        if status:
+            params["status"] = status
+
+        async with self._client() as client:
+            response = await client.get(
+                f"/repos/{owner}/{repo}/actions/runs",
+                params=params,
+            )
+            await self._raise_for_status(response)
+            data = response.json()
+
+        runs = []
+        for r in data.get("workflow_runs", [])[:limit]:
+            runs.append({
+                "id": r["id"],
+                "name": r["name"],
+                "status": r["status"],
+                "conclusion": r.get("conclusion"),
+                "branch": r["head_branch"],
+                "commit_sha": r["head_sha"][:8],
+                "commit_message": r["head_commit"]["message"].splitlines()[0] if r.get("head_commit") else "",
+                "created_at": r["created_at"],
+                "html_url": r["html_url"],
+            })
+        return runs
+
+    async def get_run_jobs(
+        self, owner: str, repo: str, run_id: int
+    ) -> list[dict[str, Any]]:
+        """Return jobs (and their steps) for a workflow run."""
+        async with self._client() as client:
+            response = await client.get(
+                f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs"
+            )
+            await self._raise_for_status(response)
+            data = response.json()
+
+        jobs = []
+        for j in data.get("jobs", []):
+            jobs.append({
+                "id": j["id"],
+                "name": j["name"],
+                "status": j["status"],
+                "conclusion": j.get("conclusion"),
+                "steps": [
+                    {
+                        "name": s["name"],
+                        "conclusion": s.get("conclusion"),
+                        "number": s["number"],
+                    }
+                    for s in j.get("steps", [])
+                    if s.get("conclusion") in ("failure", "timed_out", None)
+                    or s["status"] != "completed"
+                ],
+            })
+        return jobs
+
+    async def get_job_logs(self, owner: str, repo: str, job_id: int) -> str:
+        """Download and return plain-text logs for a specific job.
+
+        GitHub returns a redirect to a pre-signed URL; httpx follows it
+        automatically. Logs may be gzip-compressed.
+        """
+        async with self._client() as client:
+            response = await client.get(
+                f"/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+                follow_redirects=True,
+            )
+            # Logs endpoint returns 302 → raw log content (200)
+            if response.status_code >= 400:
+                await self._raise_for_status(response)
+
+        content = response.content
+        # Some responses are gzip-compressed despite no Content-Encoding header
+        if content[:2] == b"\x1f\x8b":
+            content = gzip.decompress(content)
+
+        return content.decode("utf-8", errors="replace")
+
+    async def get_run_logs(self, owner: str, repo: str, run_id: int) -> str:
+        """Fetch logs for all *failed* jobs in a run and return them combined."""
+        jobs = await self.get_run_jobs(owner, repo, run_id)
+        failed_jobs = [j for j in jobs if j["conclusion"] in ("failure", "timed_out")]
+
+        if not failed_jobs:
+            # Fall back to all jobs if nothing is explicitly failed
+            failed_jobs = jobs
+
+        parts: list[str] = []
+        async with self._client() as client:
+            for job in failed_jobs:
+                parts.append(f"\n=== Job: {job['name']} ({job['conclusion']}) ===\n")
+                try:
+                    logs = await self.get_job_logs(owner, repo, job["id"])
+                    # Keep last 300 lines — most relevant errors are at the bottom
+                    tail = "\n".join(logs.splitlines()[-300:])
+                    parts.append(tail)
+                except GitHubError as exc:
+                    parts.append(f"(Could not fetch logs: {exc})")
+
+        return "\n".join(parts) if parts else "No logs available."
 
     async def post_pr_review(
         self,
