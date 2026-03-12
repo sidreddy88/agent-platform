@@ -105,6 +105,7 @@
   - `search_codebase` — RAG search for code relevant to the incident symptoms (optional). Input: `{query}`
   - `search_similar_incidents` — keyword search against a built-in incident knowledge base to surface past incidents with matching symptoms and their resolutions. Input: `{symptoms}`
   - `generate_diagnosis` — assembles all gathered evidence and produces a structured RCA: root cause + confidence, evidence list, affected services, deployment correlation, risk-rated actions, timeline hypothesis, and prevention steps. Input: `{context}`
+  - `request_action_approval` — submits a HIGH or CRITICAL action to the `ApprovalService` before executing. LOW/MEDIUM are auto-approved. Returns the request ID and status; PENDING requests must be approved via the API before the action can run. Input: `{action, description, risk_level, parameters}`
 - **Usage:**
   ```python
   agent = IncidentResponseAgent()                  # AWS only
@@ -118,4 +119,40 @@
       "time_window": 30,
   }))
   print(result.answer)
+  ```
+
+## ApprovalService
+- **File:** `app/services/approvals.py`
+- **Type:** Service (not an agent — used by agents and API routes)
+- **Description:** Gates high-risk agent actions behind human confirmation. Agents call `request_approval()` before executing sensitive actions; LOW/MEDIUM are auto-approved instantly while HIGH/CRITICAL are queued as PENDING and printed to the console (Slack/email ready). Humans approve or reject via the REST API.
+- **Risk rules:**
+  | Level | Default behaviour | Example actions |
+  |---|---|---|
+  | `LOW` | Auto-approved | Read logs, fetch metrics, view status |
+  | `MEDIUM` | Auto-approved (configurable) | Post comment, send notification |
+  | `HIGH` | Requires human approval | Restart service, rollback deployment |
+  | `CRITICAL` | Requires human approval | Delete data, modify prod DB, destroy cluster |
+- **API endpoints** (`app/api/routes/approvals.py`):
+  - `GET  /approvals/pending` — list all requests awaiting a decision
+  - `GET  /approvals` — list all requests (any status), newest first
+  - `GET  /approvals/{id}` — get a single request by ID
+  - `POST /approvals/{id}/approve` — approve: `{"approver": "alice"}`
+  - `POST /approvals/{id}/reject` — reject: `{"approver": "bob", "reason": "..."}`
+- **Usage:**
+  ```python
+  from app.services.approvals import approval_service
+
+  req = await approval_service.request_approval(
+      agent_name="IncidentResponseAgent",
+      action="restart_ecs_service",
+      parameters={"cluster": "prod", "service": "api"},
+      risk_level="high",
+      description="Restart the ECS api service to recover from task crash-loop.",
+  )
+
+  if req.status in ("approved", "auto_approved"):
+      # safe to execute
+      ...
+  else:
+      print(f"Pending approval — request ID: {req.id}")
   ```
