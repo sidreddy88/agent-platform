@@ -58,3 +58,34 @@
   result = await agent.run('{"owner": "acme", "repo": "backend", "run_id": 12345678}')
   print(result.answer)
   ```
+
+## DeploymentAgent
+- **File:** `app/agents/deployment.py`
+- **Type:** Concrete agent (extends BaseAgent)
+- **Description:** Monitors AWS infrastructure health across ECS, EC2, and CloudWatch. Takes a natural language question or a structured list of resources, gathers health data from AWS, auto-detects anomalies, and produces a concise SRE-style health report with recommended actions.
+- **Dependencies:** `AWSService` (`app/services/aws.py`) — uses local AWS credentials (`~/.aws/credentials`) by default. Optional overrides via `.env`: `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+- **Issues detected:** `TASK_FAILING`, `CAPACITY_ISSUE`, `HIGH_CPU`, `INSTANCE_IMPAIRED`, `INSTANCE_DOWN`, `ERROR_SPIKE`, `DEPLOYMENT_ISSUE`
+- **Tools:**
+  - `get_ecs_status` — task counts (running vs desired), deployment rollout state, stopped task failure reasons, last 5 service events. Input: `{cluster, service}`
+  - `get_ec2_status` — instance state, type, IPs, CPU utilization (last 5 min from CloudWatch), system/instance status checks. Input: `{instance_id}`
+  - `get_service_logs` — fetches recent CloudWatch log streams, counts errors/warnings, returns last 10 error lines. Input: `{log_group, minutes}`
+  - `get_metrics` — generic CloudWatch metric datapoints (average + max) for any namespace. Works with ECS, EC2, ALB, RDS, and custom metrics. Input: `{namespace, metric_name, dimensions, minutes}`
+  - `check_health` — full health sweep across a list of resources; auto-detects issues and produces a structured report (overall status, issues by severity, recommended actions). Input: `{resources: [{type, ...}]}`
+- **Usage:**
+  ```python
+  agent = DeploymentAgent()
+
+  # Natural language question
+  result = await agent.run("Is the prod API service healthy?")
+
+  # Structured resource sweep
+  result = await agent.run(json.dumps({
+      "question": "Check overall health",
+      "resources": [
+          {"type": "ecs",  "cluster": "prod", "service": "api"},
+          {"type": "ec2",  "instance_id": "i-0abc123"},
+          {"type": "logs", "log_group": "/app/prod", "minutes": 30},
+      ]
+  }))
+  print(result.answer)
+  ```
