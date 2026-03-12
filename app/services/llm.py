@@ -1,8 +1,12 @@
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 import anthropic
 
 from app.core.config import settings
+
+if TYPE_CHECKING:
+    from app.services.tracing import TracingContext
 
 MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 4096
@@ -16,6 +20,7 @@ class LLMService:
         self,
         messages: list[dict],
         system: str | None = None,
+        tracing_ctx: "TracingContext | None" = None,
     ) -> str:
         """Single blocking call — returns full response text. Use for agent loops."""
         kwargs: dict = {
@@ -26,8 +31,15 @@ class LLMService:
         if system:
             kwargs["system"] = system
 
-        response = await self._client.messages.create(**kwargs)
-        return response.content[0].text
+        async def _call() -> str:
+            response = await self._client.messages.create(**kwargs)
+            return response.content[0].text
+
+        if tracing_ctx is not None and tracing_ctx.enabled:
+            from app.services.tracing import trace_llm_call
+            return await trace_llm_call(tracing_ctx, MODEL, messages, system, _call())
+
+        return await _call()
 
     async def stream_chat(
         self,

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.services.llm import LLMService
+from app.services.tracing import TracingContext, trace_agent, trace_tool_call
 
 MAX_ITERATIONS = 10
 
@@ -131,6 +132,8 @@ class BaseAgent:
         self._llm = llm or LLMService()
         # name → (async callable, description shown to Claude)
         self._tools: dict[str, tuple[ToolFn, str]] = {}
+        # set by @trace_agent at runtime — no-op sentinel until then
+        self._tracing_ctx: TracingContext = TracingContext(trace=None, enabled=False)
 
     # ------------------------------------------------------------------
     # Tool registration
@@ -158,6 +161,7 @@ class BaseAgent:
     # Core loop
     # ------------------------------------------------------------------
 
+    @trace_agent
     async def run(self, user_input: str) -> AgentResult:
         """Run the ReAct loop and return the final answer + all steps."""
         system = _build_system_prompt(self._tools)
@@ -166,7 +170,7 @@ class BaseAgent:
 
         for i in range(1, MAX_ITERATIONS + 1):
             step = Step(iteration=i)
-            raw = await self._llm.complete(messages=messages, system=system)
+            raw = await self._llm.complete(messages=messages, system=system, tracing_ctx=self._tracing_ctx)
 
             # Append assistant turn so Claude sees its own prior reasoning
             messages.append({"role": "assistant", "content": raw})
@@ -219,7 +223,9 @@ class BaseAgent:
 
         try:
             if isinstance(parsed_input, dict):
-                return await fn(**parsed_input)
-            return await fn(parsed_input)
+                coro = fn(**parsed_input)
+            else:
+                coro = fn(parsed_input)
+            return await trace_tool_call(self._tracing_ctx, name, parsed_input, coro)
         except Exception as e:
             return f"Error running tool '{name}': {e}"
