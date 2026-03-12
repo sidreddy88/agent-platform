@@ -26,6 +26,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from app.agents.base import AgentResult, BaseAgent
+from app.services.approvals import ApprovalService, approval_service as _default_approval_svc
 from app.services.aws import AWSError, AWSService
 from app.services.llm import LLMService
 from app.services.rag import RAGService
@@ -433,10 +434,12 @@ class IncidentResponseAgent(BaseAgent):
         self,
         aws: AWSService | None = None,
         rag: RAGService | None = None,
+        approvals: ApprovalService | None = None,
     ) -> None:
         super().__init__()
         self._aws = aws or AWSService()
         self._rag = rag
+        self._approvals = approvals or _default_approval_svc
         self._register_tools()
 
     def _register_tools(self) -> None:
@@ -487,6 +490,37 @@ class IncidentResponseAgent(BaseAgent):
             if context:
                 all_evidence = f"{all_evidence}\n\n---\n\nAdditional context:\n{context}"
             return await generate_diagnosis(all_evidence, llm)
+
+        approvals = self._approvals
+
+        async def _request_action_approval(
+            action: str,
+            description: str,
+            risk_level: str,
+            parameters: dict | None = None,
+        ) -> str:
+            """Submit a high-risk action for human approval."""
+            req = await approvals.request_approval(
+                agent_name="IncidentResponseAgent",
+                action=action,
+                parameters=parameters or {},
+                risk_level=risk_level,
+                description=description,
+            )
+            status = req.status.value
+            if status in ("approved", "auto_approved"):
+                return (
+                    f"Action '{action}' was {status} (request ID: {req.id}). "
+                    "You may proceed with executing it."
+                )
+            return (
+                f"Action '{action}' requires human approval before it can be executed.\n"
+                f"Approval request ID: {req.id}\n"
+                f"Risk level: {req.risk_level.upper()}\n"
+                f"What will happen: {req.description}\n"
+                f"Status: PENDING — awaiting human decision\n"
+                f"Approvers can visit: POST /approvals/{req.id}/approve"
+            )
 
         self.register_tool(
             "gather_context",
@@ -547,6 +581,19 @@ class IncidentResponseAgent(BaseAgent):
                 "Input: {context: string (optional extra context to include)}"
             ),
         )
+        self.register_tool(
+            "request_action_approval",
+            _request_action_approval,
+            (
+                "Submit a HIGH or CRITICAL risk action for human approval before executing it. "
+                "LOW and MEDIUM actions are auto-approved immediately. "
+                "Returns the approval request ID and status. "
+                "If PENDING, include the request ID in your final answer so the on-call "
+                "engineer knows what to approve. "
+                "Input: {action: string, description: string, risk_level: string, "
+                "parameters: dict (optional)}"
+            ),
+        )
 
     async def run(self, user_input: str) -> AgentResult:
         """
@@ -588,16 +635,20 @@ class IncidentResponseAgent(BaseAgent):
                 "3. search_logs for the specific error patterns you find\n"
                 "4. search_similar_incidents with symptoms from what you've found\n"
                 "5. search_codebase if you need to understand a specific code path\n"
-                "6. generate_diagnosis with all gathered evidence as your final answer\n\n"
-                "Remember: rate all recommended actions by risk level. "
-                "HIGH and CRITICAL actions must be explicitly flagged for human approval."
+                "6. generate_diagnosis with all gathered evidence\n"
+                "7. For any HIGH or CRITICAL actions in the diagnosis, call "
+                "request_action_approval for each one before including it in your answer\n\n"
+                "IMPORTANT: Never say you will execute a HIGH or CRITICAL action directly. "
+                "Always call request_action_approval first. Include the returned request ID "
+                "in your final answer so the engineer knows what to approve."
             )
         except (json.JSONDecodeError, KeyError):
             prompt = (
                 f"INCIDENT ALERT: {user_input}\n\n"
                 "Diagnose this incident: gather context, check deployments, search logs, "
-                "find similar past incidents, then generate a structured diagnosis with "
-                "risk-rated recommended actions as your final answer."
+                "find similar past incidents, then generate a structured diagnosis. "
+                "For any HIGH or CRITICAL actions, call request_action_approval before "
+                "including them in your final answer. Include the request ID in the answer."
             )
 
         return await super().run(prompt)
