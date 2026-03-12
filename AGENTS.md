@@ -89,3 +89,33 @@
   }))
   print(result.answer)
   ```
+
+## IncidentResponseAgent
+- **File:** `app/agents/incident.py`
+- **Type:** Concrete agent (extends BaseAgent)
+- **Description:** Auto-diagnoses production incidents by gathering AWS context, correlating with recent deployments, searching logs for error patterns, and surfacing similar past incidents. Produces a structured root cause analysis with risk-rated recommended actions. High and critical risk actions are explicitly flagged for human approval before execution.
+- **Dependencies:**
+  - `AWSService` (`app/services/aws.py`) — requires AWS credentials
+  - `RAGService` (`app/services/rag.py`) — optional; enables codebase search
+- **Risk levels for actions:** `LOW` (run now) → `MEDIUM` (run with awareness) → `HIGH` (human review required) → `CRITICAL` (explicit sign-off required)
+- **Tools:**
+  - `gather_context` — pulls ECS health, CPU/memory metrics, and log summary for the affected service around the incident time window. Always called first. Input: `{service, time_window, cluster, log_group}`
+  - `search_logs` — regex search across multiple CloudWatch log groups to find specific error patterns, stack traces, or exception types. Input: `{query, log_groups, minutes}`
+  - `check_recent_deployments` — checks ECS deployments across services in the last N hours and flags any that coincide with the incident window. Input: `{services, hours, cluster}`
+  - `search_codebase` — RAG search for code relevant to the incident symptoms (optional). Input: `{query}`
+  - `search_similar_incidents` — keyword search against a built-in incident knowledge base to surface past incidents with matching symptoms and their resolutions. Input: `{symptoms}`
+  - `generate_diagnosis` — assembles all gathered evidence and produces a structured RCA: root cause + confidence, evidence list, affected services, deployment correlation, risk-rated actions, timeline hypothesis, and prevention steps. Input: `{context}`
+- **Usage:**
+  ```python
+  agent = IncidentResponseAgent()                  # AWS only
+  agent = IncidentResponseAgent(rag=RAGService())  # AWS + codebase search
+
+  result = await agent.run(json.dumps({
+      "alert": "ECS api service has 0/3 tasks running",
+      "service": "api",
+      "cluster": "prod",
+      "log_group": "/app/prod/api",
+      "time_window": 30,
+  }))
+  print(result.answer)
+  ```
