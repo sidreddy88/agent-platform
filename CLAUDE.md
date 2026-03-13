@@ -70,6 +70,26 @@ ChromaDB-backed vector store with OpenAI `text-embedding-3-small`. Call `rag.ind
 | IncidentResponseAgent | `app/agents/incident.py` | Auto-diagnoses production incidents |
 | PerformanceAgent | `app/agents/performance.py` | Detects metric regressions via CloudWatch |
 
+## User Preferences
+
+> Agents read this section before every run. Edit it to change how all agents behave.
+
+```
+output_format: concise          # concise | detailed | bullet_points
+tone: professional              # professional | casual | technical
+always_explain_reasoning: true  # include a brief rationale with every recommendation
+flag_assumptions: true          # explicitly call out any assumptions made
+risk_threshold: medium          # low | medium | high — minimum risk level to flag for approval
+max_alternatives: 3             # maximum number of alternatives to suggest when uncertain
+currency: USD                   # currency for cost estimates
+timezone: UTC                   # timezone for timestamps in outputs
+```
+
+**Notes:**
+- `output_format: concise` — keep answers short; use bullet points for lists, skip preamble
+- `flag_assumptions: true` — always state "Assuming X" when the input is ambiguous
+- `risk_threshold: medium` — actions rated MEDIUM or above are flagged before execution
+
 ## MCP Server
 
 Exposes agents as tools for Claude Desktop:
