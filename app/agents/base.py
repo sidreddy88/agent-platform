@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.services.llm import LLMService
+from app.services.preferences import build_preferences_prompt
 from app.services.tracing import TracingContext, trace_agent, trace_tool_call
 
 MAX_ITERATIONS = 10
@@ -74,16 +75,18 @@ Rules:
 
 
 def _build_system_prompt(tools: dict[str, tuple[ToolFn, str]]) -> str:
-    """Render the system prompt with the registered tools."""
+    """Render the system prompt with the registered tools and user preferences."""
+    preferences = build_preferences_prompt()
+
     if not tools:
-        # No tools — skip ReAct format, act as plain assistant
-        return "You are a helpful assistant."
+        return f"{preferences}\n\nYou are a helpful assistant."
 
     descriptions = "\n".join(
         f"- {name}: {description}" for name, (_, description) in tools.items()
     )
     names = ", ".join(tools.keys())
-    return REACT_SYSTEM.format(tool_descriptions=descriptions, tool_names=names)
+    react_prompt = REACT_SYSTEM.format(tool_descriptions=descriptions, tool_names=names)
+    return f"{preferences}\n\n{react_prompt}"
 
 
 # ---------------------------------------------------------------------------
