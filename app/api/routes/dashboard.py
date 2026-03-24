@@ -35,7 +35,7 @@ async def get_dashboard() -> Dict[str, Any]:
         results = []
         for svc in service_names:
             try:
-                status = await aws.get_ecs_status(cluster, svc)
+                status = aws.get_ecs_status(cluster, svc)
                 results.append({
                     "service": svc,
                     "cluster": cluster,
