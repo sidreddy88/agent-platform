@@ -27,6 +27,27 @@ class Settings(BaseSettings):
     app_name: str = "Agent Platform"
     debug: bool = False
 
+    # Digital Ocean
+    do_api_token: str = ""
+    # WordPress sites — format: "https://site1.com|droplet_id|droplet_name, ..."
+    wordpress_sites: str = ""
+
+    # Cloudflare
+    cloudflare_api_token: str = ""
+    # Comma-separated zone IDs
+    cloudflare_zone_ids: str = ""
+
+    # ECS monitoring
+    ecs_cluster: str = ""
+    # Comma-separated ECS service names to monitor
+    ecs_services: str = ""
+
+    # GitHub webhook secret (optional — leave blank to skip signature verification)
+    github_webhook_secret: str = ""
+
+    # Detection poll interval in seconds
+    detection_poll_interval_seconds: int = 60
+
     class Config:
         env_file = ".env"
 

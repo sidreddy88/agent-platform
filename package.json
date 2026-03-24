@@ -1,0 +1,10 @@
+{
+  "name": "agent-platform",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --names \"api,ui\" --prefix-colors \"cyan,magenta\" \"uvicorn app.main:app --reload\" \"npm run dev --prefix frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

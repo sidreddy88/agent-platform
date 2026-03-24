@@ -7,3 +7,5 @@ __pycache__/
 .chromadb_test/
 *.bin
 *.onnx
+node_modules/
+frontend/dist/
