@@ -78,7 +78,7 @@ class DetectionService:
         service_names = [s.strip() for s in raw_services.split(",") if s.strip()]
         for svc in service_names:
             try:
-                status = await self._aws.get_ecs_status(cluster, svc)
+                status = self._aws.get_ecs_status(cluster, svc)
 
                 if status.running_count < status.desired_count:
                     severity = Severity.P0 if status.running_count == 0 else Severity.P1
