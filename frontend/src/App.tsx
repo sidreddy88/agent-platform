@@ -4,6 +4,7 @@ import { useDashboardWS } from "./hooks/useWebSocket";
 import { ECSPillar } from "./components/ECSPillar";
 import { ECSTaskPillar } from "./components/ECSTaskPillar";
 import { EC2Pillar } from "./components/EC2Pillar";
+import { ALBPillar } from "./components/ALBPillar";
 import { DOPillar } from "./components/DOPillar";
 import { CloudfarePillar } from "./components/CloudfarePillar";
 import { IncidentFeed } from "./components/IncidentFeed";
@@ -66,6 +67,7 @@ export default function App() {
               <ECSPillar services={data.ecs} />
               <ECSTaskPillar clusters={data.ecs_task_clusters ?? []} />
               <EC2Pillar data={data.ec2} />
+              <ALBPillar albs={data.alb ?? []} />
               <DOPillar data={data.digital_ocean} />
               <CloudfarePillar data={data.cloudflare} />
 

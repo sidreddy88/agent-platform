@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # Override region for EC2 if different from ECS region
     ec2_region: str = ""
 
+    # ALB monitoring — comma-separated ALB names
+    alb_names: str = ""
+
     # GitHub webhook secret (optional — leave blank to skip signature verification)
     github_webhook_secret: str = ""
 

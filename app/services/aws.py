@@ -80,6 +80,19 @@ class LogSummary:
 # Error
 # ---------------------------------------------------------------------------
 
+@dataclass
+class ALBStatus:
+    name: str
+    dns_name: str
+    state: str                    # active / provisioning / active_impaired / failed
+    healthy_targets: int
+    unhealthy_targets: int
+    total_targets: int
+    request_count: int | None     # last 5 min
+    http_5xx: int | None          # last 5 min
+    healthy: bool
+
+
 class AWSError(Exception):
     def __init__(self, service: str, message: str) -> None:
         super().__init__(f"AWS {service} error: {message}")
@@ -294,6 +307,77 @@ class AWSService:
             private_ip=inst.get("PrivateIpAddress"),
             cpu_utilization=cpu,
             status_checks=status_checks,
+        )
+
+    # ------------------------------------------------------------------
+    # ALB
+    # ------------------------------------------------------------------
+
+    def get_alb_status(self, alb_name: str) -> ALBStatus:
+        """Return health and basic traffic metrics for an Application Load Balancer."""
+        elb = self._client("elbv2")
+        cw = self._client("cloudwatch")
+        from datetime import timedelta
+
+        try:
+            lb_resp = elb.describe_load_balancers(Names=[alb_name])
+            lbs = lb_resp.get("LoadBalancers", [])
+            if not lbs:
+                raise AWSError("ALB", f"Load balancer '{alb_name}' not found")
+            lb = lbs[0]
+            lb_arn = lb["LoadBalancerArn"]
+            dns_name = lb["DNSName"]
+            state = lb["State"]["Code"]
+
+            # Target group health
+            tg_resp = elb.describe_target_groups(LoadBalancerArn=lb_arn)
+            healthy = unhealthy = total = 0
+            for tg in tg_resp.get("TargetGroups", []):
+                health_resp = elb.describe_target_health(TargetGroupArn=tg["TargetGroupArn"])
+                for t in health_resp.get("TargetHealthDescriptions", []):
+                    total += 1
+                    if t["TargetHealth"]["State"] == "healthy":
+                        healthy += 1
+                    else:
+                        unhealthy += 1
+
+        except (BotoCoreError, ClientError) as exc:
+            raise AWSError("ALB", str(exc)) from exc
+
+        # CloudWatch metrics — last 5 min
+        now = datetime.now(timezone.utc)
+        lb_dim = lb_arn.split("loadbalancer/")[-1]  # dimension value format
+
+        def _cw_sum(metric: str) -> int | None:
+            try:
+                resp = cw.get_metric_statistics(
+                    Namespace="AWS/ApplicationELB",
+                    MetricName=metric,
+                    Dimensions=[{"Name": "LoadBalancer", "Value": lb_dim}],
+                    StartTime=now - timedelta(minutes=5),
+                    EndTime=now,
+                    Period=300,
+                    Statistics=["Sum"],
+                )
+                dps = resp.get("Datapoints", [])
+                return int(dps[-1]["Sum"]) if dps else 0
+            except (BotoCoreError, ClientError):
+                return None
+
+        request_count = _cw_sum("RequestCount")
+        http_5xx = _cw_sum("HTTPCode_Target_5XX_Count")
+
+        is_healthy = state == "active" and unhealthy == 0
+        return ALBStatus(
+            name=alb_name,
+            dns_name=dns_name,
+            state=state,
+            healthy_targets=healthy,
+            unhealthy_targets=unhealthy,
+            total_targets=total,
+            request_count=request_count,
+            http_5xx=http_5xx,
+            healthy=is_healthy,
         )
 
     # ------------------------------------------------------------------
