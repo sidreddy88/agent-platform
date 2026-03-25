@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # Comma-separated ECS service names to monitor
     ecs_services: str = ""
 
+    # Task-based ECS clusters (no services — tasks launched on demand)
+    ecs_task_clusters: str = ""
+
+    # EC2 monitoring
+    # Comma-separated EC2 instance IDs to monitor
+    ec2_instance_ids: str = ""
+    # Override region for EC2 if different from ECS region
+    ec2_region: str = ""
+
     # GitHub webhook secret (optional — leave blank to skip signature verification)
     github_webhook_secret: str = ""
 

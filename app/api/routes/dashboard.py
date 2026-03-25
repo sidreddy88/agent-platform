@@ -26,6 +26,8 @@ async def get_dashboard() -> Dict[str, Any]:
       - Incident + queue stats
     """
     aws = AWSService()
+    ec2_region = getattr(settings, "ec2_region", "") or None
+    aws_ec2 = AWSService(region=ec2_region) if ec2_region else aws
     cluster: str = getattr(settings, "ecs_cluster", "")
     raw_services: str = getattr(settings, "ecs_services", "")
     service_names = [s.strip() for s in raw_services.split(",") if s.strip()] if raw_services else []
@@ -49,6 +51,50 @@ async def get_dashboard() -> Dict[str, Any]:
             except Exception as exc:
                 results.append({"service": svc, "cluster": cluster, "error": str(exc), "healthy": False})
         return results
+
+    # --- ECS task clusters ---
+    async def _ecs_task_pillar():
+        raw: str = getattr(settings, "ecs_task_clusters", "")
+        clusters = [c.strip() for c in raw.split(",") if c.strip()] if raw else []
+        results = []
+        for cluster in clusters:
+            try:
+                data = aws.get_ecs_cluster_tasks(cluster)
+                results.append({
+                    "cluster": cluster,
+                    "running_tasks": data["running_tasks"],
+                    "recent_failures": len(data["recent_failures"]),
+                    "healthy": len(data["recent_failures"]) == 0,
+                })
+            except Exception as exc:
+                results.append({"cluster": cluster, "error": str(exc), "healthy": False})
+        return results
+
+    # --- EC2 ---
+    async def _ec2_pillar():
+        raw_ids: str = getattr(settings, "ec2_instance_ids", "")
+        instance_ids = [i.strip() for i in raw_ids.split(",") if i.strip()] if raw_ids else []
+        results = []
+        for instance_id in instance_ids:
+            try:
+                status = aws_ec2.get_ec2_status(instance_id)
+                results.append({
+                    "instance_id": status.instance_id,
+                    "state": status.state,
+                    "instance_type": status.instance_type,
+                    "public_ip": status.public_ip,
+                    "private_ip": status.private_ip,
+                    "cpu_utilization": status.cpu_utilization,
+                    "status_checks": status.status_checks,
+                    "healthy": status.state == "running" and "impaired" not in status.status_checks,
+                })
+            except Exception as exc:
+                results.append({"instance_id": instance_id, "error": str(exc), "healthy": False})
+        return {
+            "instances": results,
+            "total": len(results),
+            "healthy": sum(1 for i in results if i.get("healthy")),
+        }
 
     # --- Digital Ocean ---
     async def _do_pillar():
@@ -99,10 +145,14 @@ async def get_dashboard() -> Dict[str, Any]:
         except Exception as exc:
             return {"error": str(exc), "zones": [], "healthy": False}
 
-    ecs, do_data, cf_data = await asyncio.gather(_ecs_pillar(), _do_pillar(), _cf_pillar())
+    ecs, ecs_tasks, ec2, do_data, cf_data = await asyncio.gather(
+        _ecs_pillar(), _ecs_task_pillar(), _ec2_pillar(), _do_pillar(), _cf_pillar()
+    )
 
     return {
         "ecs": ecs,
+        "ecs_task_clusters": ecs_tasks,
+        "ec2": ec2,
         "digital_ocean": do_data,
         "cloudflare": cf_data,
         "queue": event_queue.stats,

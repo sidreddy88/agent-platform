@@ -4,8 +4,9 @@ standardized ErrorEvents to the queue.
 
 Pillars:
   1. CloudWatch / ECS  — task crashes, CPU spikes
-  2. Digital Ocean     — droplet status, WordPress site HTTP checks
-  3. Cloudflare        — error rate spikes per zone
+  2. EC2               — instance state, status checks, CPU spikes
+  3. Digital Ocean     — droplet status, WordPress site HTTP checks
+  4. Cloudflare        — error rate spikes per zone
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Detection thresholds
 ECS_CPU_THRESHOLD_PCT = 85.0
 ECS_MEMORY_THRESHOLD_PCT = 90.0
+EC2_CPU_THRESHOLD_PCT = 85.0
 SITE_SLOW_RESPONSE_MS = 3_000.0
 CF_ERROR_RATE_WARN = 0.05   # 5%
 CF_ERROR_RATE_CRIT = 0.15   # 15%
@@ -61,6 +63,8 @@ class DetectionService:
 
     def __init__(self):
         self._aws = AWSService()
+        ec2_region = getattr(settings, "ec2_region", "") or None
+        self._aws_ec2 = AWSService(region=ec2_region) if ec2_region else self._aws
         self._sites = _parse_sites()
         self._poll_interval: int = int(getattr(settings, "detection_poll_interval_seconds", 60))
         self._running = False
@@ -105,7 +109,103 @@ class DetectionService:
         return events
 
     # ------------------------------------------------------------------ #
-    # Pillar 2 — Digital Ocean
+    # Pillar 1b — ECS task-based clusters (no services)
+    # ------------------------------------------------------------------ #
+    async def _detect_ecs_task_clusters(self) -> List[ErrorEvent]:
+        events: List[ErrorEvent] = []
+        raw: str = getattr(settings, "ecs_task_clusters", "")
+        if not raw:
+            return events
+
+        clusters = [c.strip() for c in raw.split(",") if c.strip()]
+        for cluster in clusters:
+            try:
+                result = self._aws.get_ecs_cluster_tasks(cluster)
+                for failure in result["recent_failures"]:
+                    events.append(ErrorEvent(
+                        source=EventSource.CLOUDWATCH,
+                        severity=Severity.P2,
+                        title=f"ECS task failed: {cluster}",
+                        description=failure["stopped_reason"] or failure["stop_code"] or "Task stopped unexpectedly",
+                        service=cluster,
+                        resource_id=f"{cluster}/{failure['task_id']}",
+                        metadata={
+                            "cluster": cluster,
+                            "task_id": failure["task_id"],
+                            "stop_code": failure["stop_code"],
+                            "stopped_at": failure["stopped_at"],
+                        },
+                    ))
+            except Exception as exc:
+                logger.warning("ECS task cluster detection failed for %s: %s", cluster, exc)
+
+        return events
+
+    # ------------------------------------------------------------------ #
+    # Pillar 2 — EC2
+    # ------------------------------------------------------------------ #
+    async def _detect_ec2(self) -> List[ErrorEvent]:
+        events: List[ErrorEvent] = []
+        raw: str = getattr(settings, "ec2_instance_ids", "")
+        if not raw:
+            return events
+
+        instance_ids = [i.strip() for i in raw.split(",") if i.strip()]
+        for instance_id in instance_ids:
+            try:
+                status = self._aws_ec2.get_ec2_status(instance_id)
+
+                if status.state != "running":
+                    events.append(ErrorEvent(
+                        source=EventSource.CLOUDWATCH,
+                        severity=Severity.P0,
+                        title=f"EC2 instance not running: {instance_id}",
+                        description=f"Instance {instance_id} ({status.instance_type}) is '{status.state}'",
+                        service=instance_id,
+                        resource_id=instance_id,
+                        metadata={
+                            "instance_id": instance_id,
+                            "instance_type": status.instance_type,
+                            "state": status.state,
+                            "status_checks": status.status_checks,
+                        },
+                    ))
+                elif "impaired" in status.status_checks:
+                    events.append(ErrorEvent(
+                        source=EventSource.CLOUDWATCH,
+                        severity=Severity.P1,
+                        title=f"EC2 status check failed: {instance_id}",
+                        description=f"Status checks: {status.status_checks}",
+                        service=instance_id,
+                        resource_id=instance_id,
+                        metadata={
+                            "instance_id": instance_id,
+                            "instance_type": status.instance_type,
+                            "status_checks": status.status_checks,
+                        },
+                    ))
+                elif status.cpu_utilization is not None and status.cpu_utilization > EC2_CPU_THRESHOLD_PCT:
+                    events.append(ErrorEvent(
+                        source=EventSource.CLOUDWATCH,
+                        severity=Severity.P2,
+                        title=f"EC2 high CPU: {instance_id}",
+                        description=f"CPU at {status.cpu_utilization}% (threshold {EC2_CPU_THRESHOLD_PCT}%)",
+                        service=instance_id,
+                        resource_id=instance_id,
+                        metadata={
+                            "instance_id": instance_id,
+                            "instance_type": status.instance_type,
+                            "cpu_utilization": status.cpu_utilization,
+                        },
+                    ))
+
+            except Exception as exc:
+                logger.warning("EC2 detection failed for %s: %s", instance_id, exc)
+
+        return events
+
+    # ------------------------------------------------------------------ #
+    # Pillar 3 — Digital Ocean
     # ------------------------------------------------------------------ #
     async def _detect_digitalocean(self) -> List[ErrorEvent]:
         events: List[ErrorEvent] = []
@@ -209,6 +309,8 @@ class DetectionService:
         """Run all pillars concurrently, enqueue results."""
         results = await asyncio.gather(
             self._detect_ecs(),
+            self._detect_ecs_task_clusters(),
+            self._detect_ec2(),
             self._detect_digitalocean(),
             self._detect_cloudflare(),
             return_exceptions=True,
