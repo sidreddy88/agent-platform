@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import boto3
+from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core.config import settings
@@ -91,6 +92,7 @@ class ALBStatus:
     request_count: int | None     # last 5 min
     http_5xx: int | None          # last 5 min
     healthy: bool
+
 
 
 class AWSError(Exception):
