@@ -100,21 +100,28 @@ async def get_dashboard() -> Dict[str, Any]:
     async def _do_pillar():
         try:
             droplets = await do_service.get_droplets()
+            metrics_list = await asyncio.gather(
+                *[do_service.get_droplet_metrics(d.id) for d in droplets],
+                return_exceptions=True,
+            )
+            result = []
+            for d, m in zip(droplets, metrics_list):
+                metrics = m if isinstance(m, dict) else {}
+                result.append({
+                    "id": d.id,
+                    "name": d.name,
+                    "status": d.status,
+                    "healthy": d.status == "active",
+                    "region": d.region,
+                    "ip": d.ip_address,
+                    "size": d.size,
+                    "load_1": metrics.get("load_1"),
+                    "memory_percent": metrics.get("memory_percent"),
+                })
             return {
-                "droplets": [
-                    {
-                        "id": d.id,
-                        "name": d.name,
-                        "status": d.status,
-                        "healthy": d.status == "active",
-                        "region": d.region,
-                        "ip": d.ip_address,
-                        "size": d.size,
-                    }
-                    for d in droplets
-                ],
-                "total": len(droplets),
-                "healthy": sum(1 for d in droplets if d.status == "active"),
+                "droplets": result,
+                "total": len(result),
+                "healthy": sum(1 for d in result if d["healthy"]),
             }
         except Exception as exc:
             return {"error": str(exc), "droplets": [], "total": 0, "healthy": 0}

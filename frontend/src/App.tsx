@@ -68,7 +68,9 @@ export default function App() {
               <ECSTaskPillar clusters={data.ecs_task_clusters ?? []} />
               <EC2Pillar data={data.ec2} />
               <ALBPillar albs={data.alb ?? []} />
-              <DOPillar data={data.digital_ocean} />
+              <div style={{ gridColumn: "span 2" }}>
+                <DOPillar data={data.digital_ocean} />
+              </div>
               <CloudfarePillar data={data.cloudflare} />
 
               {/* PR Agent pillar */}

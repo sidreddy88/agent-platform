@@ -85,6 +85,47 @@ class DigitalOceanService:
             )
         return droplets
 
+    async def get_droplet_metrics(self, droplet_id: int) -> dict:
+        """Fetch load and memory metrics for a droplet via DO Monitoring API."""
+        if not self._configured:
+            return {}
+        import time
+        end = int(time.time())
+        start = end - 3600  # last hour
+
+        async def _fetch(metric_type: str) -> float | None:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"{self.BASE_URL}/monitoring/metrics/droplet/{metric_type}",
+                        headers=self._headers,
+                        params={"host_id": str(droplet_id), "start": str(start), "end": str(end)},
+                        timeout=10,
+                    )
+                    if resp.status_code != 200:
+                        return None
+                    results = resp.json().get("data", {}).get("result", [])
+                    if results and results[0].get("values"):
+                        return float(results[0]["values"][-1][1])
+                    return None
+            except Exception:
+                return None
+
+        load_1, mem_available, mem_total = await asyncio.gather(
+            _fetch("load_1"),
+            _fetch("memory_available"),
+            _fetch("memory_total"),
+        )
+
+        memory_percent = None
+        if mem_available is not None and mem_total and mem_total > 0:
+            memory_percent = round((1 - mem_available / mem_total) * 100, 1)
+
+        return {
+            "load_1": round(load_1, 2) if load_1 is not None else None,
+            "memory_percent": memory_percent,
+        }
+
     async def check_site(
         self, url: str, droplet_id: int = 0, droplet_name: str = "unknown"
     ) -> SiteHealth:
