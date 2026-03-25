@@ -18,6 +18,8 @@ export interface Droplet {
   region: string;
   ip: string | null;
   size: string;
+  load_1: number | null;
+  memory_percent: number | null;
 }
 
 export interface DOData {

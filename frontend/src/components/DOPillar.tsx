@@ -26,14 +26,26 @@ export function DOPillar({ data }: Props) {
           {data.healthy}/{data.total} droplets
         </span>
       </div>
-      <div style={grid}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {data.droplets.length === 0 && <p style={empty}>No DO token configured.</p>}
         {data.droplets.map((d) => (
-          <div key={d.id} style={chip(d.healthy)}>
-            <HealthDot healthy={d.healthy} />
-            <div style={{ minWidth: 0 }}>
-              <div style={name}>{d.name}</div>
-              <div style={meta}>{d.region} · {d.size}</div>
+          <div key={d.id} style={row(d.healthy)}>
+            <div style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
+              <HealthDot healthy={d.healthy} />
+              <div style={{ minWidth: 0 }}>
+                <div style={name}>{d.name}</div>
+                <div style={meta}>{d.region} · {d.size}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 12, flexShrink: 0 }}>
+              <div style={{ textAlign: "center" }}>
+                <div style={metricVal}>{d.load_1 !== null ? d.load_1 : "—"}</div>
+                <div style={metricLabel}>LOAD</div>
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <div style={metricVal}>{d.memory_percent !== null ? `${d.memory_percent}%` : "—"}</div>
+                <div style={metricLabel}>MEM</div>
+              </div>
             </div>
           </div>
         ))}
@@ -70,21 +82,14 @@ const counter = (allGood: boolean): React.CSSProperties => ({
   color: allGood ? "#22c55e" : "#f97316",
 });
 
-const grid: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-  gap: 8,
-};
-
-const chip = (healthy: boolean): React.CSSProperties => ({
+const row = (healthy: boolean): React.CSSProperties => ({
   display: "flex",
   alignItems: "center",
-  gap: 6,
+  justifyContent: "space-between",
   background: healthy ? "#1a2235" : "#2a1a1a",
   border: `1px solid ${healthy ? "#2d3149" : "#7f1d1d"}`,
   borderRadius: 8,
-  padding: "8px 10px",
-  overflow: "hidden",
+  padding: "8px 12px",
 });
 
 const name: React.CSSProperties = {
@@ -97,6 +102,18 @@ const name: React.CSSProperties = {
 };
 
 const meta: React.CSSProperties = {
+  fontSize: 10,
+  color: "#64748b",
+  marginTop: 1,
+};
+
+const metricVal: React.CSSProperties = {
+  fontSize: 13,
+  fontWeight: 700,
+  color: "#e2e8f0",
+};
+
+const metricLabel: React.CSSProperties = {
   fontSize: 10,
   color: "#64748b",
   marginTop: 1,
