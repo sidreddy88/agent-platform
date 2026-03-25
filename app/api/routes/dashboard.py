@@ -145,8 +145,31 @@ async def get_dashboard() -> Dict[str, Any]:
         except Exception as exc:
             return {"error": str(exc), "zones": [], "healthy": False}
 
-    ecs, ecs_tasks, ec2, do_data, cf_data = await asyncio.gather(
-        _ecs_pillar(), _ecs_task_pillar(), _ec2_pillar(), _do_pillar(), _cf_pillar()
+    # --- ALB ---
+    async def _alb_pillar():
+        raw: str = getattr(settings, "alb_names", "")
+        names = [n.strip() for n in raw.split(",") if n.strip()] if raw else []
+        results = []
+        for name in names:
+            try:
+                s = aws.get_alb_status(name)
+                results.append({
+                    "name": s.name,
+                    "dns_name": s.dns_name,
+                    "state": s.state,
+                    "healthy_targets": s.healthy_targets,
+                    "unhealthy_targets": s.unhealthy_targets,
+                    "total_targets": s.total_targets,
+                    "request_count": s.request_count,
+                    "http_5xx": s.http_5xx,
+                    "healthy": s.healthy,
+                })
+            except Exception as exc:
+                results.append({"name": name, "error": str(exc), "healthy": False})
+        return results
+
+    ecs, ecs_tasks, ec2, do_data, cf_data, alb = await asyncio.gather(
+        _ecs_pillar(), _ecs_task_pillar(), _ec2_pillar(), _do_pillar(), _cf_pillar(), _alb_pillar()
     )
 
     return {
@@ -155,6 +178,7 @@ async def get_dashboard() -> Dict[str, Any]:
         "ec2": ec2,
         "digital_ocean": do_data,
         "cloudflare": cf_data,
+        "alb": alb,
         "queue": event_queue.stats,
         "incidents": incident_store.metrics(),
     }

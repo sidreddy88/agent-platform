@@ -89,12 +89,26 @@ export interface ECSTaskCluster {
   error?: string;
 }
 
+export interface ALBData {
+  name: string;
+  dns_name: string;
+  state: string;
+  healthy_targets: number;
+  unhealthy_targets: number;
+  total_targets: number;
+  request_count: number | null;
+  http_5xx: number | null;
+  healthy: boolean;
+  error?: string;
+}
+
 export interface DashboardData {
   ecs: ECSService[];
   ecs_task_clusters: ECSTaskCluster[];
   ec2: EC2Data;
   digital_ocean: DOData;
   cloudflare: CFData;
+  alb: ALBData[];
   queue: QueueStats;
   incidents: IncidentMetrics;
 }
