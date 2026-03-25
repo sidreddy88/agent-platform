@@ -63,8 +63,36 @@ export interface IncidentMetrics {
   false_positive_rate: number;
 }
 
+export interface EC2Instance {
+  instance_id: string;
+  state: string;
+  instance_type: string;
+  public_ip: string | null;
+  private_ip: string | null;
+  cpu_utilization: number | null;
+  status_checks: string;
+  healthy: boolean;
+  error?: string;
+}
+
+export interface EC2Data {
+  instances: EC2Instance[];
+  total: number;
+  healthy: number;
+}
+
+export interface ECSTaskCluster {
+  cluster: string;
+  running_tasks: number;
+  recent_failures: number;
+  healthy: boolean;
+  error?: string;
+}
+
 export interface DashboardData {
   ecs: ECSService[];
+  ecs_task_clusters: ECSTaskCluster[];
+  ec2: EC2Data;
   digital_ocean: DOData;
   cloudflare: CFData;
   queue: QueueStats;

@@ -64,6 +64,7 @@ class CloudWatchMetric:
     maximum: float | None
 
 
+
 @dataclass
 class LogSummary:
     log_group: str
@@ -158,6 +159,38 @@ class AWSService:
             deployments=dep_summaries,
             events=events,
         )
+
+    def get_ecs_cluster_tasks(self, cluster: str) -> dict:
+        """Return running and recently stopped task counts for a task-based cluster (no services)."""
+        ecs = self._client("ecs")
+        try:
+            running_arns = ecs.list_tasks(cluster=cluster, desiredStatus="RUNNING").get("taskArns", [])
+            stopped_arns = ecs.list_tasks(cluster=cluster, desiredStatus="STOPPED").get("taskArns", [])
+
+            failed = []
+            if stopped_arns:
+                tasks = ecs.describe_tasks(cluster=cluster, tasks=stopped_arns[:10])["tasks"]
+                for t in tasks:
+                    stop_code = t.get("stopCode", "")
+                    stopped_reason = t.get("stoppedReason", "")
+                    # Flag tasks that failed (not just completed normally)
+                    if stop_code not in ("EssentialContainerExited",) or any(
+                        c.get("exitCode") not in (0, None) for c in t.get("containers", [])
+                    ):
+                        failed.append({
+                            "task_id": t["taskArn"].split("/")[-1],
+                            "stop_code": stop_code,
+                            "stopped_reason": stopped_reason,
+                            "stopped_at": t["stoppedAt"].isoformat() if isinstance(t.get("stoppedAt"), datetime) else "",
+                        })
+        except (BotoCoreError, ClientError) as exc:
+            raise AWSError("ECS", str(exc)) from exc
+
+        return {
+            "cluster": cluster,
+            "running_tasks": len(running_arns),
+            "recent_failures": failed,
+        }
 
     def list_ecs_services(self, cluster: str) -> list[str]:
         """Return all service ARNs in a cluster."""
