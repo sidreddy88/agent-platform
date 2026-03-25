@@ -71,7 +71,9 @@ export default function App() {
               <div style={{ gridColumn: "span 2" }}>
                 <DOPillar data={data.digital_ocean} />
               </div>
-              <CloudfarePillar data={data.cloudflare} />
+              <div style={{ gridColumn: "span 2" }}>
+                <CloudfarePillar data={data.cloudflare} />
+              </div>
 
               {/* PR Agent pillar */}
               <div style={prCard}>
