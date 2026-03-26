@@ -8,6 +8,7 @@ import { EC2Pillar } from "./components/EC2Pillar";
 import { ALBPillar } from "./components/ALBPillar";
 import { DOPillar } from "./components/DOPillar";
 import { CloudfarePillar } from "./components/CloudfarePillar";
+import { MongoDBPillar } from "./components/MongoDBPillar";
 import { IncidentFeed } from "./components/IncidentFeed";
 
 function formatTs(d: Date) {
@@ -82,6 +83,9 @@ export default function App() {
               </div>
               <div style={{ gridColumn: "span 2" }}>
                 <CloudfarePillar data={data.cloudflare} />
+              </div>
+              <div style={{ gridColumn: "span 2" }}>
+                <MongoDBPillar data={data.mongodb} />
               </div>
 
               {/* PR Agent pillar */}

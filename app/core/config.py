@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     alert_do_memory_pct: float = 85.0             # DO droplet memory % threshold
     alert_alb_5xx_count: int = 10                 # ALB 5xx count in last 5 min
 
+    # MongoDB Atlas
+    atlas_public_key: str = ""
+    atlas_private_key: str = ""
+    atlas_project_id: str = ""
+
     # GitHub webhook secret (optional — leave blank to skip signature verification)
     github_webhook_secret: str = ""
 
