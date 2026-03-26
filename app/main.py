@@ -9,6 +9,7 @@ from app.api.routes import dashboard, incidents, webhooks, logs
 from app.api import websocket
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.detection import detection_service
+from app.services.threshold_monitor import threshold_monitor
 
 logging.basicConfig(level=logging.INFO)
 
@@ -35,8 +36,10 @@ app.include_router(logs.router)
 @app.on_event("startup")
 async def _startup():
     asyncio.create_task(detection_service.run_forever())
+    asyncio.create_task(threshold_monitor.run_forever())
 
 
 @app.on_event("shutdown")
 async def _shutdown():
     detection_service.stop()
+    threshold_monitor.stop()

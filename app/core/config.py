@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # CloudWatch log groups to monitor for errors — comma-separated
     ecs_log_groups: str = ""
 
+    # Threshold monitoring
+    threshold_check_interval_seconds: int = 300   # how often to run checks (default 5 min)
+    threshold_cooldown_minutes: int = 30           # min gap between repeat alerts for same issue
+    alert_do_memory_pct: float = 85.0             # DO droplet memory % threshold
+    alert_alb_5xx_count: int = 10                 # ALB 5xx count in last 5 min
+
     # GitHub webhook secret (optional — leave blank to skip signature verification)
     github_webhook_secret: str = ""
 
