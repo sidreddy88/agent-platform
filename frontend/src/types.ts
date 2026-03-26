@@ -104,6 +104,29 @@ export interface ALBData {
   error?: string;
 }
 
+export interface WorkflowRun {
+  id: number;
+  workflow_name: string;
+  run_number: number;
+  status: string;
+  conclusion: string | null;
+  display_conclusion: string;
+  commit_sha: string;
+  commit_message: string;
+  actor: string;
+  url: string;
+  created_at: string;
+  healthy: boolean;
+}
+
+export interface GitHubData {
+  repo: string;
+  branch: string;
+  runs: WorkflowRun[];
+  latest_healthy: boolean | null;
+  error?: string;
+}
+
 export interface MongoDBCluster {
   name: string;
   state: string;
@@ -131,6 +154,7 @@ export interface DashboardData {
   cloudflare: CFData;
   alb: ALBData[];
   mongodb: MongoDBData;
+  github: GitHubData;
   queue: QueueStats;
   incidents: IncidentMetrics;
 }

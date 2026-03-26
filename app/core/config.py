@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     alert_do_memory_pct: float = 85.0             # DO droplet memory % threshold
     alert_alb_5xx_count: int = 10                 # ALB 5xx count in last 5 min
 
+    # GitHub Actions monitoring
+    github_actions_repo: str = ""   # format: owner/repo
+
     # MongoDB Atlas
     atlas_public_key: str = ""
     atlas_private_key: str = ""
