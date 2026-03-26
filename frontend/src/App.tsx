@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useState } from "react";
 import { useDashboard } from "./hooks/useDashboard";
 import { useDashboardWS } from "./hooks/useWebSocket";
+import { LogsPage } from "./components/LogsPage";
 import { ECSPillar } from "./components/ECSPillar";
 import { ECSTaskPillar } from "./components/ECSTaskPillar";
 import { EC2Pillar } from "./components/EC2Pillar";
@@ -13,9 +14,12 @@ function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+type Tab = "dashboard" | "logs";
+
 export default function App() {
   const { data, loading, error, lastUpdated, refetch } = useDashboard();
   const { incidents, metrics, connected } = useDashboardWS();
+  const [tab, setTab] = useState<Tab>("dashboard");
 
   return (
     <div style={layout}>
@@ -24,6 +28,10 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={logo}>⚡</span>
           <span style={logoText}>Agent Platform</span>
+          <div style={{ display: "flex", gap: 4, marginLeft: 16 }}>
+            <button style={tabBtn(tab === "dashboard")} onClick={() => setTab("dashboard")}>Dashboard</button>
+            <button style={tabBtn(tab === "logs")} onClick={() => setTab("logs")}>Logs</button>
+          </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           {lastUpdated && (
@@ -40,7 +48,8 @@ export default function App() {
       </header>
 
       {/* Main content */}
-      <main style={main}>
+      {tab === "logs" && <LogsPage />}
+      <main style={main} hidden={tab !== "dashboard"}>
         {loading && !data && (
           <div style={centered}>
             <span style={{ fontSize: 24 }}>⏳</span>
@@ -137,6 +146,17 @@ const lastUpdatedText: React.CSSProperties = {
   fontSize: 12,
   color: "#4b5563",
 };
+
+const tabBtn = (active: boolean): React.CSSProperties => ({
+  background: active ? "#3b4fd8" : "transparent",
+  border: `1px solid ${active ? "#4f63f0" : "#2d3149"}`,
+  color: active ? "#e2e8f0" : "#64748b",
+  borderRadius: 6,
+  padding: "4px 14px",
+  fontSize: 13,
+  fontWeight: active ? 600 : 400,
+  cursor: "pointer",
+});
 
 const refreshBtn: React.CSSProperties = {
   background: "#2d3149",
