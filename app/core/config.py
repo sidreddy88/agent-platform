@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     ecs_log_groups: str = ""
 
     # Threshold monitoring
-    threshold_check_interval_seconds: int = 300   # how often to run checks (default 5 min)
+    threshold_check_interval_seconds: int = 86400  # how often to run checks (default 24 hours)
     threshold_cooldown_minutes: int = 30           # min gap between repeat alerts for same issue
     alert_do_memory_pct: float = 85.0             # DO droplet memory % threshold
     alert_alb_5xx_count: int = 10                 # ALB 5xx count in last 5 min
