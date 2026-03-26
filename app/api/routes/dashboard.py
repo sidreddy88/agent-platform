@@ -11,6 +11,7 @@ from app.services.aws import AWSService
 from app.services.cloudflare_service import cloudflare_service
 from app.services.digitalocean import do_service
 from app.services.mongodb_atlas import atlas_service
+from app.services.github_actions import github_actions_service
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 
@@ -200,9 +201,38 @@ async def get_dashboard() -> Dict[str, Any]:
         except Exception as exc:
             return {"error": str(exc), "clusters": [], "total": 0, "healthy": 0}
 
-    ecs, ecs_tasks, ec2, do_data, cf_data, alb, mongodb = await asyncio.gather(
+    # --- GitHub Actions ---
+    async def _github_pillar():
+        try:
+            runs = await github_actions_service.get_latest_runs(branch="master", limit=5)
+            return {
+                "repo": getattr(settings, "github_actions_repo", ""),
+                "branch": "master",
+                "runs": [
+                    {
+                        "id": r.id,
+                        "workflow_name": r.workflow_name,
+                        "run_number": r.run_number,
+                        "status": r.status,
+                        "conclusion": r.conclusion,
+                        "display_conclusion": r.display_conclusion,
+                        "commit_sha": r.commit_sha,
+                        "commit_message": r.commit_message,
+                        "actor": r.actor,
+                        "url": r.url,
+                        "created_at": r.created_at,
+                        "healthy": r.healthy,
+                    }
+                    for r in runs
+                ],
+                "latest_healthy": runs[0].healthy if runs else None,
+            }
+        except Exception as exc:
+            return {"error": str(exc), "runs": [], "latest_healthy": None}
+
+    ecs, ecs_tasks, ec2, do_data, cf_data, alb, mongodb, github = await asyncio.gather(
         _ecs_pillar(), _ecs_task_pillar(), _ec2_pillar(), _do_pillar(), _cf_pillar(), _alb_pillar(),
-        _mongodb_pillar(),
+        _mongodb_pillar(), _github_pillar(),
     )
 
     return {
@@ -213,6 +243,7 @@ async def get_dashboard() -> Dict[str, Any]:
         "cloudflare": cf_data,
         "alb": alb,
         "mongodb": mongodb,
+        "github": github,
         "queue": event_queue.stats,
         "incidents": incident_store.metrics(),
     }
