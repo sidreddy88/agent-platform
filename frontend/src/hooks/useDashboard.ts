@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { DashboardData } from "../types";
 
-const POLL_MS = 30_000;
+const POLL_MS = 86_400_000; // 24 hours
 
 export function useDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
