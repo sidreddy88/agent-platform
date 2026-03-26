@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.services.aws import AWSService
 from app.services.cloudflare_service import cloudflare_service
 from app.services.digitalocean import do_service
+from app.services.mongodb_atlas import atlas_service
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 
@@ -175,8 +176,33 @@ async def get_dashboard() -> Dict[str, Any]:
                 results.append({"name": name, "error": str(exc), "healthy": False})
         return results
 
-    ecs, ecs_tasks, ec2, do_data, cf_data, alb = await asyncio.gather(
-        _ecs_pillar(), _ecs_task_pillar(), _ec2_pillar(), _do_pillar(), _cf_pillar(), _alb_pillar()
+    # --- MongoDB Atlas ---
+    async def _mongodb_pillar():
+        try:
+            clusters = await atlas_service.get_clusters()
+            return {
+                "clusters": [
+                    {
+                        "name": c.name,
+                        "state": c.state,
+                        "mongo_version": c.mongo_version,
+                        "connections": c.connections,
+                        "disk_used_pct": c.disk_used_pct,
+                        "ops_per_sec": c.ops_per_sec,
+                        "replication_lag_sec": c.replication_lag_sec,
+                        "healthy": c.healthy,
+                    }
+                    for c in clusters
+                ],
+                "total": len(clusters),
+                "healthy": sum(1 for c in clusters if c.healthy),
+            }
+        except Exception as exc:
+            return {"error": str(exc), "clusters": [], "total": 0, "healthy": 0}
+
+    ecs, ecs_tasks, ec2, do_data, cf_data, alb, mongodb = await asyncio.gather(
+        _ecs_pillar(), _ecs_task_pillar(), _ec2_pillar(), _do_pillar(), _cf_pillar(), _alb_pillar(),
+        _mongodb_pillar(),
     )
 
     return {
@@ -186,6 +212,7 @@ async def get_dashboard() -> Dict[str, Any]:
         "digital_ocean": do_data,
         "cloudflare": cf_data,
         "alb": alb,
+        "mongodb": mongodb,
         "queue": event_queue.stats,
         "incidents": incident_store.metrics(),
     }

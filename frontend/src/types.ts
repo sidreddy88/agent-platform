@@ -104,6 +104,25 @@ export interface ALBData {
   error?: string;
 }
 
+export interface MongoDBCluster {
+  name: string;
+  state: string;
+  mongo_version: string;
+  connections: number | null;
+  disk_used_pct: number | null;
+  ops_per_sec: number | null;
+  replication_lag_sec: number | null;
+  healthy: boolean;
+  error?: string;
+}
+
+export interface MongoDBData {
+  clusters: MongoDBCluster[];
+  total: number;
+  healthy: number;
+  error?: string;
+}
+
 export interface DashboardData {
   ecs: ECSService[];
   ecs_task_clusters: ECSTaskCluster[];
@@ -111,6 +130,7 @@ export interface DashboardData {
   digital_ocean: DOData;
   cloudflare: CFData;
   alb: ALBData[];
+  mongodb: MongoDBData;
   queue: QueueStats;
   incidents: IncidentMetrics;
 }
