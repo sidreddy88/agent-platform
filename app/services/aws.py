@@ -444,6 +444,38 @@ class AWSService:
     # CloudWatch Logs
     # ------------------------------------------------------------------
 
+    def get_error_logs(self, log_group: str, minutes: int = 60, limit: int = 100) -> list[dict]:
+        """Fetch error-level log events from a CloudWatch log group using filter_log_events."""
+        logs = self._client("logs")
+        from datetime import timedelta
+
+        now = datetime.now(timezone.utc)
+        start_ms = int((now - timedelta(minutes=minutes)).timestamp() * 1000)
+        end_ms = int(now.timestamp() * 1000)
+
+        try:
+            resp = logs.filter_log_events(
+                logGroupName=log_group,
+                startTime=start_ms,
+                endTime=end_ms,
+                filterPattern='?"ERROR" ?"Error" ?"error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback"',
+                limit=limit,
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise AWSError("CloudWatchLogs", str(exc)) from exc
+
+        events = []
+        for ev in resp.get("events", []):
+            ts = datetime.fromtimestamp(ev["timestamp"] / 1000, tz=timezone.utc).isoformat()
+            events.append({
+                "timestamp": ts,
+                "stream": ev.get("logStreamName", ""),
+                "message": ev.get("message", "").rstrip(),
+                "log_group": log_group,
+            })
+
+        return sorted(events, key=lambda e: e["timestamp"], reverse=True)
+
     def get_service_logs(self, log_group: str, minutes: int = 30) -> LogSummary:
         """Fetch recent logs from a CloudWatch log group and summarise errors."""
         logs = self._client("logs")

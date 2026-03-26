@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # ALB monitoring — comma-separated ALB names
     alb_names: str = ""
 
+    # CloudWatch log groups to monitor for errors — comma-separated
+    ecs_log_groups: str = ""
+
     # GitHub webhook secret (optional — leave blank to skip signature verification)
     github_webhook_secret: str = ""
 
