@@ -295,6 +295,13 @@ class GitHubService:
         content = base64.b64decode(data["content"]).decode("utf-8")
         return content, data["sha"]
 
+    async def get_default_branch(self, owner: str, repo: str) -> str:
+        """Return the default branch name (e.g. 'main' or 'master')."""
+        async with self._client() as client:
+            response = await client.get(f"/repos/{owner}/{repo}")
+            await self._raise_for_status(response)
+            return response.json()["default_branch"]
+
     async def get_branch_sha(
         self, owner: str, repo: str, branch: str = "main"
     ) -> str:
