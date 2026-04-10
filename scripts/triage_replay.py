@@ -4,9 +4,12 @@ build an ErrorEvent, and run it through the full pipeline:
   TriageAgent → DiagnosisAgent → FixGenerationAgent → CodeReviewAgent
 
 Usage:
-    python scripts/triage_replay.py [--no-fix]
+    python scripts/triage_replay.py [--no-fix] [--synthetic]
 
-  --no-fix   Stop after diagnosis (skip fix generation and PR creation)
+  --no-fix     Stop after diagnosis (skip fix generation and PR creation)
+  --synthetic  Skip CloudWatch lookup and triage/diagnosis — jump straight
+               to fix generation using a hardcoded incident (useful when no
+               live events are available in the current lookback window)
 
 Output: full pipeline result printed to stdout + sent to Slack.
 """
@@ -59,9 +62,62 @@ def build_event(match: dict) -> ErrorEvent:
 
 
 NO_FIX = "--no-fix" in sys.argv
+SYNTHETIC = "--synthetic" in sys.argv
+
+
+def _synthetic_incident() -> IncidentState:
+    """Return a hardcoded IncidentState for the known NoSuchKey incident."""
+    event = ErrorEvent(
+        source=EventSource.CLOUDWATCH,
+        severity=Severity.P2,
+        error_type=ERROR_TYPE,
+        task_id="synthetic-task-id",
+        title=f"{ERROR_TYPE}: {SERVICE}",
+        description=(
+            "NoSuchKey: The specified key does not exist. "
+            "at moveAndRemoveFileFromS3 (routes/services/image.js)"
+        ),
+        service=SERVICE,
+        resource_id=LOG_GROUP,
+        metadata={
+            "log_group": LOG_GROUP,
+            "pattern": PATTERN,
+            "match_count": 47,
+            "evidence": [
+                "47 occurrences of NoSuchKey in /ecs/TaskAllInterviews in last 24h",
+                "Error originates in moveAndRemoveFileFromS3 at routes/services/image.js",
+                "S3 key missing at copy step — race condition between upload and move",
+            ],
+        },
+    )
+    return IncidentState(
+        error_event=event,
+        status=IncidentStatus.FIXING,
+        triage_decision="real",
+        triage_reasoning="47 occurrences/24h, affects image processing for all users",
+        blast_radius="All image upload/move operations",
+        occurrences_24h=47,
+        diagnosis=(
+            "Race condition in moveAndRemoveFileFromS3: S3 copy fails with NoSuchKey "
+            "when the source key is deleted or never created before the move runs. "
+            "The function lacks error handling for this case, causing unhandled exceptions."
+        ),
+        confidence=0.92,
+        reproduction_confirmed=True,
+    )
 
 
 async def main() -> None:
+    if SYNTHETIC:
+        print("--synthetic mode: skipping CloudWatch lookup, using hardcoded incident")
+        incident = _synthetic_incident()
+        print(f"\nSynthetic incident id: {incident.id}")
+        print(f"  error_type : {incident.error_event.error_type}")
+        print(f"  diagnosis  : {incident.diagnosis[:80]}...")
+        print(f"  confidence : {incident.confidence:.0%}")
+        await _run_fix_and_review(incident)
+        return
+
     aws = AWSService()
 
     print(f"Searching {LOG_GROUP} for '{PATTERN}' in the last {LOOKBACK_HOURS}h...")
@@ -157,12 +213,19 @@ async def main() -> None:
         print("\n--no-fix flag set — skipping fix generation.")
         return
 
-    # ── Step 3: Fix Generation ───────────────────────────────────────
-    print(f"\nStep 3 — FixGenerationAgent (Sonnet) — creating Issue + PR...")
     incident.status = IncidentStatus.FIXING
     incident.diagnosis = diagnosis.root_cause
     incident.confidence = diagnosis.confidence
     incident.reproduction_confirmed = diagnosis.reproduction_confirmed
+
+    await _run_fix_and_review(incident)
+
+
+async def _run_fix_and_review(incident: IncidentState) -> None:
+    """Steps 3+4: FixGenerationAgent → CodeReviewAgent."""
+
+    # ── Step 3: Fix Generation ───────────────────────────────────────
+    print(f"\nStep 3 — FixGenerationAgent (Sonnet) — creating Issue + PR...")
 
     fix_agent = FixGenerationAgent()
     fix, agent_steps = await fix_agent.fix_with_steps(incident)
