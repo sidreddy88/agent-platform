@@ -95,8 +95,44 @@ def _build_system_prompt(tools: dict[str, tuple[ToolFn, str]]) -> str:
 
 _THOUGHT_RE = re.compile(r"Thought:\s*(.+?)(?=\nAction:|\nAnswer:|$)", re.DOTALL)
 _ACTION_RE = re.compile(r"Action:\s*(\w+)")
-_INPUT_RE = re.compile(r"Action Input:\s*(\{.*?\})", re.DOTALL)
 _ANSWER_RE = re.compile(r"Answer:\s*(.+)", re.DOTALL)
+
+
+def _extract_json_block(text: str) -> str:
+    """
+    Extract the first complete JSON object from text using brace-counting.
+
+    The old regex approach (`{.*?}`) fails whenever the JSON value contains
+    nested braces — e.g. JavaScript function bodies in old_function/new_function.
+    This parser tracks string quoting and escape sequences so that `}` inside a
+    quoted string value is never mistaken for the closing brace of the object.
+    """
+    start = text.find("{")
+    if start == -1:
+        return "{}"
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\" and in_string:
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return "{}"
 
 
 def _parse(text: str) -> dict[str, str]:
@@ -106,11 +142,18 @@ def _parse(text: str) -> dict[str, str]:
         return {"thought": thought, "answer": answer_match.group(1).strip()}
 
     action_match = _ACTION_RE.search(text)
-    input_match = _INPUT_RE.search(text)
+
+    # Find Action Input and extract JSON with brace-counting (not regex)
+    action_input = "{}"
+    ai_marker = "Action Input:"
+    ai_pos = text.find(ai_marker)
+    if ai_pos != -1:
+        action_input = _extract_json_block(text[ai_pos + len(ai_marker):].lstrip())
+
     return {
         "thought": thought,
         "action": action_match.group(1).strip() if action_match else "",
-        "action_input": input_match.group(1).strip() if input_match else "{}",
+        "action_input": action_input,
     }
 
 
