@@ -58,12 +58,20 @@ def _parse_fix_result(answer: str, branch: str) -> FixResult:
     """Extract issue URL and PR URL from the agent's final Answer."""
     pr_url_match = re.search(r"https://github\.com/[^\s)\"]+/pull/\d+", answer)
     issue_url_match = re.search(r"https://github\.com/[^\s)\"]+/issues/\d+", answer)
-    pr_number_match = re.search(r"PR #(\d+)", answer)
+
+    pr_url = pr_url_match.group() if pr_url_match else None
+
+    # Extract PR number from URL — more reliable than parsing the LLM's prose
+    pr_number: int | None = None
+    if pr_url:
+        num_match = re.search(r"/pull/(\d+)", pr_url)
+        if num_match:
+            pr_number = int(num_match.group(1))
 
     return FixResult(
         issue_url=issue_url_match.group() if issue_url_match else None,
-        pr_url=pr_url_match.group() if pr_url_match else None,
-        pr_number=int(pr_number_match.group(1)) if pr_number_match else None,
+        pr_url=pr_url,
+        pr_number=pr_number,
         branch=branch,
         fix_description=answer[:500],
         test_added="test" in answer.lower(),
@@ -165,6 +173,7 @@ class FixGenerationAgent(BaseAgent):
                     branch_name, file_sha,
                 )
                 files_changed = [file_path]
+                self._files_changed = files_changed
 
                 # Commit test if provided
                 if test_file_path and test_content:
@@ -193,6 +202,7 @@ class FixGenerationAgent(BaseAgent):
                                 },
                             )
                     files_changed.append(test_file_path)
+                    self._files_changed = files_changed
 
                 # Create PR
                 pr_number, pr_url = await gh.create_pull_request(
@@ -251,6 +261,7 @@ class FixGenerationAgent(BaseAgent):
         self._issue_number: int | None = None
         self._pr_number: int | None = None
         self._pr_url: str | None = None
+        self._files_changed: list[str] = []
 
         event = incident.error_event
         branch_name = (
@@ -344,15 +355,25 @@ FIX PATTERN — prefer option B (specific catch, not existence check):
     }}
   }}
 
-Answer with a concise summary including the issue URL and PR URL."""
+Answer with a concise summary. In your answer, include the EXACT issue URL and PR URL
+returned by the tools — do not construct or guess URLs. Copy them verbatim from the
+tool responses (they look like https://github.com/VoyageGroupMag/AllInterviews/issues/N
+and https://github.com/VoyageGroupMag/AllInterviews/pull/N)."""
 
         result = await self.run(prompt)
         fix_result = _parse_fix_result(result.answer, branch_name)
 
-        # Patch in cached values if regex didn't catch them
+        # Patch in cached tool-call values — always prefer these over regex-parsed text
         if self._pr_url and not fix_result.pr_url:
             fix_result.pr_url = self._pr_url
         if self._pr_number and not fix_result.pr_number:
             fix_result.pr_number = self._pr_number
+        # If pr_url is now set but pr_number is still missing, extract from URL
+        if fix_result.pr_url and not fix_result.pr_number:
+            m = re.search(r"/pull/(\d+)", fix_result.pr_url)
+            if m:
+                fix_result.pr_number = int(m.group(1))
+        if self._files_changed and not fix_result.files_changed:
+            fix_result.files_changed = self._files_changed
 
         return fix_result
