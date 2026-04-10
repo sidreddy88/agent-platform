@@ -230,66 +230,101 @@ class FixGenerationAgent(BaseAgent):
         ), steps
 
     # ------------------------------------------------------------------
-    # LLM fix generation
+    # Fix generation
     # ------------------------------------------------------------------
+
+    def _extract_js_function(self, content: str, function_name: str) -> str:
+        """
+        Extract a complete JavaScript function from source using brace counting.
+        Handles async/regular functions and arrow functions assigned to const.
+        Returns the exact text as it appears in the file, or "" if not found.
+        """
+        patterns = [
+            rf'async\s+function\s+{re.escape(function_name)}\s*\(',
+            rf'function\s+{re.escape(function_name)}\s*\(',
+            rf'const\s+{re.escape(function_name)}\s*=\s*async\s*(?:function\s*)?\(',
+            rf'const\s+{re.escape(function_name)}\s*=\s*function\s*\(',
+        ]
+        start_pos = -1
+        for pattern in patterns:
+            m = re.search(pattern, content)
+            if m:
+                start_pos = m.start()
+                break
+
+        if start_pos == -1:
+            return ""
+
+        brace_start = content.find("{", start_pos)
+        if brace_start == -1:
+            return ""
+
+        depth = 0
+        in_string = False
+        string_char = ""
+        escape_next = False
+
+        for i in range(brace_start, len(content)):
+            c = content[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if c == "\\" and in_string:
+                escape_next = True
+                continue
+            if in_string:
+                if c == string_char:
+                    in_string = False
+                continue
+            if c in ('"', "'", "`"):
+                in_string = True
+                string_char = c
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return content[start_pos : i + 1]
+
+        return ""
 
     async def _generate_fix(self, content: str) -> tuple[str, str]:
         """
-        Single focused LLM call: extract the current function + generate the fix.
+        Extract the function using brace-counting (exact text from file),
+        then use a single LLM call to generate the fixed version.
         Returns (old_function_text, new_function_text).
         """
-        prompt = f"""You are a JavaScript engineer fixing a production bug.
+        old_function = self._extract_js_function(content, "moveAndRemoveFileFromS3")
+        if not old_function:
+            logger.error("[FixGen] moveAndRemoveFileFromS3 not found in file")
+            return "", ""
 
-FILE: routes/services/image.js
-```javascript
-{content[:8000]}
-```
+        logger.info("[FixGen] Extracted function (%d chars)", len(old_function))
 
-TASK:
-1. Find the complete `moveAndRemoveFileFromS3` function in the file above.
-2. Generate a fixed version that wraps the S3 operations in try/catch,
-   catching the `NoSuchKey` error code specifically and returning early.
+        prompt = f"""Fix this JavaScript function to handle the S3 NoSuchKey error gracefully.
 
-Output ONLY the two blocks below — no explanation, no markdown, no other text:
+CURRENT FUNCTION:
+{old_function}
 
-OLD_FUNCTION:
-<copy the function text EXACTLY as it appears in the file above, character for character>
-END_OLD
+Apply ONLY this change: wrap the S3 operations in a try/catch block.
+- If error.code === 'NoSuchKey': log a warning and return early
+- For all other errors: re-throw so they surface normally
+- Do NOT change the function signature or any logic outside the S3 calls
 
-NEW_FUNCTION:
-<the fixed version — same signature and guard checks, add try/catch around S3 calls>
-END_NEW
+Return ONLY the complete fixed function — no explanation, no markdown fences."""
 
-Fix pattern to apply in NEW_FUNCTION:
-  async function moveAndRemoveFileFromS3(bucket, imageObj) {{
-    try {{
-      // keep all existing guard checks here
-      await s3.copyObject({{ ... }}).promise();
-      await s3.deleteObject({{ Bucket: bucket, Key: imageObj.source }}).promise();
-    }} catch (error) {{
-      if (error.code === 'NoSuchKey') {{
-        console.warn('moveAndRemoveFileFromS3: source key not found, skipping',
-          {{ bucket, source: imageObj.source }});
-        return;
-      }}
-      console.log('moveAndRemoveFileFromS3 error', error, bucket, imageObj);
-    }}
-  }}"""
-
-        response = await self._llm.complete(
+        new_function = await self._llm.complete(
             messages=[{"role": "user", "content": prompt}],
             system=(
                 "You are a JavaScript engineer. "
-                "Output ONLY the OLD_FUNCTION and NEW_FUNCTION blocks as specified. "
-                "Do not include any explanation or markdown fences."
+                "Return ONLY the complete fixed function code, nothing else. "
+                "No markdown, no backticks, no explanation."
             ),
         )
 
-        old_match = re.search(r"OLD_FUNCTION:\n(.*?)END_OLD", response, re.DOTALL)
-        new_match = re.search(r"NEW_FUNCTION:\n(.*?)END_NEW", response, re.DOTALL)
+        # Strip any accidental markdown fences the model might add
+        new_function = re.sub(r"^```(?:javascript|js)?\n?", "", new_function.strip())
+        new_function = re.sub(r"\n?```$", "", new_function)
 
-        if not old_match or not new_match:
-            logger.error("[FixGen] LLM response missing expected blocks: %s", response[:400])
-            return "", ""
-
-        return old_match.group(1), new_match.group(1)
+        return old_function, new_function.strip()
