@@ -165,7 +165,20 @@ async def main() -> None:
     incident.reproduction_confirmed = diagnosis.reproduction_confirmed
 
     fix_agent = FixGenerationAgent()
-    fix = await fix_agent.fix(incident)
+    fix, agent_steps = await fix_agent.fix_with_steps(incident)
+
+    # Print every ReAct step so we can see exactly what the tools returned
+    print("\n" + "=" * 60)
+    print("FIX AGENT — REACT STEPS")
+    print("=" * 60)
+    for step in agent_steps:
+        if step.action:
+            print(f"\n[iter {step.iteration}] Action: {step.action}")
+            print(f"  Input : {step.action_input[:300]}")
+            print(f"  Obs   : {step.observation[:600]}")
+        elif step.answer:
+            print(f"\n[iter {step.iteration}] Answer: {step.answer[:400]}")
+    print("=" * 60)
 
     print("\n" + "=" * 60)
     print("FIX RESULT")
@@ -182,7 +195,7 @@ async def main() -> None:
     print("=" * 60)
 
     if not fix.pr_url and not fix.pr_number:
-        print("\nFix generation did not produce a PR. Check logs above.")
+        print("\nFix generation did not produce a PR — see ReAct steps above for errors.")
         return
 
     # ── Step 4: Code Review ──────────────────────────────────────────

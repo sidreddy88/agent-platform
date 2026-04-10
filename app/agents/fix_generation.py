@@ -254,8 +254,8 @@ class FixGenerationAgent(BaseAgent):
             ),
         )
 
-    async def fix(self, incident: IncidentState) -> FixResult:
-        """Generate a fix for a diagnosed incident and open a GitHub PR."""
+    async def fix_with_steps(self, incident: IncidentState) -> tuple[FixResult, list]:
+        """Generate a fix and return (FixResult, agent ReAct steps) for debugging."""
         # Reset per-run state
         self._file_shas: dict[str, str] = {}
         self._issue_number: int | None = None
@@ -361,19 +361,25 @@ tool responses (they look like https://github.com/TargetOrg/TargetApp/issues/N
 and https://github.com/TargetOrg/TargetApp/pull/N)."""
 
         result = await self.run(prompt)
+
         fix_result = _parse_fix_result(result.answer, branch_name)
 
-        # Patch in cached tool-call values — always prefer these over regex-parsed text
-        if self._pr_url and not fix_result.pr_url:
+        # Always prefer cached tool-call values over regex-parsed prose
+        if self._pr_url:
             fix_result.pr_url = self._pr_url
-        if self._pr_number and not fix_result.pr_number:
+        if self._pr_number:
             fix_result.pr_number = self._pr_number
-        # If pr_url is now set but pr_number is still missing, extract from URL
+        # Extract pr_number from URL if still missing
         if fix_result.pr_url and not fix_result.pr_number:
             m = re.search(r"/pull/(\d+)", fix_result.pr_url)
             if m:
                 fix_result.pr_number = int(m.group(1))
-        if self._files_changed and not fix_result.files_changed:
+        if self._files_changed:
             fix_result.files_changed = self._files_changed
 
+        return fix_result, result.steps
+
+    async def fix(self, incident: IncidentState) -> FixResult:
+        """Generate a fix for a diagnosed incident and open a GitHub PR."""
+        fix_result, _ = await self.fix_with_steps(incident)
         return fix_result
