@@ -100,10 +100,18 @@ class FixGenerationAgent(BaseAgent):
                 fix_description=desc,
             ), steps
 
-        # ── 1. Fetch the file from GitHub ──────────────────────────────
+        # ── 1. Resolve default branch + fetch the file ─────────────────
+        try:
+            default_branch = await self._github.get_default_branch(self._owner, self._repo)
+            steps.append(f"✓ Default branch: {default_branch}")
+            logger.info("[FixGen] Default branch: %s", default_branch)
+        except GitHubError as exc:
+            default_branch = "main"
+            steps.append(f"⚠ Could not detect default branch ({exc}) — assuming '{default_branch}'")
+
         try:
             content, file_sha = await self._github.get_file_contents(
-                self._owner, self._repo, file_path
+                self._owner, self._repo, file_path, ref=default_branch
             )
             steps.append(f"✓ Fetched {file_path} (sha={file_sha[:8]}, {len(content)} chars)")
             logger.info("[FixGen] Fetched %s (%d chars)", file_path, len(content))
@@ -179,9 +187,11 @@ class FixGenerationAgent(BaseAgent):
         )
 
         try:
-            base_sha = await self._github.get_branch_sha(self._owner, self._repo, "main")
+            base_sha = await self._github.get_branch_sha(
+                self._owner, self._repo, default_branch
+            )
             await self._github.create_branch(self._owner, self._repo, branch_name, base_sha)
-            steps.append(f"✓ Created branch {branch_name}")
+            steps.append(f"✓ Created branch {branch_name} from {default_branch}")
 
             issue_ref = f"Fixes #{issue_number}" if issue_number else ""
             commit_sha = await self._github.update_file(
@@ -197,7 +207,7 @@ class FixGenerationAgent(BaseAgent):
                 title="fix: handle NoSuchKey gracefully in moveAndRemoveFileFromS3",
                 body=pr_body,
                 head=branch_name,
-                base="main",
+                base=default_branch,
                 labels=["bug", "ai-generated-fix", "awaiting-review"],
             )
             steps.append(f"✓ Created PR #{pr_number}: {pr_url}")
