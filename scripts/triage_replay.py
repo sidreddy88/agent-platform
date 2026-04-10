@@ -181,12 +181,12 @@ async def main() -> None:
     }, indent=2))
     print("=" * 60)
 
-    if not fix.pr_number:
+    if not fix.pr_url and not fix.pr_number:
         print("\nFix generation did not produce a PR. Check logs above.")
         return
 
     # ── Step 4: Code Review ──────────────────────────────────────────
-    print(f"\nStep 4 — CodeReviewAgent — reviewing PR #{fix.pr_number}...")
+    print(f"\nStep 4 — CodeReviewAgent — reviewing PR #{fix.pr_number} ({fix.pr_url})...")
     owner, repo = settings.fix_target_repo.split("/", 1)
     review_agent = CodeReviewAgent()
     review_result = await review_agent.run(

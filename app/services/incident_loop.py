@@ -274,7 +274,7 @@ class IncidentLoop:
 
         # ── Fix Generation ────────────────────────────────────────────
         fix = await self._run_fix(incident)
-        if fix is None:
+        if fix is None or (not fix.pr_url and not fix.pr_number):
             logger.error("[IncidentLoop] %s — fix generation failed, leaving in FIXING", incident.id)
             return
 
