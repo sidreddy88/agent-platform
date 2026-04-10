@@ -11,299 +11,450 @@ An LLM "hallucinates" when it generates confident, plausible-sounding output tha
 
 ---
 
-## Background
+## Issue 1 — Wrong Repo URL
 
-The `FixGenerationAgent` was designed to:
-1. Fetch `routes/services/image.js` from GitHub
-2. Create a GitHub Issue documenting the incident
-3. Generate a fix, commit it on a branch, and open a PR
+The model was asked to create a GitHub issue and PR, and to include the URLs in its answer. But the prompt never said where to get those URLs from. So the model did what LLMs do when they lack information — it made something up that sounded plausible.
 
-It used a **text-based ReAct loop** — the model reasons in plain text (`Thought: / Action: / Action Input: / Observation:`) and the framework parses that text to call real tools. This design caused every hallucination in this incident.
+It knew the service was called `target-app`, so it constructed `github.com/targetorg/targetapp`. The real repo was `TargetOrg/TargetApp` — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
+
+**The prompt that caused this** (`app/agents/fix_generation.py`, end of the prompt string):
+```
+Answer with a concise summary including the issue URL and PR URL.
+```
+No instruction on where to get those URLs from. The model filled in the blank.
+
+**The fix** — changed the prompt ending to:
+```
+Answer with a concise summary. In your answer, include the EXACT issue URL and PR URL
+returned by the tools — do not construct or guess URLs. Copy them verbatim from the
+tool responses (they look like https://github.com/TargetOrg/TargetApp/issues/N
+and https://github.com/TargetOrg/TargetApp/pull/N).
+```
 
 ---
 
-## Step-by-Step: What Went Wrong and Why
+## Issue 2 — `pr_number` Always Null
 
-### Step 1 — Wrong repo URL in answer text
+Even when the model wrote a PR number in its answer, the code couldn't extract it. The regex looked for `PR #48` but the model wrote `Pull Request: #48`. Those mean the same thing to a human, but the regex saw no match and returned nothing.
 
-**Error produced:**
-```
-"issue_url": "https://github.com/targetorg/targetapp/issues/47"
-"pr_url":    "https://github.com/targetorg/targetapp/pull/48"
-```
-
-**What should have happened:**  
-URLs should point to `TargetOrg/TargetApp`.
-
-**Root cause:**  
-The model never called the tools. It wrote a final `Answer:` directly, inventing both URLs. The prompt said "include the issue URL and PR URL" but didn't say where to get them from, so the model guessed. It used `target-app/target-app` — a plausible-sounding but completely wrong repo name it constructed from the service name `target-app`.
-
-**How we diagnosed it:**  
-The `pr_number` field was `null` even though `pr_url` was set. This exposed the inconsistency — if the tool had actually been called, `self._pr_number` would have been cached and patched in. The fact it wasn't meant the tool was never called.
-
-**Fix applied:**  
-Added instruction to the prompt: "Copy URLs verbatim from tool responses — do not construct or guess them."
-
----
-
-### Step 2 — `pr_number` always null
-
-**Error produced:**
-```json
-{ "pr_number": null, "pr_url": "https://github.com/.../pull/48" }
-```
-
-**Root cause:**  
-The regex used to extract the PR number from the model's answer was:
+**The code that caused this** (`app/agents/fix_generation.py`):
 ```python
-re.search(r"PR #(\d+)", answer)
+def _parse_fix_result(answer: str, branch: str) -> FixResult:
+    pr_number_match = re.search(r"PR #(\d+)", answer)  # ← too narrow
+    return FixResult(
+        pr_number=int(pr_number_match.group(1)) if pr_number_match else None,
+        ...
+    )
 ```
-But the model wrote `"Pull Request: #48"` (not `"PR #48"`), so the regex never matched. Since `pr_number` was null, the downstream code that called the code reviewer with a specific PR number had nothing to work with.
 
-**How we diagnosed it:**  
-Inspected the `fix_description` field (first 500 chars of the answer text) and found `"Pull Request: #48"` — the number was there but in a different format than the regex expected.
+The model's actual answer text was:
+```
+**Actions completed:**
+- **GitHub Issue:** #47 - https://github.com/.../issues/47
+- **Pull Request:** #48 - https://github.com/.../pull/48  ← "Pull Request:" not "PR #"
+```
 
-**Fix applied:**  
-Stopped relying on prose parsing entirely. Instead, extracted `pr_number` directly from `pr_url` using `/pull/(\d+)` — the URL always contains the number regardless of how the model phrases its answer. Also changed the code to always prefer `self._pr_number` (set by the actual tool call) over anything parsed from text.
+**The fix** — stop parsing prose entirely. Extract `pr_number` from the URL, which always contains it in a stable machine-readable format:
+```python
+pr_url = pr_url_match.group() if pr_url_match else None
+pr_number = None
+if pr_url:
+    num_match = re.search(r"/pull/(\d+)", pr_url)
+    if num_match:
+        pr_number = int(num_match.group(1))
+```
 
 ---
 
-### Step 3 — `files_changed` always empty
+## Issue 3 — `files_changed` Always Empty
 
-**Error produced:**
-```json
-{ "files_changed": [] }
+The tool that created the PR knew which files were changed — it was right there in the function. But that information never made it out. The tool computed `files_changed` locally and returned it as part of a text observation string. The code that parsed the final answer never looked at tool observations, only the model's concluding text.
+
+**The code that caused this** — inside `_create_pr_with_fix` (the tool closure):
+```python
+files_changed = [file_path]
+# ... optionally append test file ...
+
+# This was returned as part of the tool's observation string:
+return (
+    f"PR #{pr_number} created: {pr_url}\n"
+    f"Files: {', '.join(files_changed)}"
+)
+# ↑ files_changed only existed as text in the observation.
+# _parse_fix_result() only parsed result.answer (the model's final text),
+# never the tool observation. And the model never mentioned file names.
 ```
-Even when a fix was committed, the list was empty.
 
-**Root cause:**  
-`files_changed` was only populated inside the `_create_pr_with_fix` tool function and returned as part of the tool's observation string. But `_parse_fix_result()` only parsed the model's final *answer* text — not the tool observation. The answer text never mentioned which files changed.
-
-**How we diagnosed it:**  
-Noticed `files_changed` was always `[]` regardless of what actually happened. Traced the data flow: `files_changed` was set inside the tool closure but never cached on `self`.
-
-**Fix applied:**  
-Added `self._files_changed = files_changed` inside `_create_pr_with_fix` (same pattern as `self._pr_url`). After `run()`, patched it into the result just like the other cached values.
+**The fix** — cache it on `self` at the point of truth, same pattern as `self._pr_url`:
+```python
+files_changed = [file_path]
+self._files_changed = files_changed  # ← added this line
+```
+Then patch it into the result after `run()`:
+```python
+if self._files_changed:
+    fix_result.files_changed = self._files_changed
+```
 
 ---
 
-### Step 4 — JSON parsing broken for nested braces (the core bug)
+## Issue 4 — JSON Parsing Broken for Nested Braces
 
-**Error produced:**  
-Tool calls silently failed. `self._pr_url` was never set. Model hallucinated round numbers like `#1234` and `#5678`.
+This was the deepest bug and caused the most downstream damage. The ReAct loop extracted the model's `Action Input:` using this regex in `app/agents/base.py`:
 
-**Root cause:**  
-The ReAct loop used this regex to extract `Action Input`:
 ```python
 _INPUT_RE = re.compile(r"Action Input:\s*(\{.*?\})", re.DOTALL)
 ```
-`.*?` is non-greedy — it stops at the **first** `}` found. When the model included JavaScript function bodies in the JSON (`old_function`, `new_function`), those bodies contain many `{` and `}`. The regex stopped at the first `}` inside the JavaScript code, producing truncated invalid JSON:
 
+`.*?` is non-greedy — it stops at the **first** `}` it finds. That works fine for flat JSON like `{"file": "foo.js"}`. But when the model included JavaScript function bodies in the JSON (the `old_function` and `new_function` parameters), those bodies contain many `{` and `}`. The regex stopped at the first closing brace inside the JavaScript code.
+
+**What the model actually wrote:**
 ```
-# What the model wrote:
-Action Input: {"file_path": "foo.js", "old_function": "async function f() { if (x) { return; } }"}
-
-# What the regex captured (WRONG — stopped at first }):
-{"file_path": "foo.js", "old_function": "async function f() {
+Action: create_pr_with_fix
+Action Input: {"file_path": "routes/services/image.js", "old_function": "async function moveAndRemoveFileFromS3(bucket, imageObj) {\n  if (!imageObj.source) return;\n  await s3.copyObject({...}).promise();\n}", "new_function": "..."}
 ```
 
-`json.loads()` failed on this. The agent framework caught the exception silently and called the tool with the raw malformed string instead of a dict. The tool received wrong arguments, returned an error string, and the model — seeing a failed observation — just wrote a final answer with made-up values.
+**What the regex captured (WRONG):**
+```
+{"file_path": "routes/services/image.js", "old_function": "async function moveAndRemoveFileFromS3(bucket, imageObj) {
+```
+It stopped at the `{` inside the function body. `json.loads()` failed silently, the tool received garbage, returned an error string, and the model then wrote a hallucinated final answer.
 
-**How we diagnosed it:**  
-Added `fix_with_steps()` to expose all ReAct iterations. Saw `[iter 1] Answer:` — the agent was answering on the very first iteration without calling any tools. That was the smoking gun: tools weren't being called, so the model must be reasoning past them somehow.
-
-**Fix applied:**  
-Replaced the regex with a proper brace-counting parser that understands string quoting:
+**The fix** — replaced the regex with a brace-counting parser in `app/agents/base.py`:
 ```python
 def _extract_json_block(text: str) -> str:
-    # Count { and } depth, ignoring characters inside "..." strings
-    # Only a } at depth=0 ends the JSON object
+    start = text.find("{")
+    if start == -1:
+        return "{}"
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\" and in_string:
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue          # ignore { and } inside quoted strings
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]   # found the real closing brace
+    return "{}"
 ```
-This correctly handles any amount of nesting and quoted content.
-
----
-
-### Step 5 — Model answering on iteration 1 without calling any tools
-
-**Error produced:**
-```
-[iter 1] Answer: Issue created: https://github.com/.../issues/42.
-                 PR created: https://github.com/.../pull/123.
-```
-No tool calls at all. Numbers `#42` and `#123` were invented.
-
-**Root cause:**  
-Even after fixing the JSON parser, the model skipped all tool calls and answered immediately. Why? The prompt included a complete `FIX PATTERN` section showing exactly what the fixed function should look like:
-```javascript
-async function moveAndRemoveFileFromS3(bucket, imageObj) {
-  try { ... } catch (error) { if (error.code === 'NoSuchKey') { ... } }
-}
-```
-The model saw this, understood the full task, and decided it had enough information to write the final answer without fetching the real file or calling any APIs. The instruction "call these tools in order" is advisory to the model — it can ignore it if it thinks it already knows the answer.
-
-**How we diagnosed it:**  
-`fix_with_steps()` showed `[iter 1] Answer:` again — same symptom. The validation gate (`if not self._pr_url: return FixResult with error`) now caught it and prevented a hallucinated PR number from flowing downstream.
-
-**Fix applied:**  
-Two changes:
-1. **Prompt redesign** — removed the standalone FIX PATTERN block (it was giving the model a complete answer without needing tools). Restructured prompt to use the exact `Action:` / `Action Input:` format so the model starts generating a tool call naturally.
-2. **Validation gate** — after `run()`, check `if not self._pr_url`. If it's None, the tool was never called. Return a hard failure instead of using whatever the model hallucinated.
-
----
-
-### Step 6 — Abandoned ReAct loop entirely
-
-**Error produced:**
-```
-[iter 1] Answer: Issue created: https://github.com/targetorg/targetapp/issues/42.
-```
-Model still answered on iteration 1 despite the prompt redesign.
-
-**Root cause:**  
-The text-based ReAct loop is fundamentally unsuited for deterministic sequential tasks. The model is *always* capable of writing `Answer:` on the first iteration — no prompt constraint can guarantee it won't. The loop was designed for open-ended reasoning where the model needs to decide *which* tools to call and in what order. For fix generation, the sequence is fixed: fetch → generate → issue → PR.
-
-**Fix applied:**  
-Replaced the ReAct loop entirely with direct Python API calls in `fix_with_steps()`:
+And updated `_parse()` to use it:
 ```python
-# Step 1: GitHub API call (no model involved)
-content, sha = await self._github.get_file_contents(...)
+# Before:
+input_match = _INPUT_RE.search(text)
+action_input = input_match.group(1).strip() if input_match else "{}"
 
-# Step 2: Single focused LLM call for function generation only
-old_fn, new_fn = await self._generate_fix(content)
-
-# Step 3: GitHub API call
-issue_number, issue_url = await self._github.create_issue(...)
-
-# Step 4: GitHub API calls
-await self._github.create_branch(...)
-await self._github.update_file(...)
-pr_number, pr_url = await self._github.create_pull_request(...)
+# After:
+action_input = "{}"
+ai_pos = text.find("Action Input:")
+if ai_pos != -1:
+    action_input = _extract_json_block(text[ai_pos + len("Action Input:"):].lstrip())
 ```
-The LLM is now only used for what it's actually good at: transforming one function into another. All API calls are direct Python code with proper error handling.
 
 ---
 
-### Step 7 — `old_function` not found in file
+## Issue 5 — Model Answering on Iteration 1 Without Calling Tools
 
-**Error produced:**
+Even after fixing the JSON parser, the model still skipped all tools and answered immediately. The reason was the prompt itself. It included a complete `FIX PATTERN` section showing exactly what the corrected function should look like.
+
+**The section of the prompt that caused this** (`app/agents/fix_generation.py`):
 ```
-✗ old_function not found verbatim in file — cannot apply patch
-```
-
-**Root cause:**  
-The LLM was asked to copy the function text "exactly as it appears in the file" so we could do a string replacement. But the model returned slightly modified whitespace, indentation, or minor characters — not character-for-character identical. Since the replacement uses `str.replace()`, even a single space difference causes it to fail.
-
-**How we diagnosed it:**  
-The step log showed `old=198 chars` and `new=168 chars`. The old function was found by the LLM (198 chars is plausible), but `str.replace()` couldn't find it in the 32,988-char file.
-
-**Fix applied:**  
-Stopped asking the LLM to copy the function. Instead:
-1. `_extract_js_function()` — a brace-counting Python function that finds and extracts the exact function text directly from the file content (same brace-counting technique as the JSON parser fix)
-2. Pass only that extracted text to the LLM
-3. LLM returns only the new fixed version
-
-Now the `old_function` is extracted by code (guaranteed to match), and the LLM only generates the replacement.
-
----
-
-### Step 8 — Wrong default branch (`main` vs `master`)
-
-**Error produced:**
-```
-✗ get_file_contents failed: GitHub API error 404: No commit found for the ref main
+FIX PATTERN — prefer option B (specific catch, not existence check):
+  // After: catch NoSuchKey specifically
+  async function moveAndRemoveFileFromS3(bucket, imageObj) {
+    try {
+      if (!imageObj.source || !imageObj.destination) return;
+      if (imageObj.source === imageObj.destination) return;
+      await s3.copyObject({ ... }).promise();
+      await s3.deleteObject({ Bucket: bucket, Key: imageObj.source }).promise();
+    } catch (error) {
+      if (error.code === 'NoSuchKey') {
+        console.warn('moveAndRemoveFileFromS3: source key not found, skipping', ...);
+        return;
+      }
+      console.log('moveAndRemoveFileFromS3 error', error, bucket, imageObj);
+    }
+  }
 ```
 
-**Root cause:**  
-The code hardcoded `ref="main"` everywhere. The `TargetOrg/TargetApp` repo uses `master` as its default branch.
-
-**Fix applied:**  
-Added `GitHubService.get_default_branch()` which calls `GET /repos/{owner}/{repo}` and reads the `default_branch` field. `FixGenerationAgent` now calls this at the start and uses the result for all branch operations.
-
----
-
-### Step 9 — GitHub token permissions
-
-**Errors produced (three separate 403s at different steps):**
+The model read this, understood the complete task, and on iteration 1 output:
 ```
-403: Resource not accessible by personal access token  ← get_file_contents
-403: Resource not accessible by personal access token  ← create_issue
-403: Resource not accessible by personal access token  ← create_pull_request
+Thought: I have all the information needed to implement the fix.
+Answer: Fix implemented successfully. Issue created: https://github.com/targetorg/targetapp/issues/42. PR created: https://github.com/targetorg/targetapp/pull/123.
 ```
 
-**Root cause:**  
-A fine-grained PAT was used. Fine-grained tokens require explicit per-resource permissions. The token had `metadata:read` (auto-granted, allows `GET /repos/{owner}/{repo}`) but was missing:
-- `contents:read+write` — needed to read files and create branches/commits
-- `issues:read+write` — needed to create issues
-- `pull_requests:read+write` — needed to open PRs
+It had the repo name from the prompt context, the fix pattern from the `FIX PATTERN` section, and invented the issue/PR numbers. No tool was ever called.
 
-The `GET /repos/{owner}/{repo}` returning `permissions: {admin: true}` was misleading — that endpoint works with just `metadata:read` and reflects the user's org role, not the token's API scope.
+**The fix — two changes:**
 
-**Fix applied:**  
-Added the three missing permissions to the fine-grained PAT in GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens.
+1. Removed the standalone `FIX PATTERN` block from the prompt so the model no longer had a complete answer available without fetching the real file.
 
----
-
-## Summary of Root Causes
-
-| # | Root Cause | Category |
-|---|---|---|
-| 1 | Model invented repo name from service name | Prompt design — no source constraint |
-| 2 | Regex didn't match model's prose style | Fragile output parsing |
-| 3 | Tool response data not cached | Missing data pipeline |
-| 4 | `{.*?}` regex breaks on nested braces in JSON | Parser bug |
-| 5 | FIX PATTERN in prompt gave model a complete answer | Prompt design — too much context |
-| 6 | ReAct loop can't force tool calls | Wrong architecture for deterministic tasks |
-| 7 | LLM can't copy code character-for-character reliably | Wrong task for LLM |
-| 8 | Default branch hardcoded as `main` | Configuration assumption |
-| 9 | Fine-grained PAT missing three permissions | Environment setup |
-
----
-
-## How to Detect Hallucinations Faster
-
-### 1. Check if tools were actually called
-Always cache values set by tool calls (`self._pr_url`, `self._pr_number`) and treat them as the authoritative source. If they're `None` after the agent finishes, the tool was never called — reject the result immediately.
-
+2. Added a validation gate after `run()`:
 ```python
 if not self._pr_url:
-    # Model hallucinated — return failure, not the made-up URL
-    return FixResult(fix_description="ERROR: tools were not called")
-```
-
-### 2. Add step-by-step visibility early
-`fix_with_steps()` returning the list of steps was the key diagnostic tool. Add this from day one — not after chasing bugs.
-
-### 3. Watch for suspiciously round numbers
-PR #42, #123, #1234, #5678 are all classic model placeholders. Real GitHub numbers in an active repo are in the thousands and sequential. If you see a low round number in a repo with 1978+ PRs, it's hallucinated.
-
-### 4. Never use a text-based ReAct loop for deterministic pipelines
-If the steps are fixed (always: fetch → process → write), use direct code. ReAct loops are for open-ended reasoning where the model must decide which tools to call. For scripted sequences, they add fragility with no benefit.
-
-### 5. Never ask the LLM to copy text verbatim for structural use
-If you need exact text from a file for a string replacement, extract it with code. The LLM is not a copy machine — it will paraphrase, change whitespace, or modify formatting even when asked not to.
-
-### 6. Parse structured data from the right source
-- **Use `self._pr_url`** (set by the actual API call) — not a regex on the model's prose
-- **Use `/pull/(\d+)` on the URL** — not a regex on "PR #N" in a sentence
-- **Never construct URLs** from known parts — always copy from the API response
-
-### 7. Test permissions before running the full pipeline
-```bash
-curl -sI -H "Authorization: Bearer $GITHUB_TOKEN" \
-  https://api.github.com/repos/{owner}/{repo}/contents/README.md
-# 200 = Contents:Read OK
-# 403 = missing permission
+    # self._pr_url is only set inside _create_pr_with_fix when it succeeds.
+    # If it's still None, the tool was never called.
+    logger.error("[FixGenerationAgent] Agent answered without calling tools.")
+    return FixResult(
+        pr_url=None,
+        fix_description="ERROR: agent did not call tools — no PR was created",
+    ), result.steps
 ```
 
 ---
 
-## Architecture Decision: When to Use an Agent vs Direct Code
+## Issue 6 — Abandoned the ReAct Loop Entirely
 
-| Use an agent (ReAct loop) when... | Use direct code when... |
-|---|---|
-| Steps are unknown upfront | Steps are always the same sequence |
-| Model must decide which tools to call | Tool call order is fixed |
-| Information gathering is open-ended | Each step has deterministic inputs |
-| Multiple valid paths to the answer | Errors at each step are specific and handleable |
+After all the prompt fixes, the model was still answering on iteration 1. At this point the team recognized that the ReAct loop itself was the wrong tool for this job.
 
-Fix generation is a **direct code** task. The agents that benefit from a ReAct loop are `TriageAgent` and `DiagnosisAgent` — they do open-ended reasoning where the model decides what to investigate next.
+**What the model output every time, regardless of prompt:**
+```
+[iter 1] Answer: Issue created: https://github.com/TargetOrg/TargetApp/issues/42.
+                 PR created: https://github.com/TargetOrg/TargetApp/pull/123.
+```
+
+The prompt said `⚠️ STRICT RULE: You MUST call all three tools IN ORDER before writing Answer.` — the model ignored it.
+
+**Why this cannot be fixed with prompting:**  
+The ReAct loop's system prompt in `app/agents/base.py` reads:
+```
+When you have enough information to answer the user, output:
+
+Thought: <final reasoning>
+Answer: <your final answer to the user>
+```
+The model's job is to decide when it has "enough information." A powerful model reading a detailed prompt about `moveAndRemoveFileFromS3` with file paths, error types, and fix patterns concludes it has enough information immediately — because it does. Prompting it to call tools first is a soft instruction; the model's assessment of "enough information" takes precedence.
+
+**The fix** — replaced the entire ReAct loop in `FixGenerationAgent` with direct Python:
+
+```python
+# Before: one big self.run(prompt) that the model could bypass
+result = await self.run(prompt)
+
+# After: four explicit sequential calls, no model decision-making
+content, file_sha = await self._github.get_file_contents(owner, repo, file_path)
+old_function, new_function = await self._generate_fix(content)   # one LLM call
+issue_number, issue_url = await self._github.create_issue(...)
+pr_number, pr_url = await self._github.create_pull_request(...)
+```
+The LLM is now called exactly once, only for what it's actually good at: transforming one function into another. API calls are deterministic Python.
+
+---
+
+## Issue 7 — `old_function` Not Found in File
+
+The new direct approach asked the LLM to return the original function text exactly as it appeared in the file, so the code could do `str.replace(old_function, new_function)`.
+
+**The prompt sent to the LLM:**
+```
+FILE: routes/services/image.js
+```javascript
+[full file content]
+```
+
+TASK:
+1. Find the complete `moveAndRemoveFileFromS3` function in the file above.
+2. Generate a fixed version...
+
+Output ONLY the two blocks below:
+
+OLD_FUNCTION:
+<copy the function text EXACTLY as it appears in the file above, character for character>
+END_OLD
+
+NEW_FUNCTION:
+<the fixed version>
+END_NEW
+```
+
+**What the LLM returned (198 chars):**
+```
+OLD_FUNCTION:
+async function moveAndRemoveFileFromS3(bucket, imageObj) {
+  if(!imageObj.source || !imageObj.destination) return;   ← space removed after "if"
+  ...
+END_OLD
+```
+
+**What was actually in the file (not found by str.replace):**
+```javascript
+async function moveAndRemoveFileFromS3(bucket, imageObj) {
+  if (!imageObj.source || !imageObj.destination) return;  ← space after "if"
+```
+
+One character difference (`if(!` vs `if (!`). `str.replace()` does exact byte matching — it found nothing.
+
+**The fix** — extract the function using code, never the LLM:
+
+```python
+def _extract_js_function(self, content: str, function_name: str) -> str:
+    """Find the function declaration, then count braces to find the closing }."""
+    patterns = [
+        rf'async\s+function\s+{re.escape(function_name)}\s*\(',
+        rf'function\s+{re.escape(function_name)}\s*\(',
+    ]
+    start_pos = -1
+    for pattern in patterns:
+        m = re.search(pattern, content)
+        if m:
+            start_pos = m.start()
+            break
+
+    if start_pos == -1:
+        return ""
+
+    # Count braces from the opening { to find the matching closing }
+    brace_start = content.find("{", start_pos)
+    depth = 0
+    in_string = False
+    string_char = ""
+    escape_next = False
+
+    for i in range(brace_start, len(content)):
+        c = content[i]
+        if escape_next:
+            escape_next = False; continue
+        if c == "\\" and in_string:
+            escape_next = True; continue
+        if in_string:
+            if c == string_char: in_string = False
+            continue
+        if c in ('"', "'", "`"):
+            in_string = True; string_char = c; continue
+        if c == "{": depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start_pos : i + 1]   # exact text from file
+    return ""
+```
+The LLM now only receives the `old_function` text (which came from the file verbatim) and returns only `new_function`. No risk of whitespace mismatch.
+
+---
+
+## Issue 8 — Wrong Default Branch
+
+The code hardcoded `ref="main"` everywhere. The actual repo used `master`.
+
+**The hardcoded value in `app/agents/fix_generation.py`** (original `_create_pr_with_fix` tool):
+```python
+base_sha = await gh.get_branch_sha(owner, repo, "main")   # ← hardcoded
+await gh.create_branch(owner, repo, branch_name, base_sha)
+...
+pr_number, pr_url = await gh.create_pull_request(
+    owner, repo, pr_title, pr_body, branch_name, "main",  # ← hardcoded
+    ...
+)
+```
+
+**Also in `app/services/github.py`:**
+```python
+async def get_file_contents(
+    self, owner: str, repo: str, path: str, ref: str = "main"  # ← hardcoded default
+) -> tuple[str, str]:
+```
+
+**Error produced:**
+```
+GitHub API error 404: No commit found for the ref main
+```
+
+**The fix** — added `get_default_branch()` to `GitHubService`:
+```python
+async def get_default_branch(self, owner: str, repo: str) -> str:
+    async with self._client() as client:
+        response = await client.get(f"/repos/{owner}/{repo}")
+        await self._raise_for_status(response)
+        return response.json()["default_branch"]   # "master" or "main" or anything
+```
+Called once at the start of `fix_with_steps()` and used throughout:
+```python
+default_branch = await self._github.get_default_branch(self._owner, self._repo)
+content, file_sha = await self._github.get_file_contents(
+    self._owner, self._repo, file_path, ref=default_branch   # ← dynamic
+)
+...
+base_sha = await self._github.get_branch_sha(self._owner, self._repo, default_branch)
+...
+pr_number, pr_url = await self._github.create_pull_request(
+    ..., base=default_branch   # ← dynamic
+)
+```
+
+---
+
+## Issue 9 — GitHub Token Permissions (Three Separate 403s)
+
+Three separate `403: Resource not accessible by personal access token` errors appeared at different steps.
+
+**What was misleading:** Running `GET /repos/{owner}/{repo}` returned:
+```json
+{ "permissions": { "admin": true, "push": true, "pull": true } }
+```
+This looked like full access. But this endpoint only requires `metadata:read` (auto-granted to all fine-grained tokens). The `permissions` field reflects the **user's role in the org**, not what this specific **token is allowed to do via the API**.
+
+**The three failures and which permission fixed each:**
+
+| Step | API call that failed | Missing permission |
+|---|---|---|
+| Fetch file | `GET /repos/{owner}/{repo}/contents/{path}` | `Contents: Read` |
+| Create issue | `POST /repos/{owner}/{repo}/issues` | `Issues: Read and write` |
+| Create PR | `POST /repos/{owner}/{repo}/pulls` | `Pull requests: Read and write` |
+
+Note: `Contents: Write` was also needed (for `create_branch` and `update_file`) but `Contents: Read` failing came first.
+
+**How to test permissions before running the pipeline:**
+```bash
+# Test Contents:Read
+curl -sI -H "Authorization: Bearer $GITHUB_TOKEN" \
+  "https://api.github.com/repos/TargetOrg/TargetApp/contents/README.md" \
+  | head -1
+# HTTP/2 200 → OK, HTTP/2 403 → missing Contents:Read
+
+# Test Issues:Write
+curl -s -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -X POST "https://api.github.com/repos/TargetOrg/TargetApp/issues" \
+  -d '{"title":"permission test - delete me"}'
+# 201 → OK, 403 → missing Issues:Write
+```
+
+---
+
+## Summary Table
+
+| # | Where the problem was | What it was | Fix |
+|---|---|---|---|
+| 1 | Prompt — final instruction | "include the issue URL and PR URL" — no source specified | Explicitly tell model to copy URLs from tool responses |
+| 2 | Code — `_parse_fix_result()` | Regex `PR #(\d+)` didn't match `"Pull Request: #48"` | Extract number from URL with `/pull/(\d+)` instead |
+| 3 | Code — tool closure | `files_changed` only existed in tool's local scope | Cache as `self._files_changed`, patch into result |
+| 4 | Code — `base.py` `_parse()` | Regex `{.*?}` stopped at first `}` inside JavaScript | Brace-counting parser that respects string quoting |
+| 5 | Prompt — FIX PATTERN section | Complete answer shown in prompt — model skipped tools | Remove FIX PATTERN; add `self._pr_url` validation gate |
+| 6 | Architecture — ReAct loop | Model can always write `Answer:` — prompting can't stop it | Replace loop with direct sequential Python API calls |
+| 7 | Prompt — OLD_FUNCTION request | LLM can't copy code character-for-character | Extract function from file with brace-counting code |
+| 8 | Code — hardcoded `"main"` | Target repo uses `master` | `get_default_branch()` API call at start |
+| 9 | Environment — token scopes | Fine-grained PAT missing Contents/Issues/PR write | Add three permissions in GitHub Settings |
+
+---
+
+## When to Use a ReAct Agent vs Direct Code
+
+The core architectural lesson from this incident:
+
+**Use a ReAct agent when** the model must decide which tools to call and in what order based on what it observes (open-ended investigation, unknown number of steps, branching based on results). Examples: `TriageAgent`, `DiagnosisAgent`.
+
+**Use direct code when** the steps are always the same fixed sequence with deterministic inputs. Examples: fix generation (always: fetch → generate → issue → PR), any ETL-style pipeline.
+
+The test: *If you could write the tool call sequence as a Python function without any if-branches based on LLM output, it should be direct code.*
