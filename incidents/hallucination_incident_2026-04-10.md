@@ -458,3 +458,103 @@ The core architectural lesson from this incident:
 **Use direct code when** the steps are always the same fixed sequence with deterministic inputs. Examples: fix generation (always: fetch → generate → issue → PR), any ETL-style pipeline.
 
 The test: *If you could write the tool call sequence as a Python function without any if-branches based on LLM output, it should be direct code.*
+
+---
+
+## Plain English Summary
+
+**Issue 1 — Wrong Repo URL**
+
+The model was asked to create a GitHub issue and PR, and to include the URLs in its answer. But the prompt never said where to get those URLs from. So the model did what LLMs do when they lack information — it made something up that sounded plausible.
+
+It knew the service was called target-app, so it constructed github.com/targetorg/targetapp. The real repo was TargetOrg/TargetApp — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
+
+The fix was simple: explicitly tell the model in the prompt to copy URLs from tool responses, never construct them.
+
+---
+
+**Issue 2 — pr_number Always Null**
+
+Even when the model did write a PR number in its answer, the code couldn't extract it. The regex looked for `PR #48` but the model wrote `Pull Request: #48`. Those mean the same thing to a human, but the regex saw no match and returned nothing.
+
+This is the fundamental problem with parsing prose — the model's phrasing is non-deterministic. It might write "PR #48" one run and "Pull Request #48" the next. You can't write a regex that covers every variation.
+
+The fix was to stop parsing prose entirely and extract the number from the URL instead, using `/pull/(\d+)`. The URL format is stable and machine-readable, unlike the model's narrative.
+
+---
+
+**Issue 3 — files_changed Always Empty**
+
+The tool that created the PR knew which files were changed — it was right there in the function. But that information never made it out. The tool computed `files_changed` locally and returned it as part of a text observation string. The code that parsed the final answer never looked at tool observations, only the model's concluding text. And the model never mentioned which files changed in its answer.
+
+The data existed but was stranded inside the tool function with no path to the output.
+
+The fix was the same pattern used for `pr_url`: assign it to `self._files_changed` inside the tool, then patch it into the result after `run()` finishes. Cache it at the point of truth, not at the point of narration.
+
+---
+
+**Issue 4 — JSON Parsing Broken for Nested Braces**
+
+This was the deepest bug and caused the most downstream damage. The ReAct loop extracted the model's `Action Input:` using a non-greedy regex that stops at the first `}` it finds. That works fine for flat JSON like `{"file": "foo.js"}`. But when the model included JavaScript function bodies in the JSON — which themselves contain `{` and `}` — the regex stopped at the first closing brace inside the function body, producing truncated invalid JSON.
+
+`json.loads()` failed on the broken string. The framework caught the exception silently and passed the raw malformed string to the tool. The tool got garbage input, returned an error, and the model — seeing a failed observation — just skipped ahead and wrote a final answer with invented values.
+
+The fix was a brace-counting parser that tracks depth and respects quoted strings, so it only stops at a `}` that actually closes the top-level object.
+
+---
+
+**Issue 5 — Model Answering on Iteration 1 Without Calling Tools**
+
+Even after fixing the JSON parser, the model still skipped all tools and answered immediately. The reason was the prompt itself. It included a complete FIX PATTERN section showing exactly what the corrected function should look like.
+
+The model read the prompt, saw the full picture — broken function, fixed function, repo name, file path — and concluded it had everything it needed to write the final answer. From its perspective, why call any APIs? It already knew the answer.
+
+This is a fundamental property of LLMs: they complete the most natural continuation of the text. If the prompt already contains the answer, the model will produce the answer. "Call these tools in order" is advisory — the model can and will ignore it.
+
+The fix was two things: remove the FIX PATTERN from the prompt (so the model no longer has a complete answer available), and add a validation gate that rejects the result if `self._pr_url` is still None after the agent finishes.
+
+---
+
+**Issue 6 — Abandoned the ReAct Loop Entirely**
+
+After all the prompt fixes, the model was still answering on iteration 1. At this point the team recognized that the ReAct loop itself was the wrong tool for this job.
+
+ReAct loops work by letting the model decide which tools to call and in what order, based on what it observes. That's useful for open-ended tasks where the path isn't known upfront. But fix generation has a completely fixed sequence: fetch file → generate fix → create issue → create PR. There's no decision-making needed, no branching, no exploration.
+
+Using a ReAct loop for a scripted sequence just adds a massive failure mode: the model can always jump to `Answer:`. You can't prevent it with prompting because the model's compliance is probabilistic, not guaranteed.
+
+The fix was to replace the entire loop with direct Python function calls. The LLM is invoked exactly once, only for the thing it's actually good at: rewriting a function. Everything else — API calls, error handling, data routing — is just Python.
+
+---
+
+**Issue 7 — old_function Not Found in File**
+
+Once the architecture was fixed, a new problem appeared. The new approach asked the LLM to return the original function text exactly as it appeared in the file, so the code could do a simple `str.replace()` to swap in the fixed version.
+
+The model returned something close to the original — but not character-for-character identical. Maybe a trailing space, a slightly different indent, a subtle character change. `str.replace()` does exact matching, so even one character difference means no match and the patch fails silently.
+
+This is asking the LLM to be a copy machine, which it isn't. Even when explicitly instructed to copy text verbatim, it paraphrases, adjusts formatting, or makes minor edits. That's the nature of how language models generate tokens.
+
+The fix was to extract the function from the file using code — a brace-counting Python function that finds the exact text — and pass only that extracted text to the LLM. The LLM never touches the "old" text; it only generates the "new" text. Since the old text came from the file directly, `str.replace()` is guaranteed to find it.
+
+---
+
+**Issue 8 — Wrong Default Branch**
+
+A straightforward configuration assumption. The code had `ref="main"` hardcoded everywhere. The actual repo used `master`. So every GitHub API call that referenced a branch got a 404.
+
+What made this tricky to notice is that `GET /repos/{owner}/{repo}` succeeded fine — that endpoint doesn't require a branch name. The failure only appeared when trying to fetch a file or create a branch.
+
+The fix was to add a `get_default_branch()` call at the start of the agent that hits the GitHub API and reads the `default_branch` field from the response, then use that value throughout instead of assuming.
+
+---
+
+**Issue 9 — GitHub Token Permissions**
+
+Three separate 403 errors at three different steps, each for a different API operation: reading file contents, creating an issue, and opening a PR.
+
+The confusing part was that the token appeared to have full access — `GET /repos/{owner}/{repo}` returned `permissions: {admin: true}`. But that endpoint only requires `metadata:read`, which is auto-granted to all fine-grained tokens, and the permissions field reflects the user's role in the org, not what the token is allowed to do via the API.
+
+Fine-grained PATs require you to explicitly grant each permission. The token was missing `contents:read+write`, `issues:read+write`, and `pull_requests:read+write`. Each one blocked a different step.
+
+The fix was to add the three missing permissions in GitHub settings. The broader lesson is to test token permissions against each API endpoint you actually need before running the full pipeline, not after hitting 403s in production.
