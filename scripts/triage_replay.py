@@ -1,12 +1,14 @@
 """
 One-shot replay: fetch today's most recent NoSuchKey event from CloudWatch,
 build an ErrorEvent, and run it through the full pipeline:
-  TriageAgent → DiagnosisAgent
+  TriageAgent → DiagnosisAgent → FixGenerationAgent → CodeReviewAgent
 
 Usage:
-    python scripts/triage_replay.py
+    python scripts/triage_replay.py [--no-fix]
 
-Output: triage + diagnosis printed to stdout + sent to Slack.
+  --no-fix   Stop after diagnosis (skip fix generation and PR creation)
+
+Output: full pipeline result printed to stdout + sent to Slack.
 """
 import asyncio
 import json
@@ -18,6 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.agents.triage import TriageAgent
 from app.agents.diagnosis import DiagnosisAgent, CONFIDENCE_THRESHOLD
+from app.agents.fix_generation import FixGenerationAgent
+from app.agents.code_review import CodeReviewAgent
+from app.core.config import settings
 from app.models.events import ErrorEvent, EventSource, IncidentState, IncidentStatus, Severity
 from app.services.aws import AWSService, AWSError
 
@@ -51,6 +56,9 @@ def build_event(match: dict) -> ErrorEvent:
             "task_id": task_id,
         },
     )
+
+
+NO_FIX = "--no-fix" in sys.argv
 
 
 async def main() -> None:
@@ -140,6 +148,62 @@ async def main() -> None:
                      else f"FIXING (confidence {diagnosis.confidence:.0%} ≥ {CONFIDENCE_THRESHOLD:.0%})",
     }, indent=2))
     print("=" * 60)
+
+    if diagnosis.escalate:
+        print("\nStopping — confidence too low for automated fix. Human review required.")
+        return
+
+    if NO_FIX:
+        print("\n--no-fix flag set — skipping fix generation.")
+        return
+
+    # ── Step 3: Fix Generation ───────────────────────────────────────
+    print(f"\nStep 3 — FixGenerationAgent (Sonnet) — creating Issue + PR...")
+    incident.status = IncidentStatus.FIXING
+    incident.diagnosis = diagnosis.root_cause
+    incident.confidence = diagnosis.confidence
+    incident.reproduction_confirmed = diagnosis.reproduction_confirmed
+
+    fix_agent = FixGenerationAgent()
+    fix = await fix_agent.fix(incident)
+
+    print("\n" + "=" * 60)
+    print("FIX RESULT")
+    print("=" * 60)
+    print(json.dumps({
+        "issue_url": fix.issue_url,
+        "pr_url": fix.pr_url,
+        "pr_number": fix.pr_number,
+        "branch": fix.branch,
+        "files_changed": fix.files_changed,
+        "test_added": fix.test_added,
+        "fix_description": fix.fix_description[:200],
+    }, indent=2))
+    print("=" * 60)
+
+    if not fix.pr_number:
+        print("\nFix generation did not produce a PR. Check logs above.")
+        return
+
+    # ── Step 4: Code Review ──────────────────────────────────────────
+    print(f"\nStep 4 — CodeReviewAgent — reviewing PR #{fix.pr_number}...")
+    owner, repo = settings.fix_target_repo.split("/", 1)
+    review_agent = CodeReviewAgent()
+    review_result = await review_agent.run(
+        f'{{"owner": "{owner}", "repo": "{repo}", '
+        f'"pr_number": {fix.pr_number}, "post_to_github": true}}'
+    )
+
+    print("\n" + "=" * 60)
+    print("CODE REVIEW")
+    print("=" * 60)
+    print(review_result.answer[:2000])
+    print("=" * 60)
+
+    print(f"\nPipeline complete.")
+    print(f"  Issue : {fix.issue_url}")
+    print(f"  PR    : {fix.pr_url}")
+    print(f"\nReview posted to GitHub. Approve or reject the PR manually.")
 
 
 if __name__ == "__main__":

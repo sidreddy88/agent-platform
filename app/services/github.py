@@ -1,3 +1,4 @@
+import base64
 import gzip
 import re
 from dataclasses import dataclass
@@ -275,6 +276,116 @@ class GitHubService:
                     parts.append(f"(Could not fetch logs: {exc})")
 
         return "\n".join(parts) if parts else "No logs available."
+
+    # ------------------------------------------------------------------
+    # Fix generation — file read/write, issues, PRs
+    # ------------------------------------------------------------------
+
+    async def get_file_contents(
+        self, owner: str, repo: str, path: str, ref: str = "main"
+    ) -> tuple[str, str]:
+        """Return (decoded_content, sha) for a file at a given ref."""
+        async with self._client() as client:
+            response = await client.get(
+                f"/repos/{owner}/{repo}/contents/{path}",
+                params={"ref": ref},
+            )
+            await self._raise_for_status(response)
+            data = response.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data["sha"]
+
+    async def get_branch_sha(
+        self, owner: str, repo: str, branch: str = "main"
+    ) -> str:
+        """Return the HEAD commit SHA of a branch."""
+        async with self._client() as client:
+            response = await client.get(
+                f"/repos/{owner}/{repo}/git/ref/heads/{branch}"
+            )
+            await self._raise_for_status(response)
+            return response.json()["object"]["sha"]
+
+    async def create_branch(
+        self, owner: str, repo: str, branch_name: str, from_sha: str
+    ) -> None:
+        """Create a new branch from a commit SHA."""
+        async with self._client() as client:
+            response = await client.post(
+                f"/repos/{owner}/{repo}/git/refs",
+                json={"ref": f"refs/heads/{branch_name}", "sha": from_sha},
+            )
+            await self._raise_for_status(response)
+
+    async def update_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        content: str,
+        message: str,
+        branch: str,
+        sha: str,
+    ) -> str:
+        """Commit a file update on a branch. Returns the new commit SHA."""
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        async with self._client() as client:
+            response = await client.put(
+                f"/repos/{owner}/{repo}/contents/{path}",
+                json={"message": message, "content": encoded, "branch": branch, "sha": sha},
+            )
+            await self._raise_for_status(response)
+            return response.json()["commit"]["sha"]
+
+    async def create_issue(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+    ) -> tuple[int, str]:
+        """Create a GitHub issue. Returns (issue_number, html_url)."""
+        payload: dict = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = labels
+        async with self._client() as client:
+            response = await client.post(f"/repos/{owner}/{repo}/issues", json=payload)
+            await self._raise_for_status(response)
+            data = response.json()
+        return data["number"], data["html_url"]
+
+    async def create_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+        labels: list[str] | None = None,
+    ) -> tuple[int, str]:
+        """Create a pull request. Returns (pr_number, html_url)."""
+        async with self._client() as client:
+            response = await client.post(
+                f"/repos/{owner}/{repo}/pulls",
+                json={"title": title, "body": body, "head": head, "base": base},
+            )
+            await self._raise_for_status(response)
+            data = response.json()
+        pr_number, pr_url = data["number"], data["html_url"]
+
+        if labels:
+            try:
+                async with self._client() as client:
+                    await client.post(
+                        f"/repos/{owner}/{repo}/issues/{pr_number}/labels",
+                        json={"labels": labels},
+                    )
+            except Exception:
+                pass   # labels are non-critical
+
+        return pr_number, pr_url
 
     async def post_pr_review(
         self,
