@@ -31,6 +31,7 @@ CPU_WARN_PCT = 80.0
 CPU_CRIT_PCT = 95.0
 ERROR_RATE_WARN = 10       # errors per minute
 CAPACITY_RATIO_WARN = 0.8  # running/desired below this → degraded
+ELB_5XX_WARN = 10          # 5xx errors in last 5 min
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,26 @@ def _fmt_logs(summary) -> str:
         lines.append("\n  Recent errors:")
         for e in summary.recent_errors[-5:]:
             lines.append(f"    {e[:200]}")
+    return "\n".join(lines)
+
+
+def _fmt_alb(status) -> str:
+    if not status.healthy:
+        icon = "✗"
+    elif status.unhealthy_targets > 0:
+        icon = "⚠"
+    else:
+        icon = "✓"
+    lines = [
+        f"ALB: {status.name}  [{icon} {status.state}]",
+        f"  DNS             : {status.dns_name}",
+        f"  Targets         : {status.healthy_targets} healthy / {status.unhealthy_targets} unhealthy / {status.total_targets} total",
+    ]
+    if status.request_count is not None:
+        lines.append(f"  Requests (5min) : {status.request_count}")
+    if status.http_5xx is not None:
+        warn = "  ⚠ HIGH 5XX" if status.http_5xx >= ELB_5XX_WARN else ""
+        lines.append(f"  5xx errors (5min): {status.http_5xx}{warn}")
     return "\n".join(lines)
 
 
@@ -238,6 +259,26 @@ async def check_health(
                         f"ERROR_SPIKE: {r['log_group']} {cached.error_count} errors in {cached.minutes}min"
                     )
 
+        elif rtype == "alb":
+            alb_name = r.get("name", "")
+            try:
+                status = aws.get_alb_status(alb_name)
+                sections.append(_fmt_alb(status))
+                if status.unhealthy_targets > 0:
+                    issues.append(
+                        f"UNHEALTHY_HOSTS: {alb_name} — {status.unhealthy_targets} unhealthy "
+                        f"target(s) ({status.healthy_targets}/{status.total_targets} healthy)"
+                    )
+                if status.healthy_targets == 0:
+                    issues.append(f"NO_HEALTHY_HOSTS: {alb_name} — all targets are unhealthy")
+                if status.state != "active":
+                    issues.append(f"ALB_IMPAIRED: {alb_name} state={status.state}")
+                if status.http_5xx and status.http_5xx >= ELB_5XX_WARN:
+                    issues.append(f"HIGH_5XX_RATE: {alb_name} {status.http_5xx} 5xx errors in last 5min")
+            except AWSError as exc:
+                sections.append(f"ALB {alb_name}: could not fetch — {exc}")
+                issues.append(f"ALB_FETCH_ERROR: {alb_name} — {exc}")
+
     raw_data = "\n\n".join(sections)
     issues_str = "\n".join(f"  - {i}" for i in issues) if issues else "  None detected"
 
@@ -332,6 +373,13 @@ class DeploymentAgent(BaseAgent):
         ) -> str:
             return await get_metrics(namespace, metric_name, dimensions, aws, minutes)
 
+        async def _get_alb_status(name: str) -> str:
+            try:
+                status = aws.get_alb_status(name)
+            except AWSError as exc:
+                return f"AWS error: {exc}"
+            return _fmt_alb(status)
+
         async def _check_health(resources: list) -> str:
             return await check_health(resources, aws, llm)
 
@@ -371,13 +419,23 @@ class DeploymentAgent(BaseAgent):
             ),
         )
         self.register_tool(
+            "get_alb_status",
+            _get_alb_status,
+            (
+                "Get Application Load Balancer health: state (active/impaired), "
+                "healthy vs unhealthy target counts, request count, and 5xx error count (last 5 min). "
+                "Input: {name: string (ALB name)}"
+            ),
+        )
+        self.register_tool(
             "check_health",
             _check_health,
             (
                 "Run a full health sweep across a list of resources (ECS services, EC2 instances, "
-                "CloudWatch log groups) and produce a structured health report. "
+                "ALBs, CloudWatch log groups) and produce a structured health report. "
                 "Use this when asked for an overall health summary. "
-                "Input: {resources: [{type: 'ecs'|'ec2'|'logs', ...resource-specific fields}]}"
+                "Input: {resources: [{type: 'ecs'|'ec2'|'alb'|'logs', ...resource-specific fields}]}"
+                " For ALB: {type: 'alb', name: 'my-alb-name'}"
             ),
         )
 

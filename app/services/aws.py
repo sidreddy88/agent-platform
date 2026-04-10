@@ -369,7 +369,7 @@ class AWSService:
         request_count = _cw_sum("RequestCount")
         http_5xx = _cw_sum("HTTPCode_Target_5XX_Count")
 
-        is_healthy = state == "active" and unhealthy == 0
+        is_healthy = state == "active" and healthy > 0
         return ALBStatus(
             name=alb_name,
             dns_name=dns_name,
