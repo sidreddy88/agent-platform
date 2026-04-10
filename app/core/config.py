@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     # GitHub webhook secret (optional — leave blank to skip signature verification)
     github_webhook_secret: str = ""
 
+    # Base URL for human approval links in Slack messages
+    approval_base_url: str = "http://localhost:8000"
+
+    # Target repo for AI-generated fix PRs (owner/repo)
+    fix_target_repo: str = "VoyageGroupMag/AllInterviews"
+
     # Detection poll interval in seconds
     detection_poll_interval_seconds: int = 60
 
