@@ -284,91 +284,90 @@ DIAGNOSIS (confidence {incident.confidence:.0%}):
   affected_function : moveAndRemoveFileFromS3
   affected_file     : routes/services/image.js (verify with get_file_contents)
 
-STEPS — follow exactly:
+⚠️  STRICT RULE: You MUST call all three tools IN ORDER before writing Answer.
+Do NOT write "Answer:" until you have received Observations from all three tools.
+Do NOT guess, construct, or invent issue numbers, PR numbers, or URLs.
+All issue/PR URLs must be copied verbatim from tool Observation text.
 
-1. Call get_file_contents with path="routes/services/image.js"
-   Read the exact current moveAndRemoveFileFromS3 function.
+MANDATORY TOOL SEQUENCE — call these in order:
 
-2. Call create_github_issue with:
-   title: "[{event.severity}] moveAndRemoveFileFromS3 throws NoSuchKey on missing S3 keys"
-   body (markdown):
-     ## Summary
-     - **Error:** `NoSuchKey` in `moveAndRemoveFileFromS3`
-     - **Occurrences:** {incident.occurrences_24h} in last 24 hours
-     - **Root cause:** {incident.diagnosis}
-     - **Affected file:** `routes/services/image.js`
-     - **Agent confidence:** {incident.confidence:.0%}
-     - **Detected:** {today}
+Step 1 → Call get_file_contents
+  Action: get_file_contents
+  Action Input: {{"path": "routes/services/image.js"}}
 
-     ## Evidence
-     {chr(10).join(f'- {e}' for e in (incident.error_event.metadata.get('evidence', [])))}
+  Wait for the Observation, then extract the EXACT current moveAndRemoveFileFromS3
+  function body to use as old_function in Step 3.
 
-     ## Fix approach
-     Wrap the S3 copy/delete in a try/catch — catch `NoSuchKey` specifically,
-     log a warning and return early. Re-throw anything else.
-   labels: ["bug", "ai-detected", "{str(event.severity).split('.')[-1].lower() if event.severity else 'p2'}"]
-
-3. Call create_pr_with_fix with:
-   file_path: "routes/services/image.js"
-   old_function: <exact current function from step 1>
-   new_function: <fixed version — catch NoSuchKey, log warn, return early>
-   branch_name: "{branch_name}"
-   pr_title: "fix: handle NoSuchKey gracefully in moveAndRemoveFileFromS3"
-   pr_body (markdown):
-     ## Summary
-     - Wraps S3 copy/delete in try/catch
-     - Catches `NoSuchKey` specifically, logs warning and returns early
-     - Re-throws all other errors so they surface normally
-     - Adds Jest unit test for missing key scenario
-
-     Fixes #{{issue_number}}
-
-     ## Change scope
-     - 1 file, ~10 lines
-     - **Agent confidence:** {incident.confidence:.0%}
-     - **Incident ID:** {incident.id}
-   test_file_path: "routes/services/__tests__/image.test.js"
-   test_content: <Jest test for NoSuchKey handling>
-
-SCOPE LIMITS — ONLY apply these types of changes:
-  ✅ Add try/catch or specific error handling around the S3 operations
-  ✅ Add a guard check before the operation
-  ✅ Add a warning log on graceful skip
-  ❌ Refactor logic or rename variables
-  ❌ Change the function signature
-  ❌ Touch any other function
-
-FIX PATTERN — prefer option B (specific catch, not existence check):
-  // After: catch NoSuchKey specifically
-  async function moveAndRemoveFileFromS3(bucket, imageObj) {{
-    try {{
-      if (!imageObj.source || !imageObj.destination) return;
-      if (imageObj.source === imageObj.destination) return;
-      await s3.copyObject({{ ... }}).promise();
-      await s3.deleteObject({{ Bucket: bucket, Key: imageObj.source }}).promise();
-    }} catch (error) {{
-      if (error.code === 'NoSuchKey') {{
-        console.warn('moveAndRemoveFileFromS3: source key not found, skipping', {{ bucket, source: imageObj.source }});
-        return;
-      }}
-      console.log('moveAndRemoveFileFromS3 error', error, bucket, imageObj);
-    }}
+Step 2 → Call create_github_issue
+  Action: create_github_issue
+  Action Input: {{
+    "title": "[{event.severity}] moveAndRemoveFileFromS3 throws NoSuchKey on missing S3 keys",
+    "body": "## Summary\\n- **Error:** `NoSuchKey` in `moveAndRemoveFileFromS3`\\n- **Occurrences:** {incident.occurrences_24h} in last 24 hours\\n- **Root cause:** {incident.diagnosis}\\n- **Affected file:** `routes/services/image.js`\\n- **Agent confidence:** {incident.confidence:.0%}\\n- **Detected:** {today}\\n\\n## Fix approach\\nWrap the S3 copy/delete in a try/catch — catch `NoSuchKey` specifically, log a warning and return early.",
+    "labels": ["bug", "ai-detected", "{str(event.severity).split('.')[-1].lower() if event.severity else 'p2'}"]
   }}
 
-Answer with a concise summary. In your answer, include the EXACT issue URL and PR URL
-returned by the tools — do not construct or guess URLs. Copy them verbatim from the
-tool responses (they look like https://github.com/VoyageGroupMag/AllInterviews/issues/N
-and https://github.com/VoyageGroupMag/AllInterviews/pull/N)."""
+  The Observation will contain "Issue #N created: <url>". Record that issue number.
+
+Step 3 → Call create_pr_with_fix
+  Use the EXACT function text from Step 1 Observation as old_function.
+  Use the fixed version (with try/catch NoSuchKey) as new_function.
+  Use the issue number from Step 2 in the pr_body.
+
+  Fix pattern for new_function (adapt to match the EXACT current code from Step 1):
+    async function moveAndRemoveFileFromS3(bucket, imageObj) {{
+      try {{
+        if (!imageObj.source || !imageObj.destination) return;
+        if (imageObj.source === imageObj.destination) return;
+        await s3.copyObject({{ ... }}).promise();
+        await s3.deleteObject({{ Bucket: bucket, Key: imageObj.source }}).promise();
+      }} catch (error) {{
+        if (error.code === 'NoSuchKey') {{
+          console.warn('moveAndRemoveFileFromS3: source key not found, skipping', {{ bucket, source: imageObj.source }});
+          return;
+        }}
+        console.log('moveAndRemoveFileFromS3 error', error, bucket, imageObj);
+      }}
+    }}
+
+  Action: create_pr_with_fix
+  Action Input: {{
+    "file_path": "routes/services/image.js",
+    "old_function": "<exact text copied from Step 1 Observation>",
+    "new_function": "<fixed version with try/catch>",
+    "branch_name": "{branch_name}",
+    "pr_title": "fix: handle NoSuchKey gracefully in moveAndRemoveFileFromS3",
+    "pr_body": "## Summary\\n- Wraps S3 copy/delete in try/catch\\n- Catches `NoSuchKey`, logs warning, returns early\\n- Re-throws all other errors\\n\\nFixes #<issue number from Step 2>\\n\\n**Incident ID:** {incident.id}",
+    "test_file_path": "routes/services/__tests__/image.test.js",
+    "test_content": "<Jest test covering NoSuchKey scenario>"
+  }}
+
+Only after receiving the Observation from Step 3, write:
+  Answer: Issue created: <url from Step 2>. PR created: <url from Step 3>."""
 
         result = await self.run(prompt)
+
+        # If the tool was never called, self._pr_url will still be None.
+        # Treat that as a hard failure — never use a hallucinated PR URL.
+        if not self._pr_url:
+            logger.error(
+                "[FixGenerationAgent] Agent answered without calling create_pr_with_fix. "
+                "Iterations: %d. Answer: %s",
+                result.iterations, result.answer[:200],
+            )
+            empty = FixResult(
+                issue_url=self._issue_url_from_issue_number(),
+                pr_url=None,
+                pr_number=None,
+                branch=branch_name,
+                fix_description="ERROR: agent did not call tools — no PR was created",
+            )
+            return empty, result.steps
 
         fix_result = _parse_fix_result(result.answer, branch_name)
 
         # Always prefer cached tool-call values over regex-parsed prose
-        if self._pr_url:
-            fix_result.pr_url = self._pr_url
-        if self._pr_number:
-            fix_result.pr_number = self._pr_number
+        fix_result.pr_url = self._pr_url
+        fix_result.pr_number = self._pr_number
         # Extract pr_number from URL if still missing
         if fix_result.pr_url and not fix_result.pr_number:
             m = re.search(r"/pull/(\d+)", fix_result.pr_url)
@@ -378,6 +377,12 @@ and https://github.com/VoyageGroupMag/AllInterviews/pull/N)."""
             fix_result.files_changed = self._files_changed
 
         return fix_result, result.steps
+
+    def _issue_url_from_issue_number(self) -> str | None:
+        if self._issue_number:
+            owner, repo = settings.fix_target_repo.split("/", 1)
+            return f"https://github.com/{owner}/{repo}/issues/{self._issue_number}"
+        return None
 
     async def fix(self, incident: IncidentState) -> FixResult:
         """Generate a fix for a diagnosed incident and open a GitHub PR."""
