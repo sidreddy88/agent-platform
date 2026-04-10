@@ -230,17 +230,11 @@ async def _run_fix_and_review(incident: IncidentState) -> None:
     fix_agent = FixGenerationAgent()
     fix, agent_steps = await fix_agent.fix_with_steps(incident)
 
-    # Print every ReAct step so we can see exactly what the tools returned
     print("\n" + "=" * 60)
-    print("FIX AGENT — REACT STEPS")
+    print("FIX AGENT — STEPS")
     print("=" * 60)
     for step in agent_steps:
-        if step.action:
-            print(f"\n[iter {step.iteration}] Action: {step.action}")
-            print(f"  Input : {step.action_input[:300]}")
-            print(f"  Obs   : {step.observation[:600]}")
-        elif step.answer:
-            print(f"\n[iter {step.iteration}] Answer: {step.answer[:400]}")
+        print(f"  {step}")
     print("=" * 60)
 
     print("\n" + "=" * 60)
