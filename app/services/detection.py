@@ -11,6 +11,7 @@ Pillars:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import List
 
@@ -303,6 +304,77 @@ class DetectionService:
         return events
 
     # ------------------------------------------------------------------ #
+    # Pillar 5 — CloudWatch log filter patterns (application-level errors)
+    # ------------------------------------------------------------------ #
+    async def _detect_cloudwatch_log_filters(self) -> List[ErrorEvent]:
+        """Emit ErrorEvents for application errors matched by custom CloudWatch filter patterns.
+
+        Configured via CW_LOG_FILTERS env var (JSON array):
+          [{"log_group": "/ecs/target-app", "pattern": "NoSuchKey",
+            "error_type": "S3_NO_SUCH_KEY", "service": "target-app"}]
+
+        severity is intentionally left null — TriageAgent sets it.
+        """
+        events: List[ErrorEvent] = []
+        raw: str = getattr(settings, "cw_log_filters", "")
+        if not raw:
+            return events
+
+        try:
+            filters = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("CW_LOG_FILTERS is not valid JSON — skipping pillar")
+            return events
+
+        window_minutes = max(self._poll_interval // 60, 1)
+
+        for f in filters:
+            log_group = f.get("log_group", "")
+            pattern = f.get("pattern", "")
+            if not log_group or not pattern:
+                continue
+
+            error_type = f.get("error_type", pattern.upper().replace(" ", "_"))
+            service = f.get("service", log_group)
+
+            try:
+                matches = self._aws.search_log_events(
+                    log_group=log_group,
+                    filter_pattern=pattern,
+                    minutes=window_minutes,
+                    limit=10,
+                )
+                if not matches:
+                    continue
+
+                latest = matches[0]
+                # ECS log stream names end with the task ID (prefix/container/task-id)
+                stream_parts = latest["stream"].rsplit("/", 1)
+                task_id = stream_parts[-1] if len(stream_parts) > 1 else latest["stream"]
+
+                events.append(ErrorEvent(
+                    source=EventSource.CLOUDWATCH,
+                    severity=None,          # TriageAgent sets this
+                    error_type=error_type,
+                    task_id=task_id,
+                    title=f"{error_type}: {service}",
+                    description=latest["message"][:300],
+                    service=service,
+                    resource_id=log_group,
+                    metadata={
+                        "log_group": log_group,
+                        "pattern": pattern,
+                        "match_count": len(matches),
+                        "latest_timestamp": latest["timestamp"],
+                        "task_id": task_id,
+                    },
+                ))
+            except Exception as exc:
+                logger.warning("CW log filter check failed [%s / %s]: %s", log_group, pattern, exc)
+
+        return events
+
+    # ------------------------------------------------------------------ #
     # Orchestration
     # ------------------------------------------------------------------ #
     async def poll_once(self) -> List[ErrorEvent]:
@@ -313,6 +385,7 @@ class DetectionService:
             self._detect_ec2(),
             self._detect_digitalocean(),
             self._detect_cloudflare(),
+            self._detect_cloudwatch_log_filters(),
             return_exceptions=True,
         )
         all_events: List[ErrorEvent] = []

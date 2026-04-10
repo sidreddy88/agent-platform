@@ -9,12 +9,14 @@ if TYPE_CHECKING:
     from app.services.tracing import TracingContext
 
 MODEL = "claude-sonnet-4-20250514"
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 4096
 
 
 class LLMService:
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._model = model or MODEL
 
     async def complete(
         self,
@@ -24,7 +26,7 @@ class LLMService:
     ) -> str:
         """Single blocking call — returns full response text. Use for agent loops."""
         kwargs: dict = {
-            "model": MODEL,
+            "model": self._model,
             "max_tokens": MAX_TOKENS,
             "messages": messages,
         }
@@ -37,7 +39,7 @@ class LLMService:
 
         if tracing_ctx is not None and tracing_ctx.enabled:
             from app.services.tracing import trace_llm_call
-            return await trace_llm_call(tracing_ctx, MODEL, messages, system, _call())
+            return await trace_llm_call(tracing_ctx, self._model, messages, system, _call())
 
         return await _call()
 
@@ -48,7 +50,7 @@ class LLMService:
     ) -> AsyncIterator[str]:
         """Stream text chunks from Claude. Yields one string per token."""
         kwargs: dict = {
-            "model": MODEL,
+            "model": self._model,
             "max_tokens": MAX_TOKENS,
             "messages": messages,
         }

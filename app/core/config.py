@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # Detection poll interval in seconds
     detection_poll_interval_seconds: int = 60
 
+    # CloudWatch log filter patterns for application-level error detection.
+    # JSON array: [{"log_group": "/ecs/...", "pattern": "NoSuchKey",
+    #               "error_type": "S3_NO_SUCH_KEY", "service": "target-app"}]
+    cw_log_filters: str = ""
+
     class Config:
         env_file = ".env"
 

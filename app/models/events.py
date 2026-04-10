@@ -24,7 +24,9 @@ class Severity(str, Enum):
 class ErrorEvent(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source: EventSource
-    severity: Severity
+    severity: Optional[Severity] = None   # null at detection; set by TriageAgent
+    error_type: Optional[str] = None      # e.g. "S3_NO_SUCH_KEY"
+    task_id: Optional[str] = None         # ECS task ID when applicable
     title: str
     description: str
     service: str
@@ -52,7 +54,9 @@ class IncidentState(BaseModel):
 
     # Triage
     triage_decision: Optional[str] = None  # "real" | "noise" | "duplicate"
+    triage_reasoning: Optional[str] = None
     blast_radius: Optional[str] = None
+    occurrences_24h: Optional[int] = None
 
     # Diagnosis
     diagnosis: Optional[str] = None
