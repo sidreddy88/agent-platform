@@ -1,11 +1,12 @@
 """
 One-shot replay: fetch today's most recent NoSuchKey event from CloudWatch,
-build an ErrorEvent, and run it through the TriageAgent.
+build an ErrorEvent, and run it through the full pipeline:
+  TriageAgent → DiagnosisAgent
 
 Usage:
     python scripts/triage_replay.py
 
-Output: triage decision printed to stdout + sent to Slack.
+Output: triage + diagnosis printed to stdout + sent to Slack.
 """
 import asyncio
 import json
@@ -16,7 +17,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.agents.triage import TriageAgent
-from app.models.events import ErrorEvent, EventSource
+from app.agents.diagnosis import DiagnosisAgent, CONFIDENCE_THRESHOLD
+from app.models.events import ErrorEvent, EventSource, IncidentState, IncidentStatus, Severity
 from app.services.aws import AWSService, AWSError
 
 LOG_GROUP = "/ecs/TaskTargetApp"
@@ -81,20 +83,61 @@ async def main() -> None:
     print(f"  error_type : {event.error_type}")
     print(f"  task_id    : {event.task_id}")
 
-    print("\nRunning TriageAgent (Haiku)...")
-    agent = TriageAgent(aws=aws)
-    result = await agent.triage(event)
+    # ── Step 1: Triage ──────────────────────────────────────────────
+    print("\nStep 1 — TriageAgent (Haiku)...")
+    triage_agent = TriageAgent(aws=aws)
+    triage = await triage_agent.triage(event)
 
     print("\n" + "=" * 60)
     print("TRIAGE RESULT")
     print("=" * 60)
     print(json.dumps({
-        "decision": result.decision,
-        "severity": result.severity,
-        "blast_radius": result.blast_radius,
-        "occurrences_24h": result.occurrences_24h,
-        "duplicate_pr": result.duplicate_pr,
-        "reasoning": result.reasoning,
+        "decision": triage.decision,
+        "severity": triage.severity,
+        "blast_radius": triage.blast_radius,
+        "occurrences_24h": triage.occurrences_24h,
+        "duplicate_pr": triage.duplicate_pr,
+        "reasoning": triage.reasoning,
+    }, indent=2))
+    print("=" * 60)
+
+    if triage.decision != "real":
+        print(f"\nStopping — decision is '{triage.decision}', no diagnosis needed.")
+        return
+
+    # ── Step 2: Diagnosis ────────────────────────────────────────────
+    print(f"\nStep 2 — DiagnosisAgent (Sonnet)...")
+    try:
+        event.severity = Severity[triage.severity]
+    except KeyError:
+        event.severity = Severity.P2
+
+    incident = IncidentState(
+        error_event=event,
+        status=IncidentStatus.DIAGNOSING,
+        triage_decision=triage.decision,
+        triage_reasoning=triage.reasoning,
+        blast_radius=triage.blast_radius,
+        occurrences_24h=triage.occurrences_24h,
+    )
+
+    diagnosis_agent = DiagnosisAgent(aws=aws)
+    diagnosis = await diagnosis_agent.diagnose(incident)
+
+    print("\n" + "=" * 60)
+    print("DIAGNOSIS RESULT")
+    print("=" * 60)
+    print(json.dumps({
+        "root_cause": diagnosis.root_cause,
+        "confidence": diagnosis.confidence,
+        "evidence": diagnosis.evidence,
+        "fix_approach": diagnosis.fix_approach,
+        "affected_function": diagnosis.affected_function,
+        "affected_file": diagnosis.affected_file,
+        "reproduction_confirmed": diagnosis.reproduction_confirmed,
+        "escalate": diagnosis.escalate,
+        "next_step": "AWAITING_APPROVAL (human review)" if diagnosis.escalate
+                     else f"FIXING (confidence {diagnosis.confidence:.0%} ≥ {CONFIDENCE_THRESHOLD:.0%})",
     }, indent=2))
     print("=" * 60)
 
