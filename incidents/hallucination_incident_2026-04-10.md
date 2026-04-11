@@ -433,94 +433,6 @@ curl -s -o /dev/null -w "%{http_code}" \
 
 ---
 
-## Issue 10 — CodeReviewAgent Fabricating Reviews
-
-After `FixGenerationAgent` was fixed to produce real PRs, the pipeline wired `CodeReviewAgent` as Step 4. The agent was given the PR number and asked to review it. The review that came back looked authoritative and detailed — but referenced **React 18 compatibility**, **XSS vulnerabilities**, and **educational content quality**. The actual PR was a two-line try/catch in a JavaScript S3 helper. None of those topics had any connection to the change.
-
-**Root cause:** Same as Issue 6 — the `CodeReviewAgent` also used the ReAct loop via `super().run()`. The loop prompted the model to call `fetch_pr` first, then `analyze_file` for each file, then `generate_review`. But on iteration 1, the model wrote:
-
-```
-Thought: I have enough information to write the review.
-Answer: ## Code Review ...
-  Critical security vulnerabilities in user input handling and XSS prevention...
-  Technical accuracy issues with React 18 compatibility...
-```
-
-It never called `fetch_pr`. It had no idea what was actually in the PR. It generated a plausible-looking review based on its training data, not the real diff.
-
-The review also did not appear in the GitHub PR — because the model never got `pr_number` from a real tool call, `post_to_github` was silently passing the wrong number (or failing in a way the output truncation hid).
-
-**The fix** — same as `FixGenerationAgent`: replaced `super().run()` in `CodeReviewAgent.run()` with direct Python:
-
-```python
-# Before: one super().run() call the model could bypass
-return await super().run(prompt)
-
-# After: three explicit sequential calls, model has no opportunity to skip fetch_pr
-pr_summary = await fetch_pr(owner, repo, pr_number, self._github)
-for filename in files:
-    analysis = await analyze_file(filename, self._github, self._llm)
-    analysis_parts.append(f"### {filename}\n{analysis}")
-review = await generate_review(owner, repo, pr_number, file_analyses, ...)
-```
-
-The model now only sees real diff content when generating the review — `fetch_pr` is a guaranteed Python call, not a suggestion.
-
----
-
-## Issue 11 — 422 Unprocessable Entity When Posting Review
-
-After fixing the ReAct loop, the review was correctly generated from the real PR diff but failed to post to GitHub with `422 Unprocessable Entity`.
-
-**Root cause:** The `generate_review` function detected the word `REQUEST_CHANGES` in the review text and set `event="REQUEST_CHANGES"` when calling `POST /repos/{owner}/{repo}/pulls/{pr_number}/reviews`. GitHub's API rejects `REQUEST_CHANGES` (and `APPROVE`) when the reviewer is the same user who opened the PR. The pipeline uses a single PAT for everything — it created the PR and is now trying to request changes on its own PR.
-
-**The event detection code that caused this** (`app/agents/code_review.py`):
-```python
-event_map = {
-    "APPROVE": "APPROVE",
-    "REQUEST_CHANGES": "REQUEST_CHANGES",  # ← rejected for self-review
-    "NEEDS_DISCUSSION": "COMMENT",
-}
-event = "COMMENT"
-for key, val in event_map.items():
-    if key in review_text:
-        event = val
-        break
-```
-
-The review said `## Recommendation: REQUEST_CHANGES` (because it found real issues). That matched the map, set `event="REQUEST_CHANGES"`, and GitHub returned 422.
-
-**What made it hard to diagnose:** The error was silently appended to the review text as `"Warning: failed to post to GitHub: ..."`, but `triage_replay.py` truncated the output to 2000 characters. The warning appeared after character 2000 and was never printed.
-
-**The fix — two changes:**
-
-1. Always use `"COMMENT"` as the event. `COMMENT` is accepted regardless of PR authorship. The recommendation (`APPROVE` / `REQUEST_CHANGES`) is visible in the review body text anyway:
-```python
-# Before: detect event from text, risk 422
-event = "COMMENT"
-for key, val in event_map.items():
-    if key in review_text:
-        event = val
-        break
-await github.post_pr_review(..., event=event)
-
-# After: always COMMENT — recommendation is in the body
-await github.post_pr_review(..., event="COMMENT")
-```
-
-2. Removed the 2000-char truncation in `triage_replay.py` and added an explicit "posted / NOT posted" status line at the end:
-```python
-# Before:
-print(review_result.answer[:2000])
-
-# After:
-print(review_result.answer)
-posted = "✓ Review posted to GitHub." in review_result.answer
-print(f"  Review : {'posted to GitHub' if posted else 'NOT posted — see warning above'}")
-```
-
----
-
 ## Summary Table
 
 | # | Where the problem was | What it was | Fix |
@@ -534,8 +446,6 @@ print(f"  Review : {'posted to GitHub' if posted else 'NOT posted — see warnin
 | 7 | Prompt — OLD_FUNCTION request | LLM can't copy code character-for-character | Extract function from file with brace-counting code |
 | 8 | Code — hardcoded `"main"` | Target repo uses `master` | `get_default_branch()` API call at start |
 | 9 | Environment — token scopes | Fine-grained PAT missing Contents/Issues/PR write | Add three permissions in GitHub Settings |
-| 10 | Architecture — CodeReviewAgent ReAct loop | Model fabricated review without calling fetch_pr | Replace ReAct loop with direct sequential calls |
-| 11 | Code — review event detection | `REQUEST_CHANGES` rejected by GitHub for self-review; error hidden by output truncation | Always use `COMMENT` event; remove output truncation |
 
 ---
 
@@ -648,23 +558,3 @@ The confusing part was that the token appeared to have full access — `GET /rep
 Fine-grained PATs require you to explicitly grant each permission. The token was missing `contents:read+write`, `issues:read+write`, and `pull_requests:read+write`. Each one blocked a different step.
 
 The fix was to add the three missing permissions in GitHub settings. The broader lesson is to test token permissions against each API endpoint you actually need before running the full pipeline, not after hitting 403s in production.
-
----
-
-**Issue 10 — CodeReviewAgent Fabricating Reviews**
-
-After the fix pipeline was working, the code review step produced a review that referenced React 18 compatibility, XSS vulnerabilities, and educational content — none of which had anything to do with the actual PR, which was a two-line try/catch fix in a JavaScript S3 helper.
-
-The `CodeReviewAgent` also used the ReAct loop. On iteration 1, the model decided it had enough context from the prompt alone and wrote a final answer without ever calling `fetch_pr`. It generated a plausible-looking review from its training data, not the actual diff.
-
-The fix was the same as for `FixGenerationAgent`: replace the ReAct loop with direct sequential Python calls. `fetch_pr` is now called unconditionally in Python before the LLM ever sees any diff content. The model can't skip it.
-
----
-
-**Issue 11 — 422 Error When Posting Review**
-
-Once the review was being generated correctly from the real diff, it failed to post to GitHub with a 422 error. The review had found real issues and recommended `REQUEST_CHANGES`. The code detected that word in the review text and used it as the GitHub review event. But GitHub rejects `REQUEST_CHANGES` when the reviewer is the same user who opened the PR — and the pipeline uses a single token for everything.
-
-The error was also invisible: it was appended to the review text after 2000 characters, and the output was truncated at 2000 characters. The terminal looked clean.
-
-The fix was two things: always post reviews as `COMMENT` (which GitHub accepts regardless of authorship — the recommendation is in the text anyway), and remove the 2000-char truncation so failures are always visible.
