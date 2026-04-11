@@ -1,17 +1,20 @@
 """
 CodeReviewAgent — reviews a GitHub pull request and produces a structured report.
 
-Flow (driven by ReAct loop in BaseAgent):
+Flow (direct sequential calls — no ReAct loop):
   1. fetch_pr        → retrieve PR metadata and list of changed files with diffs
-  2. analyze_file    → deep-dive analysis on a single file's diff
+  2. analyze_file    → deep-dive analysis on each changed file's diff
   3. generate_review → assemble the final structured review and post it to GitHub
 """
 
 import json
+import logging
 
 from app.agents.base import AgentResult, BaseAgent
 from app.services.github import FileDiff, GitHubError, GitHubService, PRDetails
 from app.services.llm import LLMService
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -181,22 +184,15 @@ Be specific. Reference actual filenames and line numbers from the analysis."""
 
     if post_to_github:
         try:
-            event_map = {
-                "APPROVE": "APPROVE",
-                "REQUEST_CHANGES": "REQUEST_CHANGES",
-                "NEEDS_DISCUSSION": "COMMENT",
-            }
-            # Determine event from recommendation line
-            event = "COMMENT"
-            for key, val in event_map.items():
-                if key in review_text:
-                    event = val
-                    break
-
-            await github.post_pr_review(owner, repo, pr_number, review_text, event=event)
+            # Always use COMMENT — APPROVE/REQUEST_CHANGES are rejected by GitHub
+            # when the reviewer is the same user who opened the PR (422 Unprocessable Entity).
+            # The recommendation is communicated in the review body text instead.
+            await github.post_pr_review(owner, repo, pr_number, review_text, event="COMMENT")
+            logger.info("[CodeReview] Posted review to PR #%d", pr_number)
             return review_text + "\n\n---\n✓ Review posted to GitHub."
         except GitHubError as exc:
-            return review_text + f"\n\n---\nWarning: failed to post to GitHub: {exc}"
+            logger.error("[CodeReview] Failed to post review to PR #%d: %s", pr_number, exc)
+            return review_text + f"\n\n---\n✗ Failed to post review to GitHub: {exc}"
 
     return review_text
 
@@ -208,6 +204,10 @@ Be specific. Reference actual filenames and line numbers from the analysis."""
 class CodeReviewAgent(BaseAgent):
     """
     Reviews a GitHub pull request and produces a structured code review.
+
+    Uses direct sequential calls instead of a ReAct loop — the steps are
+    deterministic (fetch → analyze each file → generate review) so an agent
+    loop adds no value and allows the model to skip tool calls entirely.
 
     Usage:
         agent = CodeReviewAgent()
@@ -226,82 +226,40 @@ class CodeReviewAgent(BaseAgent):
     def __init__(self, github: GitHubService | None = None) -> None:
         super().__init__()
         self._github = github or GitHubService()
-        self._register_tools()
-
-    def _register_tools(self) -> None:
-        llm = self._llm
-        gh = self._github
-
-        async def _fetch_pr(owner: str, repo: str, pr_number: int) -> str:
-            return await fetch_pr(owner, repo, pr_number, gh)
-
-        async def _analyze_file(filename: str) -> str:
-            return await analyze_file(filename, gh, llm)
-
-        async def _generate_review(
-            owner: str,
-            repo: str,
-            pr_number: int,
-            file_analyses: str,
-            post_to_github: bool = False,
-        ) -> str:
-            return await generate_review(
-                owner, repo, pr_number, file_analyses, gh, llm, post_to_github
-            )
-
-        self.register_tool(
-            "fetch_pr",
-            _fetch_pr,
-            (
-                "Fetch PR metadata and changed-file summary from GitHub. "
-                "Input: {owner: string, repo: string, pr_number: integer}"
-            ),
-        )
-        self.register_tool(
-            "analyze_file",
-            _analyze_file,
-            (
-                "Deep-dive analysis of a single changed file's diff — checks for bugs, "
-                "security issues, performance problems, and testing gaps. "
-                "Must call fetch_pr first. "
-                "Input: {filename: string}"
-            ),
-        )
-        self.register_tool(
-            "generate_review",
-            _generate_review,
-            (
-                "Assemble the final structured review from all per-file analyses and "
-                "optionally post it to the GitHub PR. Call after all files are analyzed. "
-                "Input: {owner: string, repo: string, pr_number: integer, "
-                "file_analyses: string, post_to_github: boolean}"
-            ),
-        )
 
     async def run(self, user_input: str) -> AgentResult:
         """
-        Run the code review agent.
+        Run the code review pipeline directly (no ReAct loop).
 
-        user_input should be a JSON string:
-            {"owner": "...", "repo": "...", "pr_number": 42}
-        or plain text like:
-            "Review PR #42 in acme/backend"
+        user_input: JSON string with owner, repo, pr_number, post_to_github.
         """
-        # Normalise plain-text shorthand into a richer prompt for the ReAct loop
         try:
             params = json.loads(user_input)
-            prompt = (
-                f"Review pull request #{params['pr_number']} in "
-                f"{params['owner']}/{params['repo']}. "
-                f"{'Post the review to GitHub when done.' if params.get('post_to_github') else 'Do not post to GitHub.'} "
-                "Fetch the PR first, then analyze every changed file individually, "
-                "then generate the final structured review."
-            )
-        except (json.JSONDecodeError, KeyError):
-            prompt = (
-                user_input + " "
-                "Fetch the PR first, then analyze every changed file individually, "
-                "then generate the final structured review."
-            )
+            owner = params["owner"]
+            repo = params["repo"]
+            pr_number = int(params["pr_number"])
+            post = bool(params.get("post_to_github", False))
+        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+            return AgentResult(answer=f"Invalid input: {exc}", steps=[], iterations=0)
 
-        return await super().run(prompt)
+        # ── 1. Fetch PR metadata + diff ────────────────────────────────
+        pr_summary = await fetch_pr(owner, repo, pr_number, self._github)
+        if pr_summary.startswith("GitHub error:"):
+            return AgentResult(answer=pr_summary, steps=[], iterations=1)
+
+        # ── 2. Analyze each changed file ───────────────────────────────
+        files: dict = getattr(self._github, "_cached_files", {})
+        analysis_parts: list[str] = []
+        for filename in files:
+            analysis = await analyze_file(filename, self._github, self._llm)
+            analysis_parts.append(f"### {filename}\n{analysis}")
+
+        file_analyses = "\n\n".join(analysis_parts) if analysis_parts else "No files to analyze."
+
+        # ── 3. Generate review and optionally post to GitHub ───────────
+        review = await generate_review(
+            owner, repo, pr_number, file_analyses, self._github, self._llm,
+            post_to_github=post,
+        )
+
+        return AgentResult(answer=review, steps=[], iterations=3)
