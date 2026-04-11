@@ -7,7 +7,9 @@ Flow:
   1. GitHub API  → fetch routes/services/image.js
   2. LLM call    → extract old function + generate fixed version
   3. GitHub API  → create Issue
-  4. GitHub API  → create branch, commit fix, open PR
+  4. GitHub API  → create branch, commit fix
+  4b. LLM call   → generate Jest test, commit to same branch
+  5. GitHub API  → open PR
 
 Output (FixResult):
   issue_url, pr_url, pr_number, branch, fix_description, files_changed, test_added
@@ -26,6 +28,14 @@ from app.services.github import GitHubError, GitHubService
 from app.services.llm import LLMService
 
 logger = logging.getLogger(__name__)
+
+# Candidate test file paths — tried in order; first existing one wins, else first is created
+_TEST_FILE_CANDIDATES = [
+    "tests/services/image.test.js",
+    "__tests__/services/image.test.js",
+    "test/services/image.test.js",
+]
+_TEST_FILE_PATH = _TEST_FILE_CANDIDATES[0]  # default for new file
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +212,9 @@ class FixGenerationAgent(BaseAgent):
             steps.append(f"✓ Committed fix (sha={commit_sha[:8]})")
             logger.info("[FixGen] Committed fix on branch %s", branch_name)
 
+            # ── 4b. Add test file ──────────────────────────────────────
+            test_added = await self._commit_test(branch_name, new_function, steps)
+
             pr_number, pr_url = await self._github.create_pull_request(
                 self._owner, self._repo,
                 title="fix: handle NoSuchKey gracefully in moveAndRemoveFileFromS3",
@@ -224,10 +237,90 @@ class FixGenerationAgent(BaseAgent):
             pr_number=pr_number,
             branch=branch_name,
             fix_description=f"NoSuchKey try/catch added to {file_path}",
-            files_changed=[file_path],
-            test_added=False,
+            files_changed=[file_path, _TEST_FILE_PATH] if test_added else [file_path],
+            test_added=test_added,
             commit_sha=commit_sha,
         ), steps
+
+    # ------------------------------------------------------------------
+    # Test generation
+    # ------------------------------------------------------------------
+
+    async def _commit_test(
+        self, branch_name: str, new_function: str, steps: list[str]
+    ) -> bool:
+        """
+        Generate a Jest test for the fixed function and commit it to branch_name.
+        Returns True if the test was committed successfully, False otherwise.
+        """
+        try:
+            test_code = await self._generate_test(new_function)
+        except Exception as exc:
+            steps.append(f"⚠ Test generation (LLM) failed: {exc}")
+            logger.warning("[FixGen] Test LLM error: %s", exc)
+            return False
+
+        # Find the first existing test file (so we can update rather than create)
+        test_path: str | None = None
+        test_sha: str | None = None
+        for candidate in _TEST_FILE_CANDIDATES:
+            try:
+                _, existing_sha = await self._github.get_file_contents(
+                    self._owner, self._repo, candidate, ref=branch_name
+                )
+                test_path = candidate
+                test_sha = existing_sha
+                steps.append(f"✓ Found existing test file {candidate}")
+                break
+            except GitHubError:
+                pass  # doesn't exist yet — try next candidate
+
+        if test_path is None:
+            test_path = _TEST_FILE_PATH  # create at default location
+            steps.append(f"✓ Creating new test file {test_path}")
+
+        try:
+            test_commit_sha = await self._github.update_file(
+                self._owner, self._repo, test_path, test_code,
+                f"test: add NoSuchKey handler tests for image.js",
+                branch_name, test_sha,
+            )
+            steps.append(f"✓ Committed test file (sha={test_commit_sha[:8]})")
+            logger.info("[FixGen] Committed test at %s", test_path)
+            return True
+        except GitHubError as exc:
+            steps.append(f"⚠ Test commit failed (continuing): {exc}")
+            logger.warning("[FixGen] Test commit error: %s", exc)
+            return False
+
+    async def _generate_test(self, new_function: str) -> str:
+        """Use a single LLM call to generate a Jest test for the fixed function."""
+        prompt = f"""Generate a minimal Jest unit test for this JavaScript function.
+
+FUNCTION:
+{new_function}
+
+Requirements:
+- Use jest.mock() to mock the AWS SDK S3 client (copyObject and deleteObject)
+- Test case 1: when S3 throws an error with code 'NoSuchKey', the function returns without throwing
+- Test case 2: when S3 throws a different error (e.g. 'AccessDenied'), the function re-throws it
+- Require the function from '../../routes/services/image'
+- Only these two test cases — nothing else
+
+Return ONLY the complete test file — no explanation, no markdown fences."""
+
+        test_code = await self._llm.complete(
+            messages=[{"role": "user", "content": prompt}],
+            system=(
+                "You are a JavaScript engineer writing Jest tests. "
+                "Return ONLY the complete test file code, nothing else. "
+                "No markdown, no backticks, no explanation."
+            ),
+        )
+
+        test_code = re.sub(r"^```(?:javascript|js)?\n?", "", test_code.strip())
+        test_code = re.sub(r"\n?```$", "", test_code)
+        return test_code.strip()
 
     # ------------------------------------------------------------------
     # Fix generation

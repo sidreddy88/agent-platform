@@ -332,14 +332,20 @@ class GitHubService:
         content: str,
         message: str,
         branch: str,
-        sha: str,
+        sha: str | None = None,
     ) -> str:
-        """Commit a file update on a branch. Returns the new commit SHA."""
+        """Commit a file create or update on a branch. Returns the new commit SHA.
+
+        Pass sha=None to create a new file; pass the existing sha to update.
+        """
         encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        payload: dict = {"message": message, "content": encoded, "branch": branch}
+        if sha:
+            payload["sha"] = sha
         async with self._client() as client:
             response = await client.put(
                 f"/repos/{owner}/{repo}/contents/{path}",
-                json={"message": message, "content": encoded, "branch": branch, "sha": sha},
+                json=payload,
             )
             await self._raise_for_status(response)
             return response.json()["commit"]["sha"]

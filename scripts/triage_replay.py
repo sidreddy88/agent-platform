@@ -267,13 +267,14 @@ async def _run_fix_and_review(incident: IncidentState) -> None:
     print("\n" + "=" * 60)
     print("CODE REVIEW")
     print("=" * 60)
-    print(review_result.answer[:2000])
+    print(review_result.answer)
     print("=" * 60)
 
+    posted = "✓ Review posted to GitHub." in review_result.answer
     print(f"\nPipeline complete.")
-    print(f"  Issue : {fix.issue_url}")
-    print(f"  PR    : {fix.pr_url}")
-    print(f"\nReview posted to GitHub. Approve or reject the PR manually.")
+    print(f"  Issue  : {fix.issue_url}")
+    print(f"  PR     : {fix.pr_url}")
+    print(f"  Review : {'posted to GitHub' if posted else 'NOT posted — see warning above'}")
 
 
 if __name__ == "__main__":
