@@ -9,14 +9,18 @@ Each iteration:
 """
 
 import json
+import logging
 import re
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services.checkpoint import context_checkpointer
 from app.services.llm import LLMService
 from app.services.preferences import build_preferences_prompt
 from app.services.tracing import TracingContext, trace_agent, trace_tool_call
+
+logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 10
 
@@ -215,6 +219,17 @@ class BaseAgent:
         steps: list[Step] = []
 
         for i in range(1, MAX_ITERATIONS + 1):
+            # Compress conversation history if the previous call's token count
+            # reached 70% of the context window (checked before every call
+            # except the very first — no usage data available yet on i==1).
+            if i > 1 and context_checkpointer.needs_checkpoint(self._llm.last_input_tokens):
+                agent_name = type(self).__name__
+                logger.warning(
+                    "[%s] Context checkpoint at iteration %d — %d input tokens (limit %d). Compressing.",
+                    agent_name, i, self._llm.last_input_tokens, context_checkpointer._limit,
+                )
+                messages = await context_checkpointer.compress(messages, steps)
+
             step = Step(iteration=i)
             raw = await self._llm.complete(messages=messages, system=system, tracing_ctx=self._tracing_ctx)
 
