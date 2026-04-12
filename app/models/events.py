@@ -66,6 +66,7 @@ class IncidentState(BaseModel):
 
     # Fix
     fix_attempted: Optional[str] = None
+    fix_description: Optional[str] = None   # full FixResult.fix_description (for RLHF logging)
     pr_url: Optional[str] = None
     pr_number: Optional[int] = None
     review_posted: bool = False

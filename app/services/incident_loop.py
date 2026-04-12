@@ -341,6 +341,7 @@ class IncidentLoop:
         incident.pr_number = fix.pr_number
         incident.pr_created_at = datetime.utcnow()
         incident.fix_attempted = fix.fix_description[:200]
+        incident.fix_description = fix.fix_description
         incident.status = IncidentStatus.REVIEWING
         incident_store.update(incident)
 
