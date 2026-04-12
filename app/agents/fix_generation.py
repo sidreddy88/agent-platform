@@ -24,6 +24,7 @@ from datetime import datetime
 from app.agents.base import BaseAgent
 from app.core.config import settings
 from app.models.events import IncidentState
+from app.services.blast_radius import BlastRadiusGuard
 from app.services.github import GitHubError, GitHubService
 from app.services.llm import LLMService
 
@@ -52,6 +53,8 @@ class FixResult:
     files_changed: list[str] = field(default_factory=list)
     test_added: bool = False
     commit_sha: str | None = None
+    blast_radius_violation: bool = False
+    blast_radius_violations: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +149,27 @@ class FixGenerationAgent(BaseAgent):
             f"✓ Generated fix (old={len(old_function)} chars, new={len(new_function)} chars)"
         )
         logger.info("[FixGen] Generated fix")
+
+        # ── 2b. Blast radius check ────────────────────────────────────
+        # Run BEFORE any GitHub writes so we never create a branch for a
+        # violation — escalate to human instead.
+        files_to_touch = [file_path, _TEST_FILE_PATH]
+        additions = len(new_function.splitlines())
+        deletions = len(old_function.splitlines())
+        br_result = BlastRadiusGuard().check(files_to_touch, additions=additions, deletions=deletions)
+        if not br_result.allowed:
+            steps.append(f"✗ Blast radius violated: {br_result.reason}")
+            logger.warning("[FixGen] Blast radius violation: %s", br_result.reason)
+            return FixResult(
+                issue_url=None,
+                pr_url=None,
+                pr_number=None,
+                branch=branch_name,
+                fix_description=f"BLAST_RADIUS_VIOLATION: {br_result.reason}",
+                blast_radius_violation=True,
+                blast_radius_violations=br_result.violations,
+            ), steps
+        steps.append(f"✓ Blast radius OK ({len(files_to_touch)} files, +{additions}/-{deletions} lines)")
 
         # ── 3. Create GitHub Issue ─────────────────────────────────────
         issue_url: str | None = None

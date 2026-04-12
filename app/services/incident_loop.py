@@ -100,6 +100,27 @@ async def _notify_fix_ready(incident: IncidentState, fix: FixResult, approval_id
     ))
 
 
+async def _notify_blast_radius_violation(incident: IncidentState, fix: FixResult) -> None:
+    event = incident.error_event
+    sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
+    violations_text = "\n".join(f"  • {v}" for v in fix.blast_radius_violations)
+    message = (
+        f"*Service:* {event.service}  |  *Severity:* {sev_str}\n"
+        f"*Root cause:* {incident.diagnosis}\n"
+        f"*Violations:*\n{violations_text}\n\n"
+        f"The AI fix was blocked before creating any branch or PR.\n"
+        f"A human must review and apply this fix manually.\n"
+        f"_Incident:_ {incident.id}"
+    )
+    await alerting_service.send_alert(Alert(
+        severity=AlertSeverity.WARNING,
+        title=f"[{sev_str}] AI fix blocked by blast radius limiter — manual fix required",
+        message=message,
+        source="BlastRadiusGuard",
+        metadata={"incident_id": incident.id, "violations": fix.blast_radius_violations},
+    ))
+
+
 async def _notify_diagnosis(incident: IncidentState, result: DiagnosisResult) -> None:
     event = incident.error_event
     sev = _p_to_alert_sev(str(event.severity).split(".")[-1] if event.severity else "P2")
@@ -274,7 +295,23 @@ class IncidentLoop:
 
         # ── Fix Generation ────────────────────────────────────────────
         fix = await self._run_fix(incident)
-        if fix is None or (not fix.pr_url and not fix.pr_number):
+        if fix is None:
+            logger.error("[IncidentLoop] %s — fix generation failed, leaving in FIXING", incident.id)
+            return
+
+        # Blast radius gate — block the PR before any GitHub writes
+        if fix.blast_radius_violation:
+            incident.fix_attempted = fix.fix_description[:200]
+            incident.status = IncidentStatus.AWAITING_APPROVAL
+            incident_store.update(incident)
+            await _notify_blast_radius_violation(incident, fix)
+            logger.warning(
+                "[IncidentLoop] %s — blast radius violation, escalating to human: %s",
+                incident.id, fix.fix_description,
+            )
+            return
+
+        if not fix.pr_url and not fix.pr_number:
             logger.error("[IncidentLoop] %s — fix generation failed, leaving in FIXING", incident.id)
             return
 
