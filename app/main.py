@@ -11,6 +11,7 @@ from app.api.routes import orchestrator as orchestrator_routes
 from app.api.routes import circuit_breaker as circuit_breaker_routes
 from app.api.routes import injection as injection_routes
 from app.api.routes import drift as drift_routes
+from app.api.routes import evals as evals_routes
 from app.api import websocket
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.detection import detection_service
@@ -43,6 +44,7 @@ app.include_router(metrics_routes.router)
 app.include_router(circuit_breaker_routes.router)
 app.include_router(injection_routes.router)
 app.include_router(drift_routes.router)
+app.include_router(evals_routes.router)
 
 
 @app.on_event("startup")
