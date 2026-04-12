@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import health, approvals
 from app.api.routes import dashboard, incidents, webhooks, logs
+from app.api.routes import metrics as metrics_routes
 from app.api.routes import orchestrator as orchestrator_routes
 from app.api import websocket
 from app.api.websocket_dashboard import router as ws_dashboard_router
@@ -34,6 +35,7 @@ app.include_router(incidents.router)
 app.include_router(webhooks.router)
 app.include_router(logs.router)
 app.include_router(orchestrator_routes.router)
+app.include_router(metrics_routes.router)
 
 
 @app.on_event("startup")
