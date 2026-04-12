@@ -8,6 +8,8 @@ from app.api.routes import health, approvals
 from app.api.routes import dashboard, incidents, webhooks, logs
 from app.api.routes import metrics as metrics_routes
 from app.api.routes import orchestrator as orchestrator_routes
+from app.api.routes import circuit_breaker as circuit_breaker_routes
+from app.api.routes import injection as injection_routes
 from app.api import websocket
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.detection import detection_service
@@ -36,6 +38,8 @@ app.include_router(webhooks.router)
 app.include_router(logs.router)
 app.include_router(orchestrator_routes.router)
 app.include_router(metrics_routes.router)
+app.include_router(circuit_breaker_routes.router)
+app.include_router(injection_routes.router)
 
 
 @app.on_event("startup")

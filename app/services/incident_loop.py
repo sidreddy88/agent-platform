@@ -30,6 +30,7 @@ from app.models.events import ErrorEvent, IncidentState, IncidentStatus, Severit
 from app.services.alerting import Alert, alerting_service
 from app.services.alerting import Severity as AlertSeverity
 from app.services.approvals import RiskLevel, approval_service
+from app.services.circuit_breaker import CircuitOpenError, circuit_breaker_registry
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 from app.services.schema_validator import HandoffValidationError, handoff_validator
@@ -196,8 +197,14 @@ class IncidentLoop:
     # ------------------------------------------------------------------ #
 
     async def _run_fix(self, incident: IncidentState) -> FixResult | None:
+        cb = circuit_breaker_registry.get_or_create(
+            "github_api", failure_threshold=3, timeout_seconds=120.0
+        )
         try:
-            return await self._fix_agent.fix(incident)
+            return await cb.call(self._fix_agent.fix(incident))
+        except CircuitOpenError as exc:
+            logger.warning("[IncidentLoop] GitHub circuit breaker OPEN — skipping fix for %s", incident.id)
+            return None
         except Exception as exc:
             logger.error("[IncidentLoop] FixGenerationAgent failed: %s", exc)
             return None
@@ -212,12 +219,18 @@ class IncidentLoop:
             logger.error("[IncidentLoop] FixResult schema invalid for review: %s", exc)
             return None
         owner, repo = settings.fix_target_repo.split("/", 1)
+        cb = circuit_breaker_registry.get_or_create(
+            "github_api", failure_threshold=3, timeout_seconds=120.0
+        )
         try:
-            result = await self._review_agent.run(
+            result = await cb.call(self._review_agent.run(
                 f'{{"owner": "{owner}", "repo": "{repo}", '
                 f'"pr_number": {fix.pr_number}, "post_to_github": true}}'
-            )
+            ))
             return result.answer
+        except CircuitOpenError:
+            logger.warning("[IncidentLoop] GitHub circuit breaker OPEN — skipping review for %s", incident.id)
+            return None
         except Exception as exc:
             logger.error("[IncidentLoop] CodeReviewAgent failed: %s", exc)
             return None

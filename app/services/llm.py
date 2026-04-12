@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from app.core.config import settings
+from app.services.circuit_breaker import CircuitOpenError, circuit_breaker_registry
 
 if TYPE_CHECKING:
     from app.services.tracing import TracingContext
@@ -42,11 +43,16 @@ class LLMService:
             )
             return response.content[0].text
 
-        if tracing_ctx is not None and tracing_ctx.enabled:
-            from app.services.tracing import trace_llm_call
-            return await trace_llm_call(tracing_ctx, self._model, messages, system, _call())
+        async def _complete() -> str:
+            if tracing_ctx is not None and tracing_ctx.enabled:
+                from app.services.tracing import trace_llm_call
+                return await trace_llm_call(tracing_ctx, self._model, messages, system, _call())
+            return await _call()
 
-        return await _call()
+        cb = circuit_breaker_registry.get_or_create(
+            "anthropic_llm", failure_threshold=5, timeout_seconds=60.0
+        )
+        return await cb.call(_complete())
 
     async def stream_chat(
         self,
