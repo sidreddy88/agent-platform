@@ -279,6 +279,7 @@ class IncidentLoop:
             return
 
         incident.pr_url = fix.pr_url
+        incident.pr_number = fix.pr_number
         incident.pr_created_at = datetime.utcnow()
         incident.fix_attempted = fix.fix_description[:200]
         incident.status = IncidentStatus.REVIEWING
@@ -296,6 +297,8 @@ class IncidentLoop:
         # ── Code Review ───────────────────────────────────────────────
         review_text = await self._run_review(incident, fix)
         if review_text:
+            incident.review_posted = True
+            incident_store.update(incident)
             logger.info("[IncidentLoop] %s — code review posted to GitHub PR", incident.id)
         else:
             logger.warning("[IncidentLoop] %s — code review skipped or failed", incident.id)
@@ -321,6 +324,7 @@ class IncidentLoop:
             ),
         )
 
+        incident.approval_id = approval_req.id
         incident.status = IncidentStatus.AWAITING_APPROVAL
         incident_store.update(incident)
 
