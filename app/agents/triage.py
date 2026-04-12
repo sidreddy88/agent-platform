@@ -96,8 +96,9 @@ class TriageAgent(BaseAgent):
         self,
         aws: AWSService | None = None,
         store=None,
+        llm: LLMService | None = None,
     ) -> None:
-        super().__init__(llm=LLMService(model=HAIKU_MODEL))
+        super().__init__(llm=llm or LLMService(model=HAIKU_MODEL))
         self._aws = aws or AWSService()
         self._store = store or _default_store
         self._register_tools()
