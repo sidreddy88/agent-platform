@@ -17,6 +17,8 @@ class LLMService:
     def __init__(self, model: str | None = None) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._model = model or MODEL
+        # Updated after every complete() call — read by BaseAgent for checkpointing.
+        self.last_input_tokens: int = 0
 
     async def complete(
         self,
@@ -35,6 +37,9 @@ class LLMService:
 
         async def _call() -> str:
             response = await self._client.messages.create(**kwargs)
+            self.last_input_tokens = (
+                response.usage.input_tokens if response.usage else 0
+            )
             return response.content[0].text
 
         if tracing_ctx is not None and tracing_ctx.enabled:
