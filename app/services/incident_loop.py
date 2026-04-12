@@ -32,6 +32,7 @@ from app.services.alerting import Severity as AlertSeverity
 from app.services.approvals import RiskLevel, approval_service
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
+from app.services.schema_validator import HandoffValidationError, handoff_validator
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +174,15 @@ class IncidentLoop:
 
     async def _run_triage(self, event: ErrorEvent) -> TriageResult:
         try:
-            return await self._triage.triage(event)
+            result = await self._triage.triage(event)
+            return handoff_validator.validate_triage(result)
+        except HandoffValidationError as exc:
+            logger.error("[IncidentLoop] TriageResult schema invalid: %s", exc)
+            return TriageResult(
+                decision="real", severity="P2", blast_radius="unknown",
+                occurrences_24h=0, duplicate_pr=None,
+                reasoning=f"Triage schema validation failed ({exc}) — defaulting to real/P2",
+            )
         except Exception as exc:
             logger.error("[IncidentLoop] TriageAgent failed: %s", exc)
             return TriageResult(
@@ -197,6 +206,11 @@ class IncidentLoop:
         """Run CodeReviewAgent on the new PR and post review to GitHub."""
         if not fix.pr_number:
             return None
+        try:
+            handoff_validator.validate_fix_for_review(fix)
+        except HandoffValidationError as exc:
+            logger.error("[IncidentLoop] FixResult schema invalid for review: %s", exc)
+            return None
         owner, repo = settings.fix_target_repo.split("/", 1)
         try:
             result = await self._review_agent.run(
@@ -210,7 +224,15 @@ class IncidentLoop:
 
     async def _run_diagnosis(self, incident: IncidentState) -> DiagnosisResult:
         try:
-            return await self._diagnosis.diagnose(incident)
+            result = await self._diagnosis.diagnose(incident)
+            return handoff_validator.validate_diagnosis(result)
+        except HandoffValidationError as exc:
+            logger.error("[IncidentLoop] DiagnosisResult schema invalid: %s", exc)
+            return DiagnosisResult(
+                root_cause=f"Diagnosis schema validation failed ({exc}) — manual review required",
+                confidence=0.0,
+                escalate=True,
+            )
         except Exception as exc:
             logger.error("[IncidentLoop] DiagnosisAgent failed: %s", exc)
             return DiagnosisResult(
