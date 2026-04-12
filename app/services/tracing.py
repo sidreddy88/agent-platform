@@ -158,6 +158,13 @@ def trace_agent(run_method: Callable) -> Callable:
             result = await run_method(self, user_input)
             duration_ms = int((time.perf_counter() - start) * 1000)
 
+            # Record in local latency tracker (always — independent of Langfuse)
+            try:
+                from app.services.latency import latency_tracker
+                latency_tracker.record(agent_name, duration_ms)
+            except Exception:
+                pass
+
             if enabled and trace:
                 try:
                     trace.update(
