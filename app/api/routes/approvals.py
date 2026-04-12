@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from app.models.events import IncidentStatus
 from app.services.approvals import ApprovalRequest, approval_service
 from app.services.incident_store import incident_store
+from app.services.preference_logger import preference_logger
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -101,5 +102,14 @@ async def reject(request_id: str, body: RejectBody):
             incident.status = IncidentStatus.REJECTED
             incident.resolved_at = datetime.utcnow()
             incident_store.update(incident)
+
+            # Log negative training example for RLHF fine-tuning
+            try:
+                preference_logger.log_rejection(incident, body.approver, body.reason)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "[Approvals] Failed to log preference pair: %s", exc
+                )
 
     return req
