@@ -43,7 +43,8 @@ class IncidentStatus(str, Enum):
     REVIEWING = "reviewing"
     AWAITING_APPROVAL = "awaiting_approval"
     RESOLVED = "resolved"
-    NOISE = "noise"        # Triage determined it's not real
+    REJECTED = "rejected"   # Human rejected the AI fix
+    NOISE = "noise"         # Triage determined it's not real
     DUPLICATE = "duplicate"  # Existing PR already covers this
 
 
@@ -66,6 +67,9 @@ class IncidentState(BaseModel):
     # Fix
     fix_attempted: Optional[str] = None
     pr_url: Optional[str] = None
+    pr_number: Optional[int] = None
+    review_posted: bool = False
+    approval_id: Optional[str] = None
 
     # Human decision
     human_decision: Optional[str] = None  # "approved" | "rejected"

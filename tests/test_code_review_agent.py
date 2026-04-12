@@ -248,9 +248,10 @@ class TestGenerateReview:
 
         gh.post_pr_review.assert_called_once()
         call_args = gh.post_pr_review.call_args
-        # event is passed as the 5th positional arg or as keyword arg
+        # Always COMMENT — APPROVE/REQUEST_CHANGES are rejected by GitHub with 422
+        # when the reviewer is the same user who opened the PR.
         event = call_args.kwargs.get("event") or call_args.args[4]
-        assert event == "REQUEST_CHANGES"  # derived from review text
+        assert event == "COMMENT"
         assert "posted to GitHub" in result
 
     @pytest.mark.asyncio
@@ -267,7 +268,7 @@ class TestGenerateReview:
 
         # Review text is still returned even if posting fails
         assert "Code Review" in result
-        assert "failed to post to GitHub" in result
+        assert "Failed to post review to GitHub" in result
 
     @pytest.mark.asyncio
     async def test_no_cached_pr_returns_error(self):
@@ -381,11 +382,14 @@ class TestCodeReviewAgent:
 
     @pytest.mark.asyncio
     async def test_json_input_parsed(self):
-        """JSON input is converted to a rich prompt without raising."""
-        agent, llm_mock = self._make_agent([AGENT_FINAL_ANSWER])
+        """JSON input triggers the full direct-call pipeline and returns a review."""
+        # Direct call path: analyze_file × 2 (one per FAKE_FILES) + generate_review × 1
+        analysis_1 = "ISSUE | HIGH | line 2 | SECURITY | SQL injection"
+        analysis_2 = "ISSUE | MEDIUM | line 3 | SECURITY | MD5 is weak"
+        agent, llm_mock = self._make_agent([analysis_1, analysis_2, FAKE_REVIEW])
         result = await agent.run('{"owner": "acme", "repo": "backend", "pr_number": 42}')
-        # Even if LLM skips straight to answer, we got an AgentResult
         assert result.answer is not None
+        assert result.iterations == 3
 
     @pytest.mark.asyncio
     async def test_plain_text_input(self):
@@ -395,18 +399,22 @@ class TestCodeReviewAgent:
         assert result.answer is not None
 
     @pytest.mark.asyncio
-    async def test_max_iterations_not_exceeded(self):
-        """Agent exits gracefully if it never reaches an Answer."""
-        # Always return a non-Answer response → hits MAX_ITERATIONS
-        no_answer = (
-            "Thought: still thinking\n"
-            'Action: fetch_pr\n'
-            'Action Input: {"owner": "a", "repo": "b", "pr_number": 1}'
-        )
-        agent, _ = self._make_agent([no_answer] * 20)
-        result = await agent.run('{"owner": "a", "repo": "b", "pr_number": 1}')
-        assert "unable to find" in result.answer.lower()
-        assert result.iterations == 10
+    async def test_github_error_returns_error_answer(self):
+        """A GitHub error on fetch_pr returns an error answer without calling LLM."""
+        gh = make_github_mock()
+        gh.get_pr = AsyncMock(side_effect=GitHubError(404, "Not Found"))
+
+        agent = CodeReviewAgent(github=gh)
+        llm_mock = MagicMock()
+        llm_mock.complete = AsyncMock()
+        agent._llm = llm_mock
+
+        result = await agent.run('{"owner": "a", "repo": "b", "pr_number": 999}')
+
+        assert "GitHub error" in result.answer
+        assert "404" in result.answer
+        assert result.iterations == 1
+        llm_mock.complete.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

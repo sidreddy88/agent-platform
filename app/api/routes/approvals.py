@@ -8,10 +8,14 @@ POST /approvals/{id}/approve     approve a pending request
 POST /approvals/{id}/reject      reject a pending request
 """
 
+from datetime import datetime
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.models.events import IncidentStatus
 from app.services.approvals import ApprovalRequest, approval_service
+from app.services.incident_store import incident_store
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -56,21 +60,46 @@ async def get_one(request_id: str):
 
 @router.post("/{request_id}/approve", response_model=ApprovalRequest)
 async def approve(request_id: str, body: ApproveBody):
-    """Approve a pending approval request."""
+    """Approve a pending approval request and resolve the linked incident."""
     try:
-        return approval_service.approve(request_id, body.approver)
+        req = approval_service.approve(request_id, body.approver)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+    incident_id = req.parameters.get("incident_id")
+    if incident_id:
+        incident = incident_store.get(incident_id)
+        if incident:
+            incident.human_decision = "approved"
+            incident.outcome = "fix_merged"
+            incident.status = IncidentStatus.RESOLVED
+            incident.resolved_at = datetime.utcnow()
+            incident_store.update(incident)
+
+    return req
 
 
 @router.post("/{request_id}/reject", response_model=ApprovalRequest)
 async def reject(request_id: str, body: RejectBody):
-    """Reject a pending approval request."""
+    """Reject a pending approval request and mark the linked incident as rejected."""
     try:
-        return approval_service.reject(request_id, body.approver, body.reason)
+        req = approval_service.reject(request_id, body.approver, body.reason)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+    incident_id = req.parameters.get("incident_id")
+    if incident_id:
+        incident = incident_store.get(incident_id)
+        if incident:
+            incident.human_decision = "rejected"
+            incident.human_decision_reason = body.reason
+            incident.outcome = "fix_rejected"
+            incident.status = IncidentStatus.REJECTED
+            incident.resolved_at = datetime.utcnow()
+            incident_store.update(incident)
+
+    return req
