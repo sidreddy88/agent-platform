@@ -61,7 +61,8 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
 
         if action == "closed" and pr.get("merged"):
             background_tasks.add_task(_notify_pr_merged, pr, repo)
-            return {"status": "notified", "event": "pr_merged", "pr": pr_number, "repo": repo}
+            background_tasks.add_task(_run_monitor_generation, pr, repo)
+            return {"status": "queued", "event": "pr_merged", "pr": pr_number, "repo": repo}
 
     if event == "workflow_run":
         run = data.get("workflow_run", {})
@@ -70,6 +71,34 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
             return {"status": "notified", "event": "build_failed"}
 
     return {"status": "ignored", "event": event}
+
+
+async def _run_monitor_generation(pr: dict, repo: str) -> None:
+    """Generate monitoring coverage for a merged PR (runs out-of-band)."""
+    pr_number: int = pr.get("number", 0)
+    pr_title: str = pr.get("title", "")
+    pr_body: str = pr.get("body", "") or ""
+    logger.info("[MonitorGen] Starting for %s#%d", repo, pr_number)
+    try:
+        owner, repo_name = repo.split("/", 1)
+        from app.agents.monitor_generation import MonitorGenerationAgent
+        from app.services.monitor_store import monitor_store
+        agent = MonitorGenerationAgent()
+        result = await agent.generate_monitors(
+            owner=owner,
+            repo=repo_name,
+            pr_number=pr_number,
+            pr_title=pr_title,
+            pr_description=pr_body,
+        )
+        monitor_store.save(repo, pr_number, result)
+        logger.info(
+            "[MonitorGen] %s#%d — %d monitors generated (coverage: %.0f%%, dry_run=%s)",
+            repo, pr_number, result.monitors_created,
+            result.coverage_ratio * 100, result.dry_run,
+        )
+    except Exception as exc:
+        logger.error("[MonitorGen] Failed for %s#%d: %s", repo, pr_number, exc)
 
 
 async def _notify_pr_merged(pr: dict, repo: str) -> None:
