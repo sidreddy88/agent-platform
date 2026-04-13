@@ -278,12 +278,22 @@ class IncidentLoop:
             incident.pr_url = triage.duplicate_pr
             incident_store.update(incident)
             await _notify_triage(incident.id, event, triage)
+            try:
+                from app.services.golden_dataset_builder import golden_dataset_builder
+                golden_dataset_builder.capture(incident)
+            except Exception:
+                pass
             return
 
         if triage.decision == "noise":
             incident.status = IncidentStatus.NOISE
             incident_store.update(incident)
             await _notify_triage(incident.id, event, triage)
+            try:
+                from app.services.golden_dataset_builder import golden_dataset_builder
+                golden_dataset_builder.capture(incident)
+            except Exception:
+                pass
             return
 
         # Real incident — set severity and proceed
@@ -316,6 +326,11 @@ class IncidentLoop:
             )
             incident_store.update(incident)
             await _notify_diagnosis(incident, diagnosis)
+            try:
+                from app.services.golden_dataset_builder import golden_dataset_builder
+                golden_dataset_builder.capture(incident)
+            except Exception:
+                pass
             return
 
         # High confidence → generate fix
