@@ -78,6 +78,11 @@ async def approve(request_id: str, body: ApproveBody):
             incident.status = IncidentStatus.RESOLVED
             incident.resolved_at = datetime.utcnow()
             incident_store.update(incident)
+            try:
+                from app.services.golden_dataset_builder import golden_dataset_builder
+                golden_dataset_builder.capture(incident)
+            except Exception:
+                pass
 
     return req
 
@@ -111,5 +116,12 @@ async def reject(request_id: str, body: RejectBody):
                 logging.getLogger(__name__).warning(
                     "[Approvals] Failed to log preference pair: %s", exc
                 )
+
+            # Capture terminal state for golden dataset
+            try:
+                from app.services.golden_dataset_builder import golden_dataset_builder
+                golden_dataset_builder.capture(incident)
+            except Exception:
+                pass
 
     return req
