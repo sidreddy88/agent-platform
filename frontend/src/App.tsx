@@ -12,12 +12,13 @@ import { MongoDBPillar } from "./components/MongoDBPillar";
 import { GitHubPillar } from "./components/GitHubPillar";
 import { IncidentFeed } from "./components/IncidentFeed";
 import { AgentHealthPanel } from "./components/AgentHealthPanel";
+import { PRsPage } from "./components/PRsPage";
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "agents" | "logs";
+type Tab = "dashboard" | "agents" | "prs" | "logs";
 
 export default function App() {
   const { data, loading, error, lastUpdated, refetch } = useDashboard();
@@ -34,6 +35,7 @@ export default function App() {
           <div style={{ display: "flex", gap: 4, marginLeft: 16 }}>
             <button style={tabBtn(tab === "dashboard")} onClick={() => setTab("dashboard")}>Dashboard</button>
             <button style={tabBtn(tab === "agents")} onClick={() => setTab("agents")}>Agents</button>
+            <button style={tabBtn(tab === "prs")} onClick={() => setTab("prs")}>PRs</button>
             <button style={tabBtn(tab === "logs")} onClick={() => setTab("logs")}>Logs</button>
           </div>
         </div>
@@ -56,6 +58,11 @@ export default function App() {
 
       {/* Main content */}
       {tab === "logs" && <LogsPage />}
+      {tab === "prs" && (
+        <main style={main}>
+          <PRsPage />
+        </main>
+      )}
       {tab === "agents" && (
         <main style={main}>
           <AgentHealthPanel snapshot={agentSnapshot} connected={connected} />
@@ -116,6 +123,28 @@ export default function App() {
                 </div>
               </div>
             </section>
+
+            {/* Agent pipeline strip — shown while pipeline active or recently ran */}
+            {(agentSnapshot?.pipeline_activity.length ?? 0) > 0 && (
+              <section style={activeAgentsStrip}>
+                <span style={activeAgentsLabel}>
+                  {(agentSnapshot?.active_runs.length ?? 0) > 0 ? "Agents running" : "Pipeline"}
+                </span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {agentSnapshot!.pipeline_activity.map((r) => (
+                    <div key={r.run_id} style={activeAgentPill}>
+                      <span style={r.status === "running" ? activeDot : doneDot(r.status)} />
+                      <span style={activeAgentName}>{r.agent_name}</span>
+                      <span style={activeAgentMeta}>
+                        {r.status === "running"
+                          ? `${r.tool_calls} calls`
+                          : r.status === "failed" ? "failed" : `${r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + "s" : "done"}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
 
             {/* Incident Feed */}
             <section>
@@ -249,4 +278,63 @@ const centered: React.CSSProperties = {
   justifyContent: "center",
   padding: "80px 0",
   textAlign: "center",
+};
+
+const activeAgentsStrip: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 16,
+  background: "#1e2130",
+  border: "1px solid #2d3149",
+  borderRadius: 10,
+  padding: "10px 16px",
+  flexWrap: "wrap",
+};
+
+const activeAgentsLabel: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  color: "#22c55e",
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  whiteSpace: "nowrap",
+};
+
+const activeAgentPill: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  background: "#161927",
+  border: "1px solid #2d3149",
+  borderRadius: 6,
+  padding: "4px 10px",
+};
+
+const activeDot: React.CSSProperties = {
+  width: 7,
+  height: 7,
+  borderRadius: "50%",
+  background: "#22c55e",
+  flexShrink: 0,
+  boxShadow: "0 0 0 2px rgba(34,197,94,0.25)",
+};
+
+const doneDot = (status: string): React.CSSProperties => ({
+  width: 7,
+  height: 7,
+  borderRadius: "50%",
+  background: status === "failed" ? "#ef4444" : "#1e4d2b",
+  border: `1px solid ${status === "failed" ? "#ef4444" : "#22c55e"}`,
+  flexShrink: 0,
+});
+
+const activeAgentName: React.CSSProperties = {
+  fontSize: 12,
+  fontWeight: 600,
+  color: "#e2e8f0",
+};
+
+const activeAgentMeta: React.CSSProperties = {
+  fontSize: 11,
+  color: "#4b5563",
 };
