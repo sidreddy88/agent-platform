@@ -52,17 +52,20 @@ app.include_router(agents_routes.router)
 
 
 async def _agent_status_broadcaster() -> None:
-    """Broadcast agent status to all WS clients every 2 seconds."""
+    """
+    Broadcast agent status to all WS clients.
+    Polls at 0.5s while the pipeline is active, 3s when idle.
+    """
     from app.api.websocket_dashboard import broadcast
     from app.services.agent_tracker import agent_tracker
     while True:
-        await asyncio.sleep(2)
         try:
             snapshot = agent_tracker.snapshot()
-            if snapshot["active_runs"] or snapshot["recent_errors"] or snapshot["stats"]:
-                await broadcast({"type": "agent_status", "agents": snapshot})
+            active = bool(snapshot["active_runs"]) or bool(snapshot["pipeline_activity"])
+            await broadcast({"type": "agent_status", "agents": snapshot})
+            await asyncio.sleep(0.5 if active else 3.0)
         except Exception:
-            pass
+            await asyncio.sleep(3.0)
 
 
 @app.on_event("startup")

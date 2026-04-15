@@ -6,10 +6,11 @@ stats (runs today, error rate, avg duration). Updated by BaseAgent.run().
 """
 from __future__ import annotations
 
+import json
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 
@@ -101,6 +102,18 @@ class AgentStatusTracker:
     def recent_errors(self) -> list[AgentRun]:
         return list(self._recent_errors)
 
+    def pipeline_activity(self, window_seconds: int = 30) -> list[AgentRun]:
+        """Active runs + runs completed within the last N seconds, newest first."""
+        now = datetime.utcnow()
+        recent = [
+            r for r in self._history
+            if r.completed_at and (now - r.completed_at).total_seconds() <= window_seconds
+        ]
+        # Combine active (in-flight) + recent completed, sorted by start time desc
+        combined = list(self._active.values()) + recent
+        combined.sort(key=lambda r: r.started_at, reverse=True)
+        return combined
+
     def stats(self) -> list[dict[str, Any]]:
         """Per-agent stats for runs today (completed + failed)."""
         today = date.today()
@@ -130,11 +143,14 @@ class AgentStatusTracker:
         return result
 
     def snapshot(self) -> dict[str, Any]:
-        return {
+        raw = {
             "active_runs": [r.to_dict() for r in self.active_runs()],
+            "pipeline_activity": [r.to_dict() for r in self.pipeline_activity()],
             "recent_errors": [r.to_dict() for r in self.recent_errors()],
             "stats": self.stats(),
         }
+        # Guarantee JSON safety — converts any stray datetime/enum/etc. to str
+        return json.loads(json.dumps(raw, default=str))
 
 
 agent_tracker = AgentStatusTracker()

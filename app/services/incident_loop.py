@@ -343,7 +343,37 @@ class IncidentLoop:
             incident.id, diagnosis.confidence * 100,
         )
 
+        # ── Idempotency gate ─────────────────────────────────────────
+        # If an open PR already exists for this exact error_type + service,
+        # mark as duplicate and stop — no second PR gets created.
+        error_type = incident.error_event.error_type
+        service = incident.error_event.service
+        if error_type and service:
+            existing_pr = incident_store.get_open_pr_for_error(error_type, service)
+            if existing_pr:
+                incident.status = IncidentStatus.DUPLICATE
+                incident.pr_url = existing_pr
+                incident.triage_decision = "duplicate"
+                incident.triage_reasoning = (
+                    f"Open PR already exists for {error_type} on {service}: {existing_pr}"
+                )
+                incident_store.update(incident)
+                logger.info(
+                    "[IncidentLoop] %s — open PR already exists for %s/%s (%s), skipping fix",
+                    incident.id, error_type, service, existing_pr,
+                )
+                return
+
         # ── Fix Generation ────────────────────────────────────────────
+        # Skip for demo events — we want to show agent activity without
+        # creating real GitHub branches and PRs every time.
+        if incident.error_event.metadata.get("demo"):
+            incident.status = IncidentStatus.AWAITING_APPROVAL
+            incident.fix_attempted = "[Demo mode — fix generation skipped]"
+            incident_store.update(incident)
+            logger.info("[IncidentLoop] %s — demo event, skipping fix + PR creation", incident.id)
+            return
+
         fix = await self._run_fix(incident)
         if fix is None:
             logger.error("[IncidentLoop] %s — fix generation failed, leaving in FIXING", incident.id)
