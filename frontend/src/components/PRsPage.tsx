@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from "react";
-import type { AgentPR } from "../types";
+import type { AgentPR, AgentRun } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
 function timeAgo(iso: string | null): string {
   if (!iso) return "—";
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  // Append Z if no timezone info so the browser treats it as UTC, not local time
+  const utc = iso.endsWith("Z") || iso.includes("+") ? iso : iso + "Z";
+  const s = Math.floor((Date.now() - new Date(utc).getTime()) / 1000);
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
@@ -16,6 +18,12 @@ function mttr(seconds: number | null): string {
   if (seconds < 60) return `${Math.floor(seconds)}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   return `${(seconds / 3600).toFixed(1)}h`;
+}
+
+function duration(ms: number | null): string {
+  if (ms === null) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 export function PRsPage() {
@@ -44,7 +52,7 @@ export function PRsPage() {
       <div style={header}>
         <div>
           <h2 style={title}>Agent PRs</h2>
-          <p style={subtitle}>Pull requests opened by the fix-generation agent</p>
+          <p style={subtitle}>Pull requests opened by the incident pipeline, with per-PR agent stats</p>
         </div>
         <div style={stats}>
           <StatChip label="Total" value={prs.length} />
@@ -57,7 +65,7 @@ export function PRsPage() {
       {loading && <p style={msg}>Loading...</p>}
       {error && <p style={{ ...msg, color: "#ef4444" }}>Failed to load: {error}</p>}
       {!loading && !error && prs.length === 0 && (
-        <p style={msg}>No agent PRs yet. Run the demo from the Agents tab to generate one.</p>
+        <p style={msg}>No agent PRs yet. Trigger an incident to generate one.</p>
       )}
 
       {prs.map((pr) => (
@@ -68,26 +76,22 @@ export function PRsPage() {
 }
 
 function PRCard({ pr }: { pr: AgentPR }) {
+  const [expanded, setExpanded] = useState(false);
+
   return (
     <div style={card}>
       {/* Top row */}
       <div style={cardTop}>
         <div style={cardLeft}>
           <div style={cardTitleRow}>
-            {pr.pr_number && (
-              <span style={prNumber}>#{pr.pr_number}</span>
-            )}
+            {pr.pr_number && <span style={prNumber}>#{pr.pr_number}</span>}
             <span style={cardTitle}>{pr.title}</span>
           </div>
           <div style={cardMeta}>
             <span style={metaChip}>{pr.service}</span>
-            {pr.severity && (
-              <StatusBadge type="severity" value={pr.severity as any} />
-            )}
+            {pr.severity && <StatusBadge type="severity" value={pr.severity as any} />}
             <StatusBadge type="status" value={pr.status} />
-            {pr.review_posted && (
-              <span style={reviewedBadge}>reviewed</span>
-            )}
+            {pr.review_posted && <span style={reviewedBadge}>reviewed</span>}
           </div>
         </div>
         <a href={pr.pr_url} target="_blank" rel="noopener noreferrer" style={prLink}>
@@ -103,12 +107,63 @@ function PRCard({ pr }: { pr: AgentPR }) {
         </p>
       )}
 
+      {/* Fix details */}
+      {(pr.pr_branch || pr.pr_files_changed.length > 0) && (
+        <div style={fixDetails}>
+          <div style={fixRow}>
+            <span style={fixLabel}>Branch</span>
+            <code style={fixValue}>{pr.pr_branch ?? "—"}</code>
+          </div>
+          <div style={fixRow}>
+            <span style={fixLabel}>Files</span>
+            <span style={fixValue}>{pr.pr_files_changed.length > 0 ? pr.pr_files_changed.join(", ") : "—"}</span>
+          </div>
+          <div style={fixRow}>
+            <span style={fixLabel}>Test added</span>
+            <span style={{ ...fixValue, color: pr.pr_test_added ? "#22c55e" : "#6b7280" }}>
+              {pr.pr_test_added ? "yes" : "no"}
+            </span>
+          </div>
+          {pr.occurrences_24h !== null && (
+            <div style={fixRow}>
+              <span style={fixLabel}>Occurrences (24h)</span>
+              <span style={fixValue}>{pr.occurrences_24h}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Agent runs */}
+      {pr.agent_runs.length > 0 && (
+        <div style={runsSection}>
+          <button style={runsToggle} onClick={() => setExpanded((e) => !e)}>
+            <span style={runsToggleLabel}>
+              {expanded ? "▾" : "▸"} Agent runs ({pr.agent_runs.length})
+            </span>
+            <span style={runsSummary}>
+              {pr.agent_runs.map((r) => r.agent_name.replace("Agent", "")).join(" → ")}
+            </span>
+          </button>
+          {expanded && (
+            <div style={runsTable}>
+              <div style={runsHeader}>
+                <span style={runCol("agent")}>Agent</span>
+                <span style={runCol("status")}>Status</span>
+                <span style={runCol("duration")}>Duration</span>
+                <span style={runCol("tools")}>Tool calls</span>
+              </div>
+              {pr.agent_runs.map((run) => (
+                <AgentRunRow key={run.run_id} run={run} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Bottom row */}
       <div style={cardBottom}>
         <div style={cardBottomLeft}>
-          {pr.confidence !== null && (
-            <ConfidenceBar confidence={pr.confidence} />
-          )}
+          {pr.confidence !== null && <ConfidenceBar confidence={pr.confidence} />}
           {pr.human_decision && (
             <span style={humanDecision(pr.human_decision)}>
               {pr.human_decision === "approved" ? "Approved by human" : "Rejected by human"}
@@ -122,6 +177,27 @@ function PRCard({ pr }: { pr: AgentPR }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function AgentRunRow({ run }: { run: AgentRun }) {
+  const isCompleted = run.status === "completed";
+  const isFailed = run.status === "failed";
+  const statusColor = isCompleted ? "#22c55e" : isFailed ? "#ef4444" : "#f59e0b";
+
+  return (
+    <div style={runRow}>
+      <span style={runCol("agent")}>
+        <span style={runDot(statusColor)} />
+        {run.agent_name}
+      </span>
+      <span style={{ ...runCol("status"), color: statusColor }}>{run.status}</span>
+      <span style={{ ...runCol("duration"), color: "#94a3b8" }}>{duration(run.duration_ms)}</span>
+      <span style={{ ...runCol("tools"), color: "#64748b" }}>{run.tool_calls}</span>
+      {isFailed && run.error_message && (
+        <span style={runError}>{run.error_message.slice(0, 60)}</span>
+      )}
     </div>
   );
 }
@@ -151,11 +227,7 @@ function StatChip({ label, value, color = "#94a3b8" }: { label: string; value: n
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
-const page: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 12,
-};
+const page: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 12 };
 
 const header: React.CSSProperties = {
   display: "flex",
@@ -170,31 +242,18 @@ const header: React.CSSProperties = {
 };
 
 const title: React.CSSProperties = {
-  fontSize: 14,
-  fontWeight: 700,
-  color: "#94a3b8",
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
-  margin: 0,
+  fontSize: 14, fontWeight: 700, color: "#94a3b8",
+  letterSpacing: "0.08em", textTransform: "uppercase", margin: 0,
 };
 
 const subtitle: React.CSSProperties = {
-  fontSize: 12,
-  color: "#4b5563",
-  marginTop: 4,
-  marginBottom: 0,
+  fontSize: 12, color: "#4b5563", marginTop: 4, marginBottom: 0,
 };
 
-const stats: React.CSSProperties = {
-  display: "flex",
-  gap: 20,
-};
+const stats: React.CSSProperties = { display: "flex", gap: 20 };
 
 const statChip: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  alignItems: "center",
-  gap: 2,
+  display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
 };
 
 const card: React.CSSProperties = {
@@ -208,153 +267,176 @@ const card: React.CSSProperties = {
 };
 
 const cardTop: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "flex-start",
-  gap: 12,
+  display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12,
 };
 
 const cardLeft: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 6,
-  minWidth: 0,
+  display: "flex", flexDirection: "column", gap: 6, minWidth: 0,
 };
 
 const cardTitleRow: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  flexWrap: "wrap",
+  display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
 };
 
 const prNumber: React.CSSProperties = {
-  fontSize: 13,
-  fontWeight: 700,
-  color: "#60a5fa",
-  fontFamily: "monospace",
-  flexShrink: 0,
+  fontSize: 13, fontWeight: 700, color: "#60a5fa", fontFamily: "monospace", flexShrink: 0,
 };
 
 const cardTitle: React.CSSProperties = {
-  fontSize: 14,
-  fontWeight: 600,
-  color: "#e2e8f0",
-  lineHeight: 1.4,
+  fontSize: 14, fontWeight: 600, color: "#e2e8f0", lineHeight: 1.4,
 };
 
 const cardMeta: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  flexWrap: "wrap",
+  display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
 };
 
 const metaChip: React.CSSProperties = {
-  fontSize: 11,
-  color: "#94a3b8",
-  background: "#161927",
-  border: "1px solid #2d3149",
-  borderRadius: 4,
-  padding: "1px 7px",
+  fontSize: 11, color: "#94a3b8", background: "#161927",
+  border: "1px solid #2d3149", borderRadius: 4, padding: "1px 7px",
 };
 
 const reviewedBadge: React.CSSProperties = {
-  fontSize: 11,
-  fontWeight: 600,
-  color: "#06b6d4",
-  background: "rgba(6,182,212,0.1)",
-  border: "1px solid rgba(6,182,212,0.2)",
-  borderRadius: 4,
-  padding: "1px 6px",
+  fontSize: 11, fontWeight: 600, color: "#06b6d4",
+  background: "rgba(6,182,212,0.1)", border: "1px solid rgba(6,182,212,0.2)",
+  borderRadius: 4, padding: "1px 6px",
 };
 
 const prLink: React.CSSProperties = {
-  fontSize: 13,
-  fontWeight: 600,
-  color: "#60a5fa",
-  textDecoration: "none",
-  background: "rgba(96,165,250,0.08)",
-  border: "1px solid rgba(96,165,250,0.2)",
-  borderRadius: 6,
-  padding: "5px 12px",
-  whiteSpace: "nowrap",
-  flexShrink: 0,
+  fontSize: 13, fontWeight: 600, color: "#60a5fa", textDecoration: "none",
+  background: "rgba(96,165,250,0.08)", border: "1px solid rgba(96,165,250,0.2)",
+  borderRadius: 6, padding: "5px 12px", whiteSpace: "nowrap", flexShrink: 0,
 };
 
 const diagnosisText: React.CSSProperties = {
-  fontSize: 12,
-  color: "#94a3b8",
-  margin: 0,
-  lineHeight: 1.5,
-  borderLeft: "2px solid #2d3149",
-  paddingLeft: 10,
+  fontSize: 12, color: "#94a3b8", margin: 0, lineHeight: 1.5,
+  borderLeft: "2px solid #2d3149", paddingLeft: 10,
 };
 
-const diagnosisLabel: React.CSSProperties = {
-  color: "#64748b",
+const diagnosisLabel: React.CSSProperties = { color: "#64748b", fontWeight: 600 };
+
+// Fix details
+const fixDetails: React.CSSProperties = {
+  background: "#161927",
+  border: "1px solid #2d3149",
+  borderRadius: 8,
+  padding: "10px 14px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+};
+
+const fixRow: React.CSSProperties = {
+  display: "flex",
+  alignItems: "baseline",
+  gap: 10,
+};
+
+const fixLabel: React.CSSProperties = {
+  fontSize: 11,
   fontWeight: 600,
+  color: "#4b5563",
+  textTransform: "uppercase",
+  letterSpacing: "0.05em",
+  width: 120,
+  flexShrink: 0,
+};
+
+const fixValue: React.CSSProperties = {
+  fontSize: 12,
+  color: "#94a3b8",
+  fontFamily: "monospace",
+  wordBreak: "break-all",
+};
+
+// Agent runs
+const runsSection: React.CSSProperties = {
+  background: "#161927", border: "1px solid #2d3149", borderRadius: 8, overflow: "hidden",
+};
+
+const runsToggle: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 12, width: "100%",
+  background: "none", border: "none", cursor: "pointer",
+  padding: "8px 12px", textAlign: "left",
+};
+
+const runsToggleLabel: React.CSSProperties = {
+  fontSize: 12, fontWeight: 600, color: "#64748b", whiteSpace: "nowrap",
+};
+
+const runsSummary: React.CSSProperties = {
+  fontSize: 11, color: "#374151", overflow: "hidden",
+  textOverflow: "ellipsis", whiteSpace: "nowrap",
+};
+
+const runsTable: React.CSSProperties = {
+  borderTop: "1px solid #2d3149",
+};
+
+const runsHeader: React.CSSProperties = {
+  display: "flex", padding: "6px 12px", gap: 0,
+  borderBottom: "1px solid #1a1f30",
+};
+
+const runRow: React.CSSProperties = {
+  display: "flex", padding: "6px 12px", gap: 0,
+  borderBottom: "1px solid #1a1f30", alignItems: "center", flexWrap: "wrap",
+};
+
+const runCol = (col: "agent" | "status" | "duration" | "tools"): React.CSSProperties => {
+  const widths = { agent: "45%", status: "18%", duration: "20%", tools: "17%" };
+  return {
+    fontSize: col === "agent" ? 12 : 11,
+    color: col === "agent" ? "#cbd5e1" : "#4b5563",
+    fontWeight: col === "agent" ? 500 : 400,
+    width: widths[col],
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+  };
+};
+
+const runDot = (color: string): React.CSSProperties => ({
+  width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0,
+});
+
+const runError: React.CSSProperties = {
+  fontSize: 11, color: "#f87171", fontFamily: "monospace",
+  width: "100%", paddingLeft: "45%", marginTop: 2,
 };
 
 const cardBottom: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  flexWrap: "wrap",
-  gap: 8,
+  display: "flex", justifyContent: "space-between",
+  alignItems: "center", flexWrap: "wrap", gap: 8,
 };
 
 const cardBottomLeft: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 16,
-  flexWrap: "wrap",
+  display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap",
 };
 
-const metaText: React.CSSProperties = {
-  fontSize: 11,
-  color: "#4b5563",
-};
+const metaText: React.CSSProperties = { fontSize: 11, color: "#4b5563" };
 
 const humanDecision = (decision: string): React.CSSProperties => ({
-  fontSize: 11,
-  fontWeight: 600,
+  fontSize: 11, fontWeight: 600,
   color: decision === "approved" ? "#22c55e" : "#ef4444",
   background: decision === "approved" ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
   border: `1px solid ${decision === "approved" ? "rgba(34,197,94,0.2)" : "rgba(239,68,68,0.2)"}`,
-  borderRadius: 4,
-  padding: "2px 8px",
+  borderRadius: 4, padding: "2px 8px",
 });
 
-const confRow: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-};
+const confRow: React.CSSProperties = { display: "flex", alignItems: "center", gap: 8 };
 
 const confLabel: React.CSSProperties = {
-  fontSize: 11,
-  color: "#4b5563",
-  whiteSpace: "nowrap",
+  fontSize: 11, color: "#4b5563", whiteSpace: "nowrap",
 };
 
 const confTrack: React.CSSProperties = {
-  width: 80,
-  height: 4,
-  background: "#2d3149",
-  borderRadius: 2,
-  overflow: "hidden",
+  width: 80, height: 4, background: "#2d3149", borderRadius: 2, overflow: "hidden",
 };
 
 const confFill: React.CSSProperties = {
-  height: "100%",
-  borderRadius: 2,
-  transition: "width 0.3s ease",
+  height: "100%", borderRadius: 2, transition: "width 0.3s ease",
 };
 
 const msg: React.CSSProperties = {
-  fontSize: 13,
-  color: "#4b5563",
-  padding: "40px 0",
-  textAlign: "center",
+  fontSize: 13, color: "#4b5563", padding: "40px 0", textAlign: "center",
 };

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 import uuid
 
@@ -69,6 +69,9 @@ class IncidentState(BaseModel):
     fix_description: Optional[str] = None   # full FixResult.fix_description (for RLHF logging)
     pr_url: Optional[str] = None
     pr_number: Optional[int] = None
+    pr_branch: Optional[str] = None
+    pr_files_changed: List[str] = Field(default_factory=list)
+    pr_test_added: bool = False
     review_posted: bool = False
     approval_id: Optional[str] = None
 

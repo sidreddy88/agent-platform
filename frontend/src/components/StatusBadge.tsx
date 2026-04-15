@@ -26,9 +26,10 @@ interface Props {
 }
 
 export function StatusBadge({ type, value }: Props) {
-  const style = type === "severity"
+  const style = (type === "severity"
     ? SEVERITY_STYLES[value as Severity]
-    : STATUS_STYLES[value as IncidentStatus];
+    : STATUS_STYLES[value as IncidentStatus])
+    ?? "background:#374151;color:#6b7280;";
 
   return (
     <span style={{

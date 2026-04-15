@@ -144,6 +144,36 @@ class AgentStatusTracker:
             })
         return result
 
+    def get_runs_for_incident(self, incident_id: str) -> list[dict[str, Any]]:
+        """Return all completed/failed runs for an incident from DB, oldest first."""
+        from app.services.database import get_db
+        try:
+            conn = get_db()
+            try:
+                rows = list(conn.execute(
+                    "SELECT * FROM agent_runs WHERE incident_id = ? ORDER BY started_at ASC",
+                    (incident_id,),
+                ))
+            finally:
+                conn.close()
+            return [
+                {
+                    "run_id": row["run_id"],
+                    "agent_name": row["agent_name"],
+                    "incident_id": row["incident_id"],
+                    "status": row["status"],
+                    "started_at": row["started_at"],
+                    "completed_at": row["completed_at"],
+                    "duration_ms": row["duration_ms"],
+                    "error_message": row["error_message"],
+                    "tool_calls": row["tool_calls"] or 0,
+                }
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.warning("[AgentTracker] get_runs_for_incident failed: %s", exc)
+            return []
+
     def snapshot(self) -> dict[str, Any]:
         raw = {
             "active_runs": [r.to_dict() for r in self.active_runs()],
