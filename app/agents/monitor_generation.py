@@ -342,6 +342,11 @@ STEPS:
       also call generate_do_health_checks with file, additions, any new endpoint paths found
 3. Answer with ONLY a valid JSON object (no other text):
 
+MANDATORY CONSTRAINTS:
+- You MUST call analyze_pr_diff first, even if the PR title or description is empty.
+- Do not output an Answer until analyze_pr_diff has been called and its result observed.
+- If analyze_pr_diff returns an error or empty diff, output the JSON with monitors=[] and files_analyzed=0.
+
 {{
   "monitors": [
     {{
