@@ -18,6 +18,7 @@ from typing import Any, Dict, Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.services.agent_tracker import agent_tracker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 
@@ -54,6 +55,7 @@ async def dashboard_ws(websocket: WebSocket) -> None:
             ],
             "metrics": incident_store.metrics(),
             "queue": event_queue.stats,
+            "agents": agent_tracker.snapshot(),
             "timestamp": datetime.utcnow().isoformat(),
         })
 

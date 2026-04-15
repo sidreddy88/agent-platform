@@ -17,6 +17,7 @@ const STATUS_STYLES: Record<IncidentStatus, string> = {
   resolved:          "background:#22c55e;color:#000;",
   noise:             "background:#6b7280;color:#fff;",
   duplicate:         "background:#374151;color:#9ca3af;",
+  rejected:          "background:#7f1d1d;color:#fca5a5;",
 };
 
 interface Props {

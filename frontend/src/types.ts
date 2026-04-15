@@ -200,8 +200,36 @@ export interface Incident {
   age_seconds: number;
 }
 
+export interface AgentRun {
+  run_id: string;
+  agent_name: string;
+  incident_id: string | null;
+  status: "running" | "completed" | "failed";
+  started_at: string;
+  completed_at: string | null;
+  duration_ms: number | null;
+  error_message: string | null;
+  tool_calls: number;
+}
+
+export interface AgentStats {
+  agent_name: string;
+  runs_today: number;
+  errors_today: number;
+  error_rate: number;
+  avg_duration_ms: number | null;
+  currently_active: number;
+}
+
+export interface AgentSnapshot {
+  active_runs: AgentRun[];
+  recent_errors: AgentRun[];
+  stats: AgentStats[];
+}
+
 export type WSMessage =
-  | { type: "init"; incidents: Incident[]; metrics: IncidentMetrics; queue: QueueStats; timestamp: string }
+  | { type: "init"; incidents: Incident[]; metrics: IncidentMetrics; queue: QueueStats; agents?: AgentSnapshot; timestamp: string }
   | { type: "event"; event: ErrorEvent }
   | { type: "incident_update"; incident: Incident }
+  | { type: "agent_status"; agents: AgentSnapshot }
   | { type: "pong" };

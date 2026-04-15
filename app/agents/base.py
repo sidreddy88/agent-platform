@@ -214,58 +214,73 @@ class BaseAgent:
     @trace_agent
     async def run(self, user_input: str) -> AgentResult:
         """Run the ReAct loop and return the final answer + all steps."""
-        system = _build_system_prompt(self._tools)
-        messages: list[dict] = [{"role": "user", "content": user_input}]
-        steps: list[Step] = []
+        from app.services.agent_tracker import agent_tracker
+        _run_id = agent_tracker.start(type(self).__name__)
+        self._current_run_id = _run_id
+        _failed = False
 
-        for i in range(1, MAX_ITERATIONS + 1):
-            # Compress conversation history if the previous call's token count
-            # reached 70% of the context window (checked before every call
-            # except the very first — no usage data available yet on i==1).
-            if i > 1 and context_checkpointer.needs_checkpoint(self._llm.last_input_tokens):
-                agent_name = type(self).__name__
-                logger.warning(
-                    "[%s] Context checkpoint at iteration %d — %d input tokens (limit %d). Compressing.",
-                    agent_name, i, self._llm.last_input_tokens, context_checkpointer._limit,
-                )
-                messages = await context_checkpointer.compress(messages, steps)
+        try:
+            system = _build_system_prompt(self._tools)
+            messages: list[dict] = [{"role": "user", "content": user_input}]
+            steps: list[Step] = []
 
-            step = Step(iteration=i)
-            raw = await self._llm.complete(messages=messages, system=system, tracing_ctx=self._tracing_ctx)
+            for i in range(1, MAX_ITERATIONS + 1):
+                # Compress conversation history if the previous call's token count
+                # reached 70% of the context window (checked before every call
+                # except the very first — no usage data available yet on i==1).
+                if i > 1 and context_checkpointer.needs_checkpoint(self._llm.last_input_tokens):
+                    agent_name = type(self).__name__
+                    logger.warning(
+                        "[%s] Context checkpoint at iteration %d — %d input tokens (limit %d). Compressing.",
+                        agent_name, i, self._llm.last_input_tokens, context_checkpointer._limit,
+                    )
+                    messages = await context_checkpointer.compress(messages, steps)
 
-            # Append assistant turn so Claude sees its own prior reasoning
-            messages.append({"role": "assistant", "content": raw})
+                step = Step(iteration=i)
+                raw = await self._llm.complete(messages=messages, system=system, tracing_ctx=self._tracing_ctx)
 
-            parsed = _parse(raw)
-            step.thought = parsed.get("thought", "")
+                # Append assistant turn so Claude sees its own prior reasoning
+                messages.append({"role": "assistant", "content": raw})
 
-            # ── ANSWER → done ──────────────────────────────────────────
-            if "answer" in parsed:
-                step.answer = parsed["answer"]
+                parsed = _parse(raw)
+                step.thought = parsed.get("thought", "")
+
+                # ── ANSWER → done ──────────────────────────────────────────
+                if "answer" in parsed:
+                    step.answer = parsed["answer"]
+                    steps.append(step)
+                    return AgentResult(
+                        answer=step.answer,
+                        steps=steps,
+                        iterations=i,
+                    )
+
+                # ── ACTION → execute tool ───────────────────────────────────
+                step.action = parsed.get("action", "")
+                step.action_input = parsed.get("action_input", "{}")
+
+                observation = await self._execute_tool(step.action, step.action_input)
+                step.observation = observation
                 steps.append(step)
-                return AgentResult(
-                    answer=step.answer,
-                    steps=steps,
-                    iterations=i,
-                )
 
-            # ── ACTION → execute tool ───────────────────────────────────
-            step.action = parsed.get("action", "")
-            step.action_input = parsed.get("action_input", "{}")
+                # Feed observation back as a user turn
+                messages.append({"role": "user", "content": f"Observation: {observation}"})
 
-            observation = await self._execute_tool(step.action, step.action_input)
-            step.observation = observation
-            steps.append(step)
+            # Exceeded max iterations
+            return AgentResult(
+                answer="I was unable to find an answer within the allowed number of steps.",
+                steps=steps,
+                iterations=MAX_ITERATIONS,
+            )
 
-            # Feed observation back as a user turn
-            messages.append({"role": "user", "content": f"Observation: {observation}"})
+        except Exception as exc:
+            _failed = True
+            agent_tracker.fail(_run_id, str(exc))
+            raise
 
-        # Exceeded max iterations
-        return AgentResult(
-            answer="I was unable to find an answer within the allowed number of steps.",
-            steps=steps,
-            iterations=MAX_ITERATIONS,
-        )
+        finally:
+            if not _failed:
+                agent_tracker.complete(_run_id)
 
     # ------------------------------------------------------------------
     # Tool execution
@@ -287,6 +302,10 @@ class BaseAgent:
                 coro = fn(**parsed_input)
             else:
                 coro = fn(parsed_input)
-            return await trace_tool_call(self._tracing_ctx, name, parsed_input, coro)
+            result = await trace_tool_call(self._tracing_ctx, name, parsed_input, coro)
+            from app.services.agent_tracker import agent_tracker
+            if hasattr(self, "_current_run_id"):
+                agent_tracker.increment_tool_call(self._current_run_id)
+            return result
         except Exception as e:
             return f"Error running tool '{name}': {e}"
