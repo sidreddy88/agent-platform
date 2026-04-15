@@ -407,14 +407,21 @@ class CICDAgent(BaseAgent):
                 "Analyze the failure to determine its type and root cause. "
                 "Search the codebase if the analysis suggests specific files or code to look at. "
                 "Finally suggest a concrete fix. "
-                "Produce a complete CI failure report as your final answer."
+                "Produce a complete CI failure report as your final answer.\n\n"
+                "MANDATORY CONSTRAINTS:\n"
+                "- You MUST call get_workflow_runs before any other tool or your Answer.\n"
+                "- You MUST call get_run_logs and analyze_failure before writing your Answer.\n"
+                "- Never produce a CI failure report from memory — all data must come from tool results.\n"
+                "- If a specific run_id is not found, say so clearly and analyze the most recent failure instead."
             )
         except (json.JSONDecodeError, KeyError):
             prompt = (
                 user_input + " "
                 "First list recent workflow runs. Fetch logs for the most recent failure. "
                 "Analyze the failure type and root cause. Search the codebase if helpful. "
-                "Suggest a concrete fix as your final answer."
+                "Suggest a concrete fix as your final answer.\n\n"
+                "MANDATORY CONSTRAINTS: You MUST call get_workflow_runs first, then get_run_logs "
+                "and analyze_failure, before writing your Answer. Never produce a report from memory."
             )
 
         return await super().run(prompt)
