@@ -1,17 +1,21 @@
 """
-Agent status tracker — in-memory registry of active and recent agent runs.
+Agent status tracker — registry of active and recent agent runs.
 
-Tracks which agents are currently executing, recent failures, and per-agent
-stats (runs today, error rate, avg duration). Updated by BaseAgent.run().
+Active runs are kept in memory. Completed and failed runs are persisted
+to SQLite (agent_platform.db) and loaded back on startup, so run history
+and per-agent stats survive server restarts.
 """
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,12 +48,10 @@ class AgentStatusTracker:
     """Singleton tracking all agent invocations."""
 
     def __init__(self) -> None:
-        # Runs currently in flight
         self._active: dict[str, AgentRun] = {}
-        # Last 20 failed runs for error feed
         self._recent_errors: deque[AgentRun] = deque(maxlen=20)
-        # Last 500 completed (or failed) runs for stats
         self._history: deque[AgentRun] = deque(maxlen=500)
+        self._load_from_db()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -79,6 +81,7 @@ class AgentStatusTracker:
             run.completed_at = datetime.utcnow()
             run.duration_ms = (run.completed_at - run.started_at).total_seconds() * 1000
             self._history.append(run)
+            self._persist_run(run)
         return run
 
     def fail(self, run_id: str, error: str) -> AgentRun | None:
@@ -90,6 +93,7 @@ class AgentStatusTracker:
             run.error_message = error
             self._recent_errors.appendleft(run)
             self._history.append(run)
+            self._persist_run(run)
         return run
 
     # ------------------------------------------------------------------
@@ -109,7 +113,6 @@ class AgentStatusTracker:
             r for r in self._history
             if r.completed_at and (now - r.completed_at).total_seconds() <= window_seconds
         ]
-        # Combine active (in-flight) + recent completed, sorted by start time desc
         combined = list(self._active.values()) + recent
         combined.sort(key=lambda r: r.started_at, reverse=True)
         return combined
@@ -123,7 +126,6 @@ class AgentStatusTracker:
             if run.started_at.date() == today:
                 by_agent[run.agent_name].append(run)
 
-        # Ensure agents currently active appear even if no history today
         all_names = set(by_agent.keys()) | {r.agent_name for r in self._active.values()}
 
         result = []
@@ -149,8 +151,74 @@ class AgentStatusTracker:
             "recent_errors": [r.to_dict() for r in self.recent_errors()],
             "stats": self.stats(),
         }
-        # Guarantee JSON safety — converts any stray datetime/enum/etc. to str
         return json.loads(json.dumps(raw, default=str))
+
+    # ------------------------------------------------------------------
+    # DB helpers
+    # ------------------------------------------------------------------
+
+    def _persist_run(self, run: AgentRun) -> None:
+        from app.services.database import get_db
+        try:
+            conn = get_db()
+            try:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO agent_runs
+                        (run_id, agent_name, incident_id, status, started_at,
+                         completed_at, duration_ms, error_message, tool_calls)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run.run_id,
+                        run.agent_name,
+                        run.incident_id,
+                        run.status,
+                        run.started_at.isoformat(),
+                        run.completed_at.isoformat() if run.completed_at else None,
+                        run.duration_ms,
+                        run.error_message,
+                        run.tool_calls,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("[AgentTracker] DB write failed: %s", exc)
+
+    def _load_from_db(self) -> None:
+        from app.services.database import get_db
+        try:
+            conn = get_db()
+            try:
+                rows = list(conn.execute(
+                    "SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 500"
+                ))
+            finally:
+                conn.close()
+
+            # Load in chronological order into the history deque
+            for row in reversed(rows):
+                run = AgentRun(
+                    run_id=row["run_id"],
+                    agent_name=row["agent_name"],
+                    incident_id=row["incident_id"],
+                    status=row["status"],
+                    started_at=datetime.fromisoformat(row["started_at"]),
+                    completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+                    duration_ms=row["duration_ms"],
+                    error_message=row["error_message"],
+                    tool_calls=row["tool_calls"] or 0,
+                )
+                self._history.append(run)
+                if run.status == "failed":
+                    self._recent_errors.appendleft(run)
+
+            if rows:
+                logger.info("[AgentTracker] Loaded %d runs from DB", len(rows))
+        except Exception as exc:
+            logger.warning("[AgentTracker] DB load failed: %s", exc)
 
 
 agent_tracker = AgentStatusTracker()

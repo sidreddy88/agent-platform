@@ -1,8 +1,9 @@
 """
-In-memory incident state store with JSON file persistence.
+Incident state store backed by SQLite (agent_platform.db).
 
-Incidents survive a server restart — written to .incidents.json on every update.
-Replace with PostgreSQL (append-only event log) for production.
+Incidents survive server restarts. State is loaded from the DB on startup
+and written through on every mutation. A legacy .incidents.json file is
+auto-migrated to the DB on first run and renamed to .incidents.json.migrated.
 """
 import json
 import logging
@@ -11,16 +12,16 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from app.models.events import ErrorEvent, IncidentState, IncidentStatus
+from app.services.database import get_db
 
 logger = logging.getLogger(__name__)
 
-PERSISTENCE_FILE = ".incidents.json"
+_LEGACY_JSON = ".incidents.json"
 
 
 class IncidentStore:
     def __init__(self):
         self._incidents: Dict[str, IncidentState] = {}
-        # error_type / resource_id → pr_url — prevents duplicate PRs
         self._monitor_pr_map: Dict[str, str] = {}
         self._load()
 
@@ -31,7 +32,7 @@ class IncidentStore:
     def create(self, error_event: ErrorEvent) -> IncidentState:
         incident = IncidentState(error_event=error_event, detected_at=datetime.utcnow())
         self._incidents[incident.id] = incident
-        self._save()
+        self._upsert_incident(incident)
         return incident
 
     def get(self, incident_id: str) -> Optional[IncidentState]:
@@ -39,7 +40,7 @@ class IncidentStore:
 
     def update(self, incident: IncidentState) -> IncidentState:
         self._incidents[incident.id] = incident
-        self._save()
+        self._upsert_incident(incident)
         return incident
 
     def list_all(self) -> List[IncidentState]:
@@ -50,11 +51,7 @@ class IncidentStore:
         return [i for i in self.list_all() if i.status not in terminal]
 
     def get_open_pr_for_error(self, error_type: str, service: str) -> Optional[str]:
-        """
-        Return the PR URL if an open (non-resolved, non-rejected) incident for
-        this exact error_type + service combo already has a PR.
-        Used to prevent duplicate PRs for the same recurring error.
-        """
+        """Return PR URL if an open incident for this error_type + service already has a PR."""
         closed = {IncidentStatus.RESOLVED, IncidentStatus.REJECTED,
                   IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
         for incident in self._incidents.values():
@@ -68,11 +65,19 @@ class IncidentStore:
         return None
 
     def clear(self) -> int:
-        """Delete all incidents from memory and disk. Returns count deleted."""
+        """Delete all incidents. Returns count deleted."""
         count = len(self._incidents)
         self._incidents.clear()
         self._monitor_pr_map.clear()
-        self._save()
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM incidents")
+            conn.execute("DELETE FROM monitor_pr_map")
+            conn.commit()
+        except Exception as exc:
+            logger.warning("[IncidentStore] DB clear failed: %s", exc)
+        finally:
+            conn.close()
         return count
 
     # ------------------------------------------------------------------
@@ -80,12 +85,21 @@ class IncidentStore:
     # ------------------------------------------------------------------
 
     def get_pr_for_resource(self, resource_id: str) -> Optional[str]:
-        """Return existing PR url for a resource, or None."""
         return self._monitor_pr_map.get(resource_id)
 
     def set_pr_for_resource(self, resource_id: str, pr_url: str) -> None:
         self._monitor_pr_map[resource_id] = pr_url
-        self._save()
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO monitor_pr_map (resource_id, pr_url) VALUES (?, ?)",
+                (resource_id, pr_url),
+            )
+            conn.commit()
+        except Exception as exc:
+            logger.warning("[IncidentStore] DB write (monitor_pr_map) failed: %s", exc)
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Metrics
@@ -108,36 +122,67 @@ class IncidentStore:
         }
 
     # ------------------------------------------------------------------
-    # Persistence
+    # DB helpers
     # ------------------------------------------------------------------
 
-    def _save(self) -> None:
+    def _upsert_incident(self, incident: IncidentState) -> None:
+        conn = get_db()
         try:
-            data = {
-                "incidents": [i.model_dump(mode="json") for i in self._incidents.values()],
-                "monitor_pr_map": self._monitor_pr_map,
-            }
-            with open(PERSISTENCE_FILE, "w") as f:
-                json.dump(data, f, default=str, indent=2)
+            conn.execute(
+                "INSERT OR REPLACE INTO incidents (id, status, detected_at, data) VALUES (?, ?, ?, ?)",
+                (
+                    incident.id,
+                    incident.status.value,
+                    incident.detected_at.isoformat(),
+                    incident.model_dump_json(),
+                ),
+            )
+            conn.commit()
         except Exception as exc:
-            logger.warning("[IncidentStore] Could not persist to disk: %s", exc)
+            logger.warning("[IncidentStore] DB upsert failed: %s", exc)
+        finally:
+            conn.close()
 
     def _load(self) -> None:
-        if not os.path.exists(PERSISTENCE_FILE):
+        self._load_from_db()
+        if not self._incidents:
+            self._migrate_from_json()
+
+    def _load_from_db(self) -> None:
+        conn = get_db()
+        try:
+            for row in conn.execute("SELECT data FROM incidents"):
+                incident = IncidentState.model_validate_json(row["data"])
+                self._incidents[incident.id] = incident
+            for row in conn.execute("SELECT resource_id, pr_url FROM monitor_pr_map"):
+                self._monitor_pr_map[row["resource_id"]] = row["pr_url"]
+            if self._incidents:
+                logger.info("[IncidentStore] Loaded %d incidents from DB", len(self._incidents))
+        except Exception as exc:
+            logger.warning("[IncidentStore] DB load failed: %s", exc)
+        finally:
+            conn.close()
+
+    def _migrate_from_json(self) -> None:
+        if not os.path.exists(_LEGACY_JSON):
             return
         try:
-            with open(PERSISTENCE_FILE) as f:
+            with open(_LEGACY_JSON) as f:
                 data = json.load(f)
             for item in data.get("incidents", []):
                 incident = IncidentState.model_validate(item)
                 self._incidents[incident.id] = incident
-            self._monitor_pr_map = data.get("monitor_pr_map", {})
+                self._upsert_incident(incident)
+            for resource_id, pr_url in data.get("monitor_pr_map", {}).items():
+                self._monitor_pr_map[resource_id] = pr_url
+                self.set_pr_for_resource(resource_id, pr_url)
+            os.rename(_LEGACY_JSON, _LEGACY_JSON + ".migrated")
             logger.info(
-                "[IncidentStore] Loaded %d incidents from %s",
-                len(self._incidents), PERSISTENCE_FILE,
+                "[IncidentStore] Migrated %d incidents from %s → DB",
+                len(self._incidents), _LEGACY_JSON,
             )
         except Exception as exc:
-            logger.warning("[IncidentStore] Could not load from disk: %s", exc)
+            logger.warning("[IncidentStore] JSON migration failed: %s", exc)
 
 
 # Module-level singleton
