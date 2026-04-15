@@ -78,6 +78,13 @@ async def _run_monitor_generation(pr: dict, repo: str) -> None:
     pr_number: int = pr.get("number", 0)
     pr_title: str = pr.get("title", "")
     pr_body: str = pr.get("body", "") or ""
+
+    # Only run for the configured target repo — skip test/placeholder webhooks
+    if settings.fix_target_repo and repo != settings.fix_target_repo:
+        logger.info("[MonitorGen] Skipping %s#%d — not the target repo (%s)",
+                    repo, pr_number, settings.fix_target_repo)
+        return
+
     logger.info("[MonitorGen] Starting for %s#%d", repo, pr_number)
     try:
         owner, repo_name = repo.split("/", 1)
