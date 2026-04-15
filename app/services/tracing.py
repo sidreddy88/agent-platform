@@ -1,20 +1,18 @@
 """
-Tracing service — wraps Langfuse to capture every agent invocation,
+Tracing service — wraps Langfuse v4 to capture every agent invocation,
 LLM call, and tool execution as structured traces.
 
 What gets traced:
-  Agent run   → top-level Langfuse trace (input, output, duration, metadata)
-  LLM call    → generation span (prompt, response, model, token counts, latency)
-  Tool call   → event span (tool name, input, output, duration, errors)
+  Agent run   → top-level span (as_type="agent")
+  LLM call    → generation span nested under the agent span
+  Tool call   → tool span nested under the agent span
 
 When LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are not set in .env,
 tracing is silently disabled — agents run exactly as before.
 
-Usage:
-  Tracing is wired into BaseAgent and LLMService automatically.
-  No changes needed in individual agents.
-
-  To view traces: https://cloud.langfuse.com  (or your self-hosted instance)
+Langfuse v4 uses context managers + contextvars to automatically nest
+spans. No TracingContext object needs to be passed around — the SDK
+tracks the current observation internally per asyncio task.
 """
 
 from __future__ import annotations
@@ -23,7 +21,6 @@ import functools
 import logging
 import time
 from collections.abc import Callable, Coroutine
-from contextlib import contextmanager
 from typing import Any
 
 from app.core.config import settings
@@ -40,7 +37,6 @@ _initialized = False
 
 
 def _get_client() -> Any:
-    """Return the Langfuse client, initializing it once. Returns None if unconfigured."""
     global _langfuse, _initialized
     if _initialized:
         return _langfuse
@@ -59,7 +55,7 @@ def _get_client() -> Any:
             secret_key=settings.langfuse_secret_key,
             host=host,
         )
-        logger.info("[Tracing] Langfuse initialized → %s", settings.langfuse_host)
+        logger.info("[Tracing] Langfuse v4 initialized → %s", host)
     except Exception as exc:
         logger.warning("[Tracing] Failed to initialize Langfuse: %s", exc)
         _langfuse = None
@@ -68,49 +64,28 @@ def _get_client() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# TracingContext — holds the active trace for the duration of one agent run
+# Backward-compat no-op TracingContext
+# (base.py and llm.py still reference self._tracing_ctx)
 # ---------------------------------------------------------------------------
 
 class TracingContext:
-    """
-    Lightweight context object passed through a single agent run.
-    Holds the active Langfuse trace so all spans nest under it correctly.
-    """
+    """No-op stub kept for backward compatibility. Tracing is now handled
+    via Langfuse v4 context managers directly in the wrapper functions."""
 
-    def __init__(self, trace: Any, enabled: bool) -> None:
-        self._trace = trace
+    def __init__(self, trace: Any = None, enabled: bool = False) -> None:
         self.enabled = enabled
 
     def span(self, name: str, input: Any = None) -> Any:
-        """Open a new child span. Returns the span, or a no-op sentinel."""
-        if not self.enabled or self._trace is None:
-            return _NoOpSpan()
-        try:
-            return self._trace.span(name=name, input=input)
-        except Exception:
-            return _NoOpSpan()
+        return _NoOpSpan()
 
     def generation(self, name: str, model: str, input: Any = None) -> Any:
-        """Open a generation span for an LLM call."""
-        if not self.enabled or self._trace is None:
-            return _NoOpSpan()
-        try:
-            return self._trace.generation(name=name, model=model, input=input)
-        except Exception:
-            return _NoOpSpan()
+        return _NoOpSpan()
 
     def flush(self) -> None:
-        if self.enabled and self._trace is not None:
-            try:
-                lf = _get_client()
-                if lf:
-                    lf.flush()
-            except Exception:
-                pass
+        pass
 
 
 class _NoOpSpan:
-    """Returned when tracing is disabled — all method calls are silent no-ops."""
     def end(self, **kwargs: Any) -> None:
         pass
 
@@ -119,83 +94,60 @@ class _NoOpSpan:
 
 
 # ---------------------------------------------------------------------------
-# trace_agent decorator
+# trace_agent — decorator for BaseAgent.run()
 # ---------------------------------------------------------------------------
 
 def trace_agent(run_method: Callable) -> Callable:
     """
-    Decorator for BaseAgent.run().
+    Wraps BaseAgent.run() with a Langfuse v4 agent span.
 
-    Creates a top-level Langfuse trace for each agent invocation and
-    attaches it to the agent as `self._tracing_ctx` so LLM and tool
-    spans can nest under it.
-
-    Usage: applied automatically in BaseAgent — no manual decoration needed.
+    All nested LLM calls and tool calls automatically become child spans
+    because Langfuse v4 tracks the current observation via contextvars.
     """
+
     @functools.wraps(run_method)
     async def wrapper(self: Any, user_input: str) -> Any:
+        # Keep no-op TracingContext for backward compat
+        self._tracing_ctx = TracingContext()
+
         lf = _get_client()
         agent_name = type(self).__name__
-        enabled = lf is not None
-
-        trace = None
-        if enabled:
-            try:
-                trace = lf.trace(
-                    name=agent_name,
-                    input={"user_input": user_input},
-                    metadata={"agent": agent_name},
-                )
-            except Exception as exc:
-                logger.debug("[Tracing] Could not create trace: %s", exc)
-                enabled = False
-
-        ctx = TracingContext(trace=trace, enabled=enabled)
-        self._tracing_ctx = ctx
         start = time.perf_counter()
 
-        try:
+        if lf is None:
             result = await run_method(self, user_input)
-            duration_ms = int((time.perf_counter() - start) * 1000)
-
-            # Record in local latency tracker (always — independent of Langfuse)
-            try:
-                from app.services.latency import latency_tracker
-                latency_tracker.record(agent_name, duration_ms)
-            except Exception:
-                pass
-
-            if enabled and trace:
-                try:
-                    trace.update(
-                        output={"answer": result.answer, "iterations": result.iterations},
-                        metadata={
-                            "agent": agent_name,
-                            "iterations": result.iterations,
-                            "duration_ms": duration_ms,
-                        },
-                    )
-                except Exception:
-                    pass
-
+            _record_latency(agent_name, start)
             return result
 
-        except Exception as exc:
-            duration_ms = int((time.perf_counter() - start) * 1000)
-            if enabled and trace:
+        try:
+            with lf.start_as_current_observation(
+                name=agent_name,
+                as_type="agent",
+                input={"user_input": user_input},
+            ) as obs:
                 try:
-                    trace.update(
-                        output={"error": str(exc)},
+                    result = await run_method(self, user_input)
+                    duration_ms = int((time.perf_counter() - start) * 1000)
+                    obs.update(
+                        output={"answer": result.answer, "iterations": result.iterations},
+                        metadata={"agent": agent_name, "iterations": result.iterations,
+                                  "duration_ms": duration_ms},
+                    )
+                    return result
+                except Exception as exc:
+                    duration_ms = int((time.perf_counter() - start) * 1000)
+                    obs.update(
                         level="ERROR",
                         status_message=str(exc),
-                        metadata={"duration_ms": duration_ms},
+                        metadata={"agent": agent_name, "duration_ms": duration_ms},
                     )
-                except Exception:
-                    pass
-            raise
-
+                    raise
         finally:
-            ctx.flush()
+            _record_latency(agent_name, start)
+            try:
+                lf.flush()
+            except Exception:
+                pass
 
     return wrapper
 
@@ -211,47 +163,27 @@ async def trace_llm_call(
     system: str | None,
     coro: Coroutine,
 ) -> str:
-    """
-    Wrap a single LLM completion call with a Langfuse generation span.
-
-    Called from LLMService.complete() when a TracingContext is active.
-    """
-    if not ctx.enabled:
+    lf = _get_client()
+    if lf is None:
         return await coro
 
-    prompt_input = {
-        "messages": messages,
-        "system": system or "",
-    }
-
-    gen = ctx.generation(name="llm_call", model=model, input=prompt_input)
     start = time.perf_counter()
-
     try:
-        response = await coro
-        duration_ms = int((time.perf_counter() - start) * 1000)
-
-        try:
-            gen.end(
-                output=response,
-                metadata={"duration_ms": duration_ms},
-            )
-        except Exception:
-            pass
-
-        return response
-
-    except Exception as exc:
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        try:
-            gen.end(
-                output={"error": str(exc)},
-                level="ERROR",
-                status_message=str(exc),
-                metadata={"duration_ms": duration_ms},
-            )
-        except Exception:
-            pass
+        with lf.start_as_current_observation(
+            name="llm_call",
+            as_type="generation",
+            model=model,
+            input={"system": system or "", "messages": messages},
+        ) as gen:
+            try:
+                response = await coro
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                gen.update(output=response, metadata={"duration_ms": duration_ms})
+                return response
+            except Exception as exc:
+                gen.update(level="ERROR", status_message=str(exc))
+                raise
+    except Exception:
         raise
 
 
@@ -265,40 +197,39 @@ async def trace_tool_call(
     tool_input: Any,
     coro: Coroutine,
 ) -> str:
-    """
-    Wrap a tool execution with a Langfuse span.
-
-    Called from BaseAgent._execute_tool() automatically.
-    """
-    if not ctx.enabled:
+    lf = _get_client()
+    if lf is None:
         return await coro
 
-    span = ctx.span(name=f"tool:{tool_name}", input=tool_input)
     start = time.perf_counter()
-
     try:
-        result = await coro
-        duration_ms = int((time.perf_counter() - start) * 1000)
-
-        try:
-            span.end(
-                output=result[:500] if isinstance(result, str) else result,
-                metadata={"duration_ms": duration_ms},
-            )
-        except Exception:
-            pass
-
-        return result
-
-    except Exception as exc:
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        try:
-            span.end(
-                output={"error": str(exc)},
-                level="ERROR",
-                status_message=str(exc),
-                metadata={"duration_ms": duration_ms},
-            )
-        except Exception:
-            pass
+        with lf.start_as_current_observation(
+            name=tool_name,
+            as_type="tool",
+            input=tool_input,
+        ) as span:
+            try:
+                result = await coro
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                span.update(
+                    output=result[:500] if isinstance(result, str) else result,
+                    metadata={"duration_ms": duration_ms},
+                )
+                return result
+            except Exception as exc:
+                span.update(level="ERROR", status_message=str(exc))
+                raise
+    except Exception:
         raise
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _record_latency(agent_name: str, start: float) -> None:
+    try:
+        from app.services.latency import latency_tracker
+        latency_tracker.record(agent_name, int((time.perf_counter() - start) * 1000))
+    except Exception:
+        pass
