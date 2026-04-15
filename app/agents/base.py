@@ -12,8 +12,13 @@ import json
 import logging
 import re
 from collections.abc import Callable, Coroutine
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
+
+# Set this before awaiting any agent to link its runs to an incident in the tracker.
+# incident_loop.py sets it once per _process() task; all awaited agents inherit it.
+incident_id_ctx: ContextVar[str | None] = ContextVar("incident_id", default=None)
 
 from app.services.checkpoint import context_checkpointer
 from app.services.llm import LLMService
@@ -215,7 +220,7 @@ class BaseAgent:
     async def run(self, user_input: str) -> AgentResult:
         """Run the ReAct loop and return the final answer + all steps."""
         from app.services.agent_tracker import agent_tracker
-        _run_id = agent_tracker.start(type(self).__name__)
+        _run_id = agent_tracker.start(type(self).__name__, incident_id=incident_id_ctx.get())
         self._current_run_id = _run_id
         _failed = False
 

@@ -233,9 +233,14 @@ export interface AgentPR {
   diagnosis: string | null;
   human_decision: string | null;
   review_posted: boolean;
+  pr_branch: string | null;
+  pr_files_changed: string[];
+  pr_test_added: boolean;
+  occurrences_24h: number | null;
   pr_created_at: string | null;
   resolved_at: string | null;
   mttr_seconds: number | null;
+  agent_runs: AgentRun[];
 }
 
 export interface AgentSnapshot {
