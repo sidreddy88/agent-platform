@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     alert_daily_budget_usd: float = 10.0     # daily LLM cost budget in USD
     app_name: str = "Agent Platform"
     debug: bool = False
+    environment: str = "production"  # production | development | test
 
     # Digital Ocean
     do_api_token: str = ""
