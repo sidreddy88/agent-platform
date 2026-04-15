@@ -168,6 +168,7 @@ export type IncidentStatus =
   | "reviewing"
   | "awaiting_approval"
   | "resolved"
+  | "rejected"
   | "noise"
   | "duplicate";
 
@@ -190,6 +191,7 @@ export interface Incident {
   diagnosis: string | null;
   confidence: number | null;
   pr_url: string | null;
+  pr_number: number | null;
   human_decision: string | null;
   outcome: string | null;
   detected_at: string;
