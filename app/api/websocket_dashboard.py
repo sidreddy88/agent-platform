@@ -50,7 +50,7 @@ async def dashboard_ws(websocket: WebSocket) -> None:
         await websocket.send_json({
             "type": "init",
             "incidents": [
-                {**i.model_dump(), "mttr_seconds": i.mttr_seconds, "age_seconds": i.age_seconds}
+                {**i.model_dump(mode="json"), "mttr_seconds": i.mttr_seconds, "age_seconds": i.age_seconds}
                 for i in incident_store.list_active()
             ],
             "metrics": incident_store.metrics(),

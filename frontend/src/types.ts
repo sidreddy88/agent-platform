@@ -221,8 +221,26 @@ export interface AgentStats {
   currently_active: number;
 }
 
+export interface AgentPR {
+  incident_id: string;
+  pr_url: string;
+  pr_number: number | null;
+  title: string;
+  service: string;
+  severity: string | null;
+  status: IncidentStatus;
+  confidence: number | null;
+  diagnosis: string | null;
+  human_decision: string | null;
+  review_posted: boolean;
+  pr_created_at: string | null;
+  resolved_at: string | null;
+  mttr_seconds: number | null;
+}
+
 export interface AgentSnapshot {
   active_runs: AgentRun[];
+  pipeline_activity: AgentRun[];  // active + completed in last 30s
   recent_errors: AgentRun[];
   stats: AgentStats[];
 }
