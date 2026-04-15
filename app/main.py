@@ -16,6 +16,7 @@ from app.api.routes import monitors as monitors_routes
 from app.api.routes import agents as agents_routes
 from app.api import websocket
 from app.api.websocket_dashboard import router as ws_dashboard_router
+from app.services.database import init_db
 from app.services.detection import detection_service
 from app.services.drift_detector import drift_detector
 from app.services.orchestrator import orchestrator
@@ -70,6 +71,7 @@ async def _agent_status_broadcaster() -> None:
 
 @app.on_event("startup")
 async def _startup():
+    init_db()
     asyncio.create_task(detection_service.run_forever())
     asyncio.create_task(threshold_monitor.run_forever())
     asyncio.create_task(orchestrator.run_forever())

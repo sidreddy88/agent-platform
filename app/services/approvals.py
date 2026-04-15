@@ -7,22 +7,7 @@ Risk rules:
   HIGH     — requires human approval before the action can execute
   CRITICAL — requires human approval + explicit confirmation token
 
-Usage:
-    svc = ApprovalService()
-
-    req = await svc.request_approval(
-        agent_name="IncidentResponseAgent",
-        action="restart_ecs_service",
-        parameters={"cluster": "prod", "service": "api"},
-        risk_level="high",
-        description="Restart the ECS api service to recover from task crash-loop.",
-    )
-
-    if req.status == "approved":
-        # execute the action
-        ...
-    else:
-        print(f"Pending approval: {req.id}")
+State is persisted to SQLite (agent_platform.db) and survives server restarts.
 """
 
 from __future__ import annotations
@@ -82,19 +67,59 @@ class ApprovalDecision(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# ApprovalService
+# DB helpers (module-level so they work with the module-level _store)
 # ---------------------------------------------------------------------------
 
-# Module-level store — replace with a database for production
+def _upsert_approval(req: ApprovalRequest) -> None:
+    from app.services.database import get_db
+    try:
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO approvals (id, status, created_at, data) VALUES (?, ?, ?, ?)",
+                (req.id, req.status.value, req.created_at.isoformat(), req.model_dump_json()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("[Approvals] DB write failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# In-memory store (populated from DB at startup)
+# ---------------------------------------------------------------------------
+
 _store: dict[str, ApprovalRequest] = {}
 
 # Whether MEDIUM risk also requires approval (default: auto-approve)
 _MEDIUM_REQUIRES_APPROVAL = False
 
 
+def _load_from_db() -> None:
+    from app.services.database import get_db
+    try:
+        conn = get_db()
+        try:
+            rows = list(conn.execute("SELECT data FROM approvals"))
+        finally:
+            conn.close()
+        for row in rows:
+            req = ApprovalRequest.model_validate_json(row["data"])
+            _store[req.id] = req
+        if _store:
+            logger.info("[Approvals] Loaded %d requests from DB", len(_store))
+    except Exception as exc:
+        logger.warning("[Approvals] DB load failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# ApprovalService
+# ---------------------------------------------------------------------------
+
 class ApprovalService:
     """
-    In-memory approval gate for agent actions.
+    DB-backed approval gate for agent actions.
 
     LOW and MEDIUM actions are auto-approved by default.
     HIGH and CRITICAL actions are queued as PENDING until a human decides.
@@ -115,14 +140,6 @@ class ApprovalService:
         risk_level: str | RiskLevel,
         description: str,
     ) -> ApprovalRequest:
-        """
-        Create an approval request for an action.
-
-        LOW/MEDIUM → auto-approved immediately (unless medium_requires_approval=True).
-        HIGH/CRITICAL → queued as PENDING; notifies approvers.
-
-        Returns the ApprovalRequest. Check `.status` to know whether to proceed.
-        """
         level = RiskLevel(risk_level.lower() if isinstance(risk_level, str) else risk_level)
 
         req = ApprovalRequest(
@@ -135,7 +152,6 @@ class ApprovalService:
 
         _store[req.id] = req
 
-        # Auto-approve safe actions
         if level == RiskLevel.LOW or (
             level == RiskLevel.MEDIUM and not self._medium_requires_approval
         ):
@@ -143,18 +159,18 @@ class ApprovalService:
             req.decided_at = datetime.now(timezone.utc)
             req.decided_by = "auto"
             logger.info("[Approvals] AUTO-APPROVED %s — %s: %s", req.id, agent_name, action)
+            _upsert_approval(req)
             return req
 
-        # Queue for human review
         logger.warning(
             "[Approvals] PENDING APPROVAL %s — %s/%s [%s]",
             req.id, agent_name, action, level.upper(),
         )
+        _upsert_approval(req)
         self._notify_approvers(req)
         return req
 
     def approve(self, request_id: str, approver: str) -> ApprovalRequest:
-        """Approve a pending request."""
         req = self._get_or_raise(request_id)
         self._assert_pending(req)
 
@@ -162,12 +178,12 @@ class ApprovalService:
         req.decided_at = datetime.now(timezone.utc)
         req.decided_by = approver
 
+        _upsert_approval(req)
         logger.info("[Approvals] APPROVED %s by %s", request_id, approver)
         self._notify_approvers(req)
         return req
 
     def reject(self, request_id: str, approver: str, reason: str = "") -> ApprovalRequest:
-        """Reject a pending request."""
         req = self._get_or_raise(request_id)
         self._assert_pending(req)
 
@@ -176,31 +192,25 @@ class ApprovalService:
         req.decided_by = approver
         req.rejection_reason = reason
 
+        _upsert_approval(req)
         logger.warning("[Approvals] REJECTED %s by %s — %s", request_id, approver, reason)
         self._notify_approvers(req)
         return req
 
     def get_pending(self) -> list[ApprovalRequest]:
-        """Return all requests still waiting for a decision."""
         return [r for r in _store.values() if r.status == ApprovalStatus.PENDING]
 
     def get(self, request_id: str) -> ApprovalRequest | None:
-        """Return a request by ID, or None if not found."""
         return _store.get(request_id)
 
     def get_all(self) -> list[ApprovalRequest]:
-        """Return all requests (any status), newest first."""
         return sorted(_store.values(), key=lambda r: r.created_at, reverse=True)
 
     # ------------------------------------------------------------------
-    # Notification (console for now — extend for Slack/email later)
+    # Notification
     # ------------------------------------------------------------------
 
     def _notify_approvers(self, req: ApprovalRequest) -> None:
-        """
-        Notify approvers of a new or decided request.
-        Currently prints to console. Replace with Slack/email/PagerDuty later.
-        """
         border = "=" * 60
         if req.status == ApprovalStatus.PENDING:
             risk_icon = {"low": "ℹ", "medium": "⚡", "high": "⚠", "critical": "🚨"}.get(
@@ -250,7 +260,8 @@ class ApprovalService:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton (shared across routes and agents)
+# Module-level singleton
 # ---------------------------------------------------------------------------
 
+_load_from_db()
 approval_service = ApprovalService()
