@@ -73,6 +73,13 @@ async def get_metrics() -> Dict[str, Any]:
     return incident_store.metrics()
 
 
+@router.delete("")
+async def clear_incidents() -> Dict[str, Any]:
+    """Delete all incidents from the store (memory + disk)."""
+    count = incident_store.clear()
+    return {"deleted": count}
+
+
 @router.get("/{incident_id}")
 async def get_incident(incident_id: str) -> Dict[str, Any]:
     incident = incident_store.get(incident_id)

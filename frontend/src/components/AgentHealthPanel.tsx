@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import type { AgentRun, AgentSnapshot, AgentStats } from "../types";
 
 interface Props {
@@ -28,13 +28,28 @@ function tsAgo(iso: string | null): string {
 }
 
 function ActiveRunPill({ run }: { run: AgentRun }) {
+  const isRunning = run.status === "running";
+  const isFailed = run.status === "failed";
+
+  const dotStyle: React.CSSProperties = isRunning
+    ? pulseDot
+    : {
+        width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+        background: isFailed ? "#ef4444" : "#1e4d2b",
+        border: `1px solid ${isFailed ? "#f87171" : "#22c55e"}`,
+      };
+
   return (
-    <div style={pill}>
-      <span style={pulseDot} />
+    <div style={{ ...pill, opacity: isRunning ? 1 : 0.65 }}>
+      <span style={dotStyle} />
       <div>
         <div style={pillName}>{run.agent_name}</div>
         <div style={pillMeta}>
-          {elapsed(run.started_at)} · {run.tool_calls} tool calls
+          {isRunning
+            ? `${elapsed(run.started_at)} · ${run.tool_calls} tool calls`
+            : isFailed
+            ? `failed · ${run.error_message?.slice(0, 40) ?? "error"}`
+            : `${duration(run.duration_ms)} · ${run.tool_calls} tool calls`}
           {run.incident_id && <span> · #{run.incident_id.slice(0, 6)}</span>}
         </div>
       </div>
@@ -82,12 +97,42 @@ function ErrorRow({ run }: { run: AgentRun }) {
   );
 }
 
+type DemoState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "running"; title: string; service: string; eventId: string; source: string }
+  | { status: "error"; message: string };
+
 export function AgentHealthPanel({ snapshot, connected }: Props) {
+  const [demo, setDemo] = useState<DemoState>({ status: "idle" });
+
+  async function runDemo() {
+    setDemo({ status: "loading" });
+    try {
+      const res = await fetch("/api/agents/demo", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setDemo({
+        status: "running",
+        title: data.title,
+        service: data.service,
+        eventId: data.event_id,
+        source: data.source,
+      });
+      // Auto-dismiss after 12s
+      setTimeout(() => setDemo({ status: "idle" }), 12_000);
+    } catch (e) {
+      setDemo({ status: "error", message: e instanceof Error ? e.message : "Failed" });
+      setTimeout(() => setDemo({ status: "idle" }), 5_000);
+    }
+  }
+
+  const pipelineActivity = snapshot?.pipeline_activity ?? [];
   const activeRuns = snapshot?.active_runs ?? [];
   const recentErrors = snapshot?.recent_errors ?? [];
   const stats = snapshot?.stats ?? [];
 
-  const hasActivity = activeRuns.length > 0 || recentErrors.length > 0 || stats.length > 0;
+  const hasActivity = pipelineActivity.length > 0 || recentErrors.length > 0 || stats.length > 0;
 
   return (
     <div style={panel}>
@@ -112,22 +157,61 @@ export function AgentHealthPanel({ snapshot, connected }: Props) {
           {activeRuns.length > 0 && (
             <span style={runningBadge}>{activeRuns.length} running</span>
           )}
+          {activeRuns.length === 0 && pipelineActivity.length > 0 && (
+            <span style={{ ...runningBadge, color: "#64748b", background: "rgba(100,116,139,0.1)", borderColor: "rgba(100,116,139,0.25)" }}>
+              pipeline done
+            </span>
+          )}
           {recentErrors.length > 0 && (
             <span style={errorBadge}>{recentErrors.length} recent errors</span>
           )}
         </div>
       </div>
 
+      {/* Demo runner */}
+      <div style={demoBar}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <button
+            style={demoBtn(demo.status === "loading")}
+            onClick={runDemo}
+            disabled={demo.status === "loading" || demo.status === "running"}
+          >
+            {demo.status === "loading" ? "Injecting..." : "Run on latest ECS error"}
+          </button>
+          {demo.status === "running" && (
+            <div style={demoStatus}>
+              <span style={pulseDot} />
+              <span style={demoLabel}>
+                Running pipeline on{" "}
+                <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{demo.title}</span>
+                {" "}· {demo.service}
+                {demo.source === "synthetic" && (
+                  <span style={{ color: "#6b7280" }}> (synthetic)</span>
+                )}
+              </span>
+            </div>
+          )}
+          {demo.status === "error" && (
+            <span style={{ fontSize: 12, color: "#ef4444" }}>{demo.message}</span>
+          )}
+        </div>
+        <span style={demoHint}>
+          Triage → Diagnosis → Fix → Review → Approval
+        </span>
+      </div>
+
       {!hasActivity && (
         <p style={empty}>No agent activity yet. Agents appear here when they run.</p>
       )}
 
-      {/* Active runs */}
-      {activeRuns.length > 0 && (
+      {/* Pipeline activity — active + recently completed */}
+      {pipelineActivity.length > 0 && (
         <div style={section}>
-          <div style={sectionLabel}>Active</div>
+          <div style={sectionLabel}>
+            {activeRuns.length > 0 ? `Pipeline · ${activeRuns.length} running` : "Pipeline · completed"}
+          </div>
           <div style={pillGrid}>
-            {activeRuns.map((r) => (
+            {pipelineActivity.map((r) => (
               <ActiveRunPill key={r.run_id} run={r} />
             ))}
           </div>
@@ -358,4 +442,46 @@ const empty: React.CSSProperties = {
   fontSize: 13,
   color: "#4b5563",
   margin: 0,
+};
+
+const demoBar: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  background: "#161927",
+  border: "1px solid #2d3149",
+  borderRadius: 8,
+  padding: "10px 14px",
+  marginBottom: 16,
+  flexWrap: "wrap",
+  gap: 8,
+};
+
+const demoBtn = (loading: boolean): React.CSSProperties => ({
+  background: loading ? "#2d3149" : "#3b4fd8",
+  border: `1px solid ${loading ? "#3d4166" : "#4f63f0"}`,
+  color: loading ? "#64748b" : "#e2e8f0",
+  borderRadius: 6,
+  padding: "6px 16px",
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: loading ? "not-allowed" : "pointer",
+  whiteSpace: "nowrap",
+});
+
+const demoStatus: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const demoLabel: React.CSSProperties = {
+  fontSize: 12,
+  color: "#94a3b8",
+};
+
+const demoHint: React.CSSProperties = {
+  fontSize: 11,
+  color: "#374151",
+  whiteSpace: "nowrap",
 };

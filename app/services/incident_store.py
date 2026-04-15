@@ -49,6 +49,32 @@ class IncidentStore:
         terminal = {IncidentStatus.RESOLVED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
         return [i for i in self.list_all() if i.status not in terminal]
 
+    def get_open_pr_for_error(self, error_type: str, service: str) -> Optional[str]:
+        """
+        Return the PR URL if an open (non-resolved, non-rejected) incident for
+        this exact error_type + service combo already has a PR.
+        Used to prevent duplicate PRs for the same recurring error.
+        """
+        closed = {IncidentStatus.RESOLVED, IncidentStatus.REJECTED,
+                  IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
+        for incident in self._incidents.values():
+            if (
+                incident.error_event.error_type == error_type
+                and incident.error_event.service == service
+                and incident.pr_url
+                and incident.status not in closed
+            ):
+                return incident.pr_url
+        return None
+
+    def clear(self) -> int:
+        """Delete all incidents from memory and disk. Returns count deleted."""
+        count = len(self._incidents)
+        self._incidents.clear()
+        self._monitor_pr_map.clear()
+        self._save()
+        return count
+
     # ------------------------------------------------------------------
     # PR idempotency
     # ------------------------------------------------------------------
