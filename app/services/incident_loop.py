@@ -259,11 +259,39 @@ class IncidentLoop:
     # ------------------------------------------------------------------ #
 
     async def _process(self, event: ErrorEvent) -> None:
+        # ── Staleness gate ────────────────────────────────────────────
+        # Only process events detected within the last 30 minutes.
+        # Stale events (replayed, delayed, or from before the server started)
+        # are dropped silently to avoid acting on outdated data.
+        age_minutes = (datetime.utcnow() - event.detected_at).total_seconds() / 60
+        if age_minutes > 30:
+            logger.info(
+                "[IncidentLoop] Dropping stale event %s (%.0fm old) — outside 30-minute window",
+                event.id, age_minutes,
+            )
+            return
+
+        # ── Deduplication gate ────────────────────────────────────────
+        # If an open PR already exists for this exact error_type + service,
+        # drop the event entirely — no incident created, no agents run.
+        if event.error_type and event.service:
+            existing_pr = incident_store.get_open_pr_for_error(event.error_type, event.service)
+            if existing_pr:
+                logger.info(
+                    "[IncidentLoop] Dropping %s (%s / %s) — open PR already exists: %s",
+                    event.id, event.error_type, event.service, existing_pr,
+                )
+                return
+
         # ── Triage ────────────────────────────────────────────────────
         incident = incident_store.create(event)
         incident.status = IncidentStatus.TRIAGING
         incident_store.update(incident)
         logger.info("[IncidentLoop] Triaging %s — %s", incident.id, event.title)
+
+        # Link all agent runs in this pipeline task to the incident
+        from app.agents.base import incident_id_ctx
+        incident_id_ctx.set(incident.id)
 
         triage = await self._run_triage(event)
 
@@ -343,27 +371,6 @@ class IncidentLoop:
             incident.id, diagnosis.confidence * 100,
         )
 
-        # ── Idempotency gate ─────────────────────────────────────────
-        # If an open PR already exists for this exact error_type + service,
-        # mark as duplicate and stop — no second PR gets created.
-        error_type = incident.error_event.error_type
-        service = incident.error_event.service
-        if error_type and service:
-            existing_pr = incident_store.get_open_pr_for_error(error_type, service)
-            if existing_pr:
-                incident.status = IncidentStatus.DUPLICATE
-                incident.pr_url = existing_pr
-                incident.triage_decision = "duplicate"
-                incident.triage_reasoning = (
-                    f"Open PR already exists for {error_type} on {service}: {existing_pr}"
-                )
-                incident_store.update(incident)
-                logger.info(
-                    "[IncidentLoop] %s — open PR already exists for %s/%s (%s), skipping fix",
-                    incident.id, error_type, service, existing_pr,
-                )
-                return
-
         # ── Fix Generation ────────────────────────────────────────────
         # Skip for demo events — we want to show agent activity without
         # creating real GitHub branches and PRs every time.
@@ -397,6 +404,9 @@ class IncidentLoop:
 
         incident.pr_url = fix.pr_url
         incident.pr_number = fix.pr_number
+        incident.pr_branch = fix.branch
+        incident.pr_files_changed = fix.files_changed
+        incident.pr_test_added = fix.test_added
         incident.pr_created_at = datetime.utcnow()
         incident.fix_attempted = fix.fix_description[:200]
         incident.fix_description = fix.fix_description
