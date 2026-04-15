@@ -652,7 +652,14 @@ class IncidentResponseAgent(BaseAgent):
                 "6. generate_diagnosis with all gathered evidence\n"
                 "7. For any HIGH or CRITICAL actions in the diagnosis, call "
                 "request_action_approval for each one before including it in your answer\n\n"
-                "IMPORTANT: Never say you will execute a HIGH or CRITICAL action directly. "
+                "MANDATORY CONSTRAINTS — these are hard rules, not suggestions:\n"
+                "- You MUST call gather_context before any other tool. "
+                "Never skip it, even if the alert text seems self-explanatory.\n"
+                "- You MUST call generate_diagnosis before calling request_action_approval "
+                "or writing your Answer. A diagnosis based only on the alert text is not valid.\n"
+                "- Never call request_action_approval without first calling gather_context "
+                "and generate_diagnosis. Doing so constitutes a hallucinated diagnosis.\n"
+                "- Never say you will execute a HIGH or CRITICAL action directly. "
                 "Always call request_action_approval first. Include the returned request ID "
                 "in your final answer so the engineer knows what to approve."
             )
@@ -662,7 +669,10 @@ class IncidentResponseAgent(BaseAgent):
                 "Diagnose this incident: gather context, check deployments, search logs, "
                 "find similar past incidents, then generate a structured diagnosis. "
                 "For any HIGH or CRITICAL actions, call request_action_approval before "
-                "including them in your final answer. Include the request ID in the answer."
+                "including them in your final answer. Include the request ID in the answer.\n\n"
+                "MANDATORY CONSTRAINTS: You MUST call gather_context first, then "
+                "generate_diagnosis, before calling request_action_approval or writing "
+                "your Answer. Never skip evidence gathering."
             )
 
         return await super().run(prompt)
