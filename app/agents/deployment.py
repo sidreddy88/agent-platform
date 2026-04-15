@@ -23,6 +23,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
 
 from app.agents.base import AgentResult, BaseAgent
+from app.core.config import settings
 from app.services.aws import AWSError, AWSService
 from app.services.llm import LLMService
 
@@ -350,11 +351,17 @@ class DeploymentAgent(BaseAgent):
     def __init__(self, aws: AWSService | None = None) -> None:
         super().__init__()
         self._aws = aws or AWSService()
+        self._ecs_cluster = settings.ecs_cluster or "default"
+        self._alb_names = [n.strip() for n in settings.alb_names.split(",") if n.strip()]
+        self._log_groups = [g.strip() for g in settings.ecs_log_groups.split(",") if g.strip()]
         self._register_tools()
 
     def _register_tools(self) -> None:
         aws = self._aws
         llm = self._llm
+        ecs_cluster = self._ecs_cluster
+        alb_names = self._alb_names
+        log_groups = self._log_groups
 
         async def _get_ecs_status(cluster: str, service: str) -> str:
             return await get_ecs_status(cluster, service, aws)
@@ -383,13 +390,22 @@ class DeploymentAgent(BaseAgent):
         async def _check_health(resources: list) -> str:
             return await check_health(resources, aws, llm)
 
+        _cluster_hint = f"use '{ecs_cluster}'"
+        _alb_hint = (
+            f"known ALB names: {alb_names} — use one of these"
+            if alb_names else "no ALB names configured — look up via ECS service tags"
+        )
+        _log_hint = (
+            f"known log groups: {log_groups}"
+            if log_groups else "no log groups configured — ask the user or omit"
+        )
         self.register_tool(
             "get_ecs_status",
             _get_ecs_status,
             (
                 "Get ECS service health: running vs desired task count, deployment status, "
                 "stopped task failure reasons, and recent service events. "
-                "Input: {cluster: string, service: string}"
+                f"Input: {{cluster: string ({_cluster_hint}), service: string}}"
             ),
         )
         self.register_tool(
@@ -405,6 +421,7 @@ class DeploymentAgent(BaseAgent):
             _get_service_logs,
             (
                 "Fetch recent CloudWatch logs from a log group and summarise error/warning counts. "
+                f"{_log_hint}. "
                 "Input: {log_group: string, minutes: integer (optional, default 30)}"
             ),
         )
@@ -414,6 +431,9 @@ class DeploymentAgent(BaseAgent):
             (
                 "Fetch CloudWatch metric datapoints (average + max) for any AWS service. "
                 "Common namespaces: AWS/ECS, AWS/EC2, AWS/ApplicationELB, AWS/RDS. "
+                "IMPORTANT: For ECS metrics (namespace=AWS/ECS), dimensions MUST include both "
+                f"ClusterName AND ServiceName — e.g. {{ClusterName: '{ecs_cluster}', ServiceName: 'my-svc'}}. "
+                "Using ServiceName alone returns 0 datapoints. "
                 "Input: {namespace: string, metric_name: string, "
                 "dimensions: {key: value}, minutes: integer (optional, default 60)}"
             ),
@@ -424,6 +444,7 @@ class DeploymentAgent(BaseAgent):
             (
                 "Get Application Load Balancer health: state (active/impaired), "
                 "healthy vs unhealthy target counts, request count, and 5xx error count (last 5 min). "
+                f"{_alb_hint}. "
                 "Input: {name: string (ALB name)}"
             ),
         )
@@ -448,12 +469,21 @@ class DeploymentAgent(BaseAgent):
           - JSON with resources:
             {"question": "...", "resources": [{type: "ecs", cluster: "...", service: "..."}]}
         """
+        # Build a config context block so the LLM never guesses resource names
+        cfg_lines = [f"ECS cluster: {self._ecs_cluster}"]
+        if self._alb_names:
+            cfg_lines.append(f"ALB names: {', '.join(self._alb_names)}")
+        if self._log_groups:
+            cfg_lines.append(f"CloudWatch log groups: {', '.join(self._log_groups)}")
+        config_context = "KNOWN AWS RESOURCES (use these — do not guess):\n" + "\n".join(f"  {l}" for l in cfg_lines)
+
         try:
             params = json.loads(user_input)
             question = params.get("question", "Check overall infrastructure health")
             resources = params.get("resources", [])
             resources_str = json.dumps(resources, indent=2) if resources else "(not specified)"
             prompt = (
+                f"{config_context}\n\n"
                 f"{question}\n\n"
                 f"Resources to check:\n{resources_str}\n\n"
                 "Use the available tools to gather health data, then produce a complete "
@@ -463,7 +493,8 @@ class DeploymentAgent(BaseAgent):
             )
         except (json.JSONDecodeError, KeyError):
             prompt = (
-                user_input + "\n\n"
+                f"{config_context}\n\n"
+                + user_input + "\n\n"
                 "Use the available tools to check infrastructure health. "
                 "Detect: task failures, high CPU/memory, error spikes in logs, deployment issues."
             )

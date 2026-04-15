@@ -26,6 +26,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from app.agents.base import AgentResult, BaseAgent
+from app.core.config import settings
 from app.services.approvals import ApprovalService, approval_service as _default_approval_svc
 from app.services.aws import AWSError, AWSService
 from app.services.llm import LLMService
@@ -153,9 +154,10 @@ async def gather_context(
     service: str,
     time_window: int,
     aws: AWSService,
-    cluster: str = "default",
+    cluster: str | None = None,
     log_group: str | None = None,
 ) -> str:
+    cluster = cluster or settings.ecs_cluster or "default"
     """Pull ECS health, CloudWatch metrics, and logs around the incident time."""
     parts: list[str] = [f"=== Context for service '{service}' (last {time_window} min) ===\n"]
 
@@ -249,8 +251,9 @@ async def check_recent_deployments(
     services: list[str],
     aws: AWSService,
     hours: int = 6,
-    cluster: str = "default",
+    cluster: str | None = None,
 ) -> str:
+    cluster = cluster or settings.ecs_cluster or "default"
     """Check for deployments in the last N hours and flag any that are degraded."""
     lines: list[str] = [f"Deployments in the last {hours}h:\n"]
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -450,13 +453,18 @@ class IncidentResponseAgent(BaseAgent):
         # Accumulate all gathered evidence for the final diagnosis call
         self._evidence: list[str] = []
 
+        _default_cluster = settings.ecs_cluster or "default"
+        _default_log_groups = [g.strip() for g in settings.ecs_log_groups.split(",") if g.strip()]
+
         async def _gather_context(
             service: str,
             time_window: int = 30,
-            cluster: str = "default",
+            cluster: str = "",
             log_group: str = "",
         ) -> str:
-            out = await gather_context(service, time_window, aws, cluster, log_group or None)
+            resolved_cluster = cluster or _default_cluster
+            resolved_log_group = log_group or (_default_log_groups[0] if _default_log_groups else "")
+            out = await gather_context(service, time_window, aws, resolved_cluster, resolved_log_group or None)
             self._evidence.append(out)
             return out
 
@@ -472,9 +480,9 @@ class IncidentResponseAgent(BaseAgent):
         async def _check_recent_deployments(
             services: list[str],
             hours: int = 6,
-            cluster: str = "default",
+            cluster: str = "",
         ) -> str:
-            out = await check_recent_deployments(services, aws, hours, cluster)
+            out = await check_recent_deployments(services, aws, hours, cluster or _default_cluster)
             self._evidence.append(out)
             return out
 
@@ -522,14 +530,19 @@ class IncidentResponseAgent(BaseAgent):
                 f"Approvers can visit: POST /approvals/{req.id}/approve"
             )
 
+        _cluster_hint = f"default cluster: '{_default_cluster}'"
+        _log_hint = (
+            f"known log groups: {_default_log_groups}" if _default_log_groups
+            else "no log groups configured — ask the user or omit log_group"
+        )
         self.register_tool(
             "gather_context",
             _gather_context,
             (
                 "Pull ECS health, CPU/memory metrics, and recent logs for a service "
                 "around the incident time window. Always call this first. "
-                "Input: {service: string, time_window: integer (minutes, default 30), "
-                "cluster: string (default 'default'), log_group: string (optional)}"
+                f"Input: {{service: string, time_window: integer (minutes, default 30), "
+                f"cluster: string ({_cluster_hint}), log_group: string ({_log_hint})}}"
             ),
         )
         self.register_tool(
@@ -538,7 +551,7 @@ class IncidentResponseAgent(BaseAgent):
             (
                 "Search for a specific error pattern across one or more CloudWatch log groups. "
                 "Use regex patterns. Good for finding stack traces, specific error codes, "
-                "or exception types across multiple services. "
+                f"or exception types across multiple services. {_log_hint}. "
                 "Input: {query: string (regex), log_groups: [string], minutes: integer (default 30)}"
             ),
         )
@@ -547,8 +560,8 @@ class IncidentResponseAgent(BaseAgent):
             _check_recent_deployments,
             (
                 "Check for recent ECS deployments across services and flag any that "
-                "coincide with the incident window. Key for deployment correlation. "
-                "Input: {services: [string], hours: integer (default 6), cluster: string (default 'default')}"
+                f"coincide with the incident window. Key for deployment correlation. "
+                f"Input: {{services: [string], hours: integer (default 6), cluster: string ({_cluster_hint})}}"
             ),
         )
         self.register_tool(
@@ -617,9 +630,10 @@ class IncidentResponseAgent(BaseAgent):
             params = json.loads(user_input)
             alert = params.get("alert", user_input)
             service = params.get("service", "")
-            cluster = params.get("cluster", "default")
+            cluster = params.get("cluster", settings.ecs_cluster or "default")
             log_group = params.get("log_group", "")
-            log_groups = params.get("log_groups", [log_group] if log_group else [])
+            _cfg_log_groups = [g.strip() for g in settings.ecs_log_groups.split(",") if g.strip()]
+            log_groups = params.get("log_groups", [log_group] if log_group else _cfg_log_groups)
             time_window = params.get("time_window", 30)
             hours = params.get("hours", 6)
 
