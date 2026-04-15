@@ -11,14 +11,13 @@ import { CloudfarePillar } from "./components/CloudfarePillar";
 import { MongoDBPillar } from "./components/MongoDBPillar";
 import { GitHubPillar } from "./components/GitHubPillar";
 import { IncidentFeed } from "./components/IncidentFeed";
-import { AgentHealthPanel } from "./components/AgentHealthPanel";
 import { PRsPage } from "./components/PRsPage";
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "agents" | "prs" | "logs";
+type Tab = "dashboard" | "prs" | "logs";
 
 export default function App() {
   const { data, loading, error, lastUpdated, refetch } = useDashboard();
@@ -34,8 +33,7 @@ export default function App() {
           <span style={logoText}>Agent Platform</span>
           <div style={{ display: "flex", gap: 4, marginLeft: 16 }}>
             <button style={tabBtn(tab === "dashboard")} onClick={() => setTab("dashboard")}>Dashboard</button>
-            <button style={tabBtn(tab === "agents")} onClick={() => setTab("agents")}>Agents</button>
-            <button style={tabBtn(tab === "prs")} onClick={() => setTab("prs")}>PRs</button>
+            <button style={tabBtn(tab === "prs")} onClick={() => setTab("prs")}>Agent PRs</button>
             <button style={tabBtn(tab === "logs")} onClick={() => setTab("logs")}>Logs</button>
           </div>
         </div>
@@ -48,7 +46,7 @@ export default function App() {
               <button style={refreshBtn} onClick={refetch}>Refresh</button>
             </>
           )}
-          {(tab === "dashboard" || tab === "agents") && data && (
+          {tab === "dashboard" && data && (
             <span style={queueBadge}>
               Queue: {data.queue.queue_size} · Enqueued: {data.queue.total_enqueued}
             </span>
@@ -61,11 +59,6 @@ export default function App() {
       {tab === "prs" && (
         <main style={main}>
           <PRsPage />
-        </main>
-      )}
-      {tab === "agents" && (
-        <main style={main}>
-          <AgentHealthPanel snapshot={agentSnapshot} connected={connected} />
         </main>
       )}
       {tab === "dashboard" && <main style={main}>
