@@ -55,6 +55,9 @@ def _get_client() -> Any:
             secret_key=settings.langfuse_secret_key,
             host=host,
         )
+        # Set service name for OpenTelemetry resource attributes
+        import os
+        os.environ.setdefault("OTEL_SERVICE_NAME", settings.app_name)
         logger.info("[Tracing] Langfuse v4 initialized → %s", host)
     except Exception as exc:
         logger.warning("[Tracing] Failed to initialize Langfuse: %s", exc)
@@ -125,6 +128,7 @@ def trace_agent(run_method: Callable) -> Callable:
                 as_type="agent",
                 input={"user_input": user_input},
             ) as obs:
+                obs.update(tags=[settings.environment])
                 try:
                     result = await run_method(self, user_input)
                     duration_ms = int((time.perf_counter() - start) * 1000)
