@@ -13,6 +13,7 @@ from app.api.routes import injection as injection_routes
 from app.api.routes import drift as drift_routes
 from app.api.routes import evals as evals_routes
 from app.api.routes import monitors as monitors_routes
+from app.api.routes import agents as agents_routes
 from app.api import websocket
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.detection import detection_service
@@ -47,6 +48,21 @@ app.include_router(injection_routes.router)
 app.include_router(drift_routes.router)
 app.include_router(evals_routes.router)
 app.include_router(monitors_routes.router)
+app.include_router(agents_routes.router)
+
+
+async def _agent_status_broadcaster() -> None:
+    """Broadcast agent status to all WS clients every 2 seconds."""
+    from app.api.websocket_dashboard import broadcast
+    from app.services.agent_tracker import agent_tracker
+    while True:
+        await asyncio.sleep(2)
+        try:
+            snapshot = agent_tracker.snapshot()
+            if snapshot["active_runs"] or snapshot["recent_errors"] or snapshot["stats"]:
+                await broadcast({"type": "agent_status", "agents": snapshot})
+        except Exception:
+            pass
 
 
 @app.on_event("startup")
@@ -55,6 +71,7 @@ async def _startup():
     asyncio.create_task(threshold_monitor.run_forever())
     asyncio.create_task(orchestrator.run_forever())
     asyncio.create_task(drift_detector.run_forever())
+    asyncio.create_task(_agent_status_broadcaster())
 
 
 @app.on_event("shutdown")

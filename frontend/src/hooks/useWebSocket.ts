@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { Incident, IncidentMetrics, WSMessage } from "../types";
+import type { AgentSnapshot, Incident, IncidentMetrics, WSMessage } from "../types";
 
 const PING_MS = 25_000;
 const RECONNECT_MS = 3_000;
@@ -7,6 +7,7 @@ const RECONNECT_MS = 3_000;
 export function useDashboardWS() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [metrics, setMetrics] = useState<IncidentMetrics | null>(null);
+  const [agentSnapshot, setAgentSnapshot] = useState<AgentSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -26,6 +27,7 @@ export function useDashboardWS() {
       if (msg.type === "init") {
         setIncidents(msg.incidents);
         setMetrics(msg.metrics);
+        if (msg.agents) setAgentSnapshot(msg.agents);
       } else if (msg.type === "incident_update") {
         setIncidents((prev) => {
           const idx = prev.findIndex((i) => i.id === msg.incident.id);
@@ -36,6 +38,8 @@ export function useDashboardWS() {
           }
           return [msg.incident, ...prev];
         });
+      } else if (msg.type === "agent_status") {
+        setAgentSnapshot(msg.agents);
       } else if (msg.type === "event") {
         // New raw error event — will become an incident shortly
       }
@@ -58,5 +62,5 @@ export function useDashboardWS() {
     };
   }, [connect]);
 
-  return { incidents, metrics, connected };
+  return { incidents, metrics, agentSnapshot, connected };
 }

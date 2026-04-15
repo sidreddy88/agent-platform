@@ -11,16 +11,17 @@ import { CloudfarePillar } from "./components/CloudfarePillar";
 import { MongoDBPillar } from "./components/MongoDBPillar";
 import { GitHubPillar } from "./components/GitHubPillar";
 import { IncidentFeed } from "./components/IncidentFeed";
+import { AgentHealthPanel } from "./components/AgentHealthPanel";
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "logs";
+type Tab = "dashboard" | "agents" | "logs";
 
 export default function App() {
   const { data, loading, error, lastUpdated, refetch } = useDashboard();
-  const { incidents, metrics, connected } = useDashboardWS();
+  const { incidents, metrics, agentSnapshot, connected } = useDashboardWS();
   const [tab, setTab] = useState<Tab>("dashboard");
 
   return (
@@ -32,16 +33,20 @@ export default function App() {
           <span style={logoText}>Agent Platform</span>
           <div style={{ display: "flex", gap: 4, marginLeft: 16 }}>
             <button style={tabBtn(tab === "dashboard")} onClick={() => setTab("dashboard")}>Dashboard</button>
+            <button style={tabBtn(tab === "agents")} onClick={() => setTab("agents")}>Agents</button>
             <button style={tabBtn(tab === "logs")} onClick={() => setTab("logs")}>Logs</button>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          {lastUpdated && (
-            <span style={lastUpdatedText}>Updated {formatTs(lastUpdated)}</span>
+          {tab === "dashboard" && (
+            <>
+              {lastUpdated && (
+                <span style={lastUpdatedText}>Updated {formatTs(lastUpdated)}</span>
+              )}
+              <button style={refreshBtn} onClick={refetch}>Refresh</button>
+            </>
           )}
-          <button style={refreshBtn} onClick={refetch}>Refresh</button>
-          {/* Queue stats */}
-          {data && (
+          {(tab === "dashboard" || tab === "agents") && data && (
             <span style={queueBadge}>
               Queue: {data.queue.queue_size} · Enqueued: {data.queue.total_enqueued}
             </span>
@@ -51,7 +56,12 @@ export default function App() {
 
       {/* Main content */}
       {tab === "logs" && <LogsPage />}
-      <main style={main} hidden={tab !== "dashboard"}>
+      {tab === "agents" && (
+        <main style={main}>
+          <AgentHealthPanel snapshot={agentSnapshot} connected={connected} />
+        </main>
+      )}
+      {tab === "dashboard" && <main style={main}>
         {loading && !data && (
           <div style={centered}>
             <span style={{ fontSize: 24 }}>⏳</span>
@@ -117,7 +127,7 @@ export default function App() {
             </section>
           </>
         )}
-      </main>
+      </main>}
     </div>
   );
 }
