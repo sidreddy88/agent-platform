@@ -409,7 +409,7 @@ class CICDAgent(BaseAgent):
                 "Finally suggest a concrete fix. "
                 "Produce a complete CI failure report as your final answer.\n\n"
                 "MANDATORY CONSTRAINTS:\n"
-                "- You MUST call get_workflow_runs before any other tool or your Answer.\n"
+                "- Call get_workflow_runs exactly once as your first tool call, then move on.\n"
                 "- You MUST call get_run_logs and analyze_failure before writing your Answer.\n"
                 "- Never produce a CI failure report from memory — all data must come from tool results.\n"
                 "- If a specific run_id is not found, say so clearly and analyze the most recent failure instead."
