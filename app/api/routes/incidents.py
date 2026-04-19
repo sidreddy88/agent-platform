@@ -20,12 +20,10 @@ router = APIRouter(prefix="/incidents", tags=["incidents"])
 # ---------------------------------------------------------------------------
 
 class TriggerBody(BaseModel):
-    error_type: str = "S3_NO_SUCH_KEY"
-    title: str = "NoSuchKey in moveAndRemoveFileFromS3"
-    description: str = (
-        "S3 throws NoSuchKey when attempting to copy/delete a key that no longer exists"
-    )
-    service: str = "image-service"
+    error_type: str = "UNHANDLED_EXCEPTION"
+    title: str = "Unhandled exception in production"
+    description: str = "An unhandled exception was detected in production"
+    service: str = "unknown"
     source: str = "application"
     log_group: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -36,8 +34,7 @@ async def trigger_incident(body: TriggerBody) -> Dict[str, Any]:
     """
     Inject an ErrorEvent into the incident pipeline for testing.
 
-    Defaults simulate the canonical NoSuchKey S3 incident the FixGenerationAgent
-    is built to handle. Override any field to test different scenarios.
+    All fields are required — override them to simulate any incident scenario.
     """
     extra_meta = dict(body.metadata)
     if body.log_group:
