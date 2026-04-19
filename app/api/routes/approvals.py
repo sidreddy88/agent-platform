@@ -73,16 +73,21 @@ async def approve(request_id: str, body: ApproveBody):
     if incident_id:
         incident = incident_store.get(incident_id)
         if incident:
-            incident.human_decision = "approved"
-            incident.outcome = "fix_merged"
-            incident.status = IncidentStatus.RESOLVED
-            incident.resolved_at = datetime.utcnow()
-            incident_store.update(incident)
-            try:
-                from app.services.golden_dataset_builder import golden_dataset_builder
-                golden_dataset_builder.capture(incident)
-            except Exception:
-                pass
+            if req.action == "approve_diagnosis_escalation":
+                import asyncio
+                from app.services.incident_loop import incident_loop
+                asyncio.create_task(incident_loop.resume_fix(incident_id))
+            else:
+                incident.human_decision = "approved"
+                incident.outcome = "fix_merged"
+                incident.status = IncidentStatus.RESOLVED
+                incident.resolved_at = datetime.utcnow()
+                incident_store.update(incident)
+                try:
+                    from app.services.golden_dataset_builder import golden_dataset_builder
+                    golden_dataset_builder.capture(incident)
+                except Exception:
+                    pass
 
     return req
 
