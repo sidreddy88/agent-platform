@@ -11,7 +11,9 @@ Pipeline per event:
 
 Status flow:
   OPEN → TRIAGING → NOISE / DUPLICATE (terminal)
-                  → DIAGNOSING → AWAITING_APPROVAL (low confidence, terminal)
+                  → DIAGNOSING → AWAITING_APPROVAL (low confidence — human approves or rejects)
+                                                  → FIXING → REVIEWING → AWAITING_APPROVAL (fix gate)
+                                                                        → RESOLVED / REJECTED
                               → FIXING → REVIEWING → AWAITING_APPROVAL (human gate)
                                                    → RESOLVED / REJECTED
 """
@@ -123,18 +125,28 @@ async def _notify_blast_radius_violation(incident: IncidentState, fix: FixResult
     ))
 
 
-async def _notify_diagnosis(incident: IncidentState, result: DiagnosisResult) -> None:
+async def _notify_diagnosis(incident: IncidentState, result: DiagnosisResult, approval_id: str | None = None) -> None:
     event = incident.error_event
     sev = _p_to_alert_sev(str(event.severity).split(".")[-1] if event.severity else "P2")
 
     if result.escalate:
         title = f"[LOW CONFIDENCE] {event.title} — human review needed"
+        if approval_id:
+            approve_url = f"{settings.approval_base_url}/approvals/{approval_id}/approve"
+            reject_url = f"{settings.approval_base_url}/approvals/{approval_id}/reject"
+            approval_links = (
+                f"\n<{approve_url}|✅ Approve — continue to fix generation>  |  "
+                f"<{reject_url}|❌ Reject>\n_Approval ID: {approval_id}_"
+            )
+        else:
+            approval_links = ""
         message = (
             f"*Confidence:* {result.confidence:.0%}  (threshold {CONFIDENCE_THRESHOLD:.0%})\n"
             f"*Root cause:* {result.root_cause}\n"
             f"*Evidence:* {', '.join(result.evidence[:2])}\n"
             f"*Reproduction:* {'✅ confirmed' if result.reproduction_confirmed else '❌ not confirmed'}\n"
             f"*Incident:* {incident.id} — awaiting human diagnosis"
+            + approval_links
         )
         sev = AlertSeverity.WARNING
     else:
@@ -347,13 +359,26 @@ class IncidentLoop:
         incident.diagnosis_completed_at = datetime.utcnow()
 
         if diagnosis.escalate:
+            event = incident.error_event
+            sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
+            approval_req = await approval_service.request_approval(
+                agent_name="DiagnosisAgent",
+                action="approve_diagnosis_escalation",
+                parameters={"incident_id": incident.id},
+                risk_level=RiskLevel.HIGH,
+                description=(
+                    f"Low-confidence diagnosis ({diagnosis.confidence:.0%}) for "
+                    f"[{sev_str}] {event.title}. Approve to proceed to fix generation."
+                ),
+            )
+            incident.approval_id = approval_req.id
             incident.status = IncidentStatus.AWAITING_APPROVAL
             logger.warning(
-                "[IncidentLoop] %s → low confidence (%.0f%%) — escalating to human",
-                incident.id, diagnosis.confidence * 100,
+                "[IncidentLoop] %s → low confidence (%.0f%%) — escalating to human (approval %s)",
+                incident.id, diagnosis.confidence * 100, approval_req.id,
             )
             incident_store.update(incident)
-            await _notify_diagnosis(incident, diagnosis)
+            await _notify_diagnosis(incident, diagnosis, approval_id=approval_req.id)
             try:
                 from app.services.golden_dataset_builder import golden_dataset_builder
                 golden_dataset_builder.capture(incident)
@@ -461,6 +486,94 @@ class IncidentLoop:
             "[IncidentLoop] %s — approval %s sent to Slack",
             incident.id, approval_req.id,
         )
+
+    async def resume_fix(self, incident_id: str) -> None:
+        """Resume the pipeline from fix generation after a human approves a low-confidence escalation."""
+        incident = incident_store.get(incident_id)
+        if incident is None:
+            logger.error("[IncidentLoop] resume_fix: incident %s not found", incident_id)
+            return
+
+        incident.status = IncidentStatus.FIXING
+        incident_store.update(incident)
+        logger.info(
+            "[IncidentLoop] %s — human approved diagnosis, resuming fix generation",
+            incident_id,
+        )
+
+        if incident.error_event.metadata.get("demo"):
+            incident.status = IncidentStatus.AWAITING_APPROVAL
+            incident.fix_attempted = "[Demo mode — fix generation skipped]"
+            incident_store.update(incident)
+            return
+
+        fix = await self._run_fix(incident)
+        if fix is None:
+            logger.error("[IncidentLoop] %s — fix generation failed after diagnosis approval", incident_id)
+            return
+
+        if fix.blast_radius_violation:
+            incident.fix_attempted = fix.fix_description[:200]
+            incident.status = IncidentStatus.AWAITING_APPROVAL
+            incident_store.update(incident)
+            await _notify_blast_radius_violation(incident, fix)
+            logger.warning(
+                "[IncidentLoop] %s — blast radius violation after resume: %s",
+                incident_id, fix.fix_description,
+            )
+            return
+
+        if not fix.pr_url and not fix.pr_number:
+            logger.error("[IncidentLoop] %s — fix generation produced no PR after resume", incident_id)
+            return
+
+        incident.pr_url = fix.pr_url
+        incident.pr_number = fix.pr_number
+        incident.pr_branch = fix.branch
+        incident.pr_files_changed = fix.files_changed
+        incident.pr_test_added = fix.test_added
+        incident.pr_created_at = datetime.utcnow()
+        incident.fix_attempted = fix.fix_description[:200]
+        incident.fix_description = fix.fix_description
+        incident.status = IncidentStatus.REVIEWING
+        incident_store.update(incident)
+
+        if fix.pr_url and incident.error_event.error_type:
+            incident_store.set_pr_for_resource(incident.error_event.error_type, fix.pr_url)
+
+        logger.info("[IncidentLoop] %s — PR created: %s — running CodeReviewAgent", incident_id, fix.pr_url)
+
+        review_text = await self._run_review(incident, fix)
+        if review_text:
+            incident.review_posted = True
+            incident_store.update(incident)
+
+        event = incident.error_event
+        sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
+        approval_req = await approval_service.request_approval(
+            agent_name="FixGenerationAgent",
+            action="merge_ai_fix_pr",
+            parameters={
+                "incident_id": incident.id,
+                "pr_url": fix.pr_url,
+                "pr_number": fix.pr_number,
+                "branch": fix.branch,
+                "confidence": f"{incident.confidence:.0%}",
+            },
+            risk_level=RiskLevel.HIGH,
+            description=(
+                f"AI-generated fix for [{sev_str}] {event.title} "
+                f"(confidence {incident.confidence:.0%}, {incident.occurrences_24h} occurrences/24h). "
+                f"PR: {fix.pr_url}"
+            ),
+        )
+
+        incident.approval_id = approval_req.id
+        incident.status = IncidentStatus.AWAITING_APPROVAL
+        incident_store.update(incident)
+
+        await _notify_fix_ready(incident, fix, approval_req.id)
+        logger.info("[IncidentLoop] %s — approval %s sent to Slack", incident_id, approval_req.id)
 
     async def run_forever(self) -> None:
         self._running = True
