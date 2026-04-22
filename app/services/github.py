@@ -302,6 +302,29 @@ class GitHubService:
             await self._raise_for_status(response)
             return response.json()["default_branch"]
 
+    async def find_files_by_name(self, owner: str, repo: str, filename: str, ref: str = "main") -> list[str]:
+        """Return all repo paths whose basename matches filename (recursive tree search)."""
+        try:
+            async with self._client() as client:
+                # Get the tree SHA for the ref
+                ref_resp = await client.get(f"/repos/{owner}/{repo}/git/ref/heads/{ref}")
+                if ref_resp.status_code != 200:
+                    return []
+                tree_sha = ref_resp.json()["object"]["sha"]
+                tree_resp = await client.get(
+                    f"/repos/{owner}/{repo}/git/trees/{tree_sha}",
+                    params={"recursive": "1"},
+                )
+                if tree_resp.status_code != 200:
+                    return []
+                items = tree_resp.json().get("tree", [])
+            return [
+                item["path"] for item in items
+                if item.get("type") == "blob" and item["path"].rsplit("/", 1)[-1] == filename
+            ]
+        except Exception:
+            return []
+
     async def get_branch_sha(
         self, owner: str, repo: str, branch: str = "main"
     ) -> str:

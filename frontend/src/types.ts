@@ -250,9 +250,16 @@ export interface AgentSnapshot {
   stats: AgentStats[];
 }
 
+export interface ScanLogEntry {
+  ts: string;
+  level: "info" | "event" | "error" | "done";
+  message: string;
+}
+
 export type WSMessage =
   | { type: "init"; incidents: Incident[]; metrics: IncidentMetrics; queue: QueueStats; agents?: AgentSnapshot; timestamp: string }
   | { type: "event"; event: ErrorEvent }
   | { type: "incident_update"; incident: Incident }
   | { type: "agent_status"; agents: AgentSnapshot }
+  | { type: "scan_progress"; ts: string; level: ScanLogEntry["level"]; message: string }
   | { type: "pong" };

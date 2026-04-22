@@ -107,11 +107,12 @@ class TriageAgent(BaseAgent):
         aws = self._aws
         store = self._store
 
-        async def _check_duplicate_pr(error_type: str) -> str:
-            pr_url = store.get_pr_for_resource(error_type)
+        async def _check_duplicate_pr(error_type: str, service: str = "", description_prefix: str = "") -> str:
+            key = f"{error_type}:{service}:{description_prefix[:100]}"
+            pr_url = store.get_pr_for_resource(key) or store.get_pr_for_resource(error_type)
             if pr_url:
-                return f"DUPLICATE: Open PR already exists for '{error_type}': {pr_url}"
-            return f"NO_DUPLICATE: No existing PR found for '{error_type}'"
+                return f"DUPLICATE: Open PR already exists for '{key}': {pr_url}"
+            return f"NO_DUPLICATE: No existing PR found for '{key}'"
 
         async def _get_occurrence_count(
             log_group: str,
@@ -136,9 +137,9 @@ class TriageAgent(BaseAgent):
             "check_duplicate_pr",
             _check_duplicate_pr,
             (
-                "Check if an open PR already exists for this error type. "
+                "Check if an open PR already exists for this specific error. "
                 "Returns DUPLICATE (with PR URL) or NO_DUPLICATE. "
-                "Input: {error_type: string}"
+                "Input: {error_type: string, service: string, description_prefix: string (first 100 chars of description)}"
             ),
         )
         self.register_tool(
@@ -178,7 +179,7 @@ ERROR EVENT:
   detected_at : {event.detected_at.isoformat()}
 
 STEPS:
-1. Call check_duplicate_pr with error_type="{error_type}"
+1. Call check_duplicate_pr with error_type="{error_type}", service="{event.service}", description_prefix="{event.description[:100]}"
 {occurrence_instruction}
 3. Output your triage decision as JSON in the Answer field
 

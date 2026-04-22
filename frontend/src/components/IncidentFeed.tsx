@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import type { Incident, IncidentMetrics } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -29,6 +29,23 @@ const SOURCE_ICON: Record<string, string> = {
 };
 
 export function IncidentFeed({ incidents, metrics, connected }: Props) {
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState<{ events_found: number } | null>(null);
+
+  async function handleScan() {
+    setScanning(true);
+    setScanResult(null);
+    try {
+      const res = await fetch("/incidents/scan", { method: "POST" });
+      const data = await res.json();
+      setScanResult(data);
+    } catch {
+      setScanResult({ events_found: 0 });
+    } finally {
+      setScanning(false);
+    }
+  }
+
   return (
     <div style={panel}>
       <div style={header}>
@@ -36,25 +53,37 @@ export function IncidentFeed({ incidents, metrics, connected }: Props) {
           <h2 style={title}>Incident Feed</h2>
           <span style={dot(connected)} title={connected ? "Live" : "Reconnecting..."} />
         </div>
-        {metrics && (
-          <div style={metricRow}>
-            <MetricChip label="Active" value={metrics.active} color="#3b82f6" />
-            <MetricChip label="Resolved" value={metrics.resolved} color="#22c55e" />
-            <MetricChip label="Noise" value={metrics.noise} color="#6b7280" />
-            <MetricChip
-              label="False +ve"
-              value={`${(metrics.false_positive_rate * 100).toFixed(0)}%`}
-              color="#94a3b8"
-            />
-            {metrics.avg_mttr_seconds !== null && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          {scanResult !== null && (
+            <span style={scanResultBadge(scanResult.events_found > 0)}>
+              {scanResult.events_found > 0
+                ? `${scanResult.events_found} error${scanResult.events_found === 1 ? "" : "s"} found — pipeline started`
+                : "No errors detected"}
+            </span>
+          )}
+          <button style={scanBtn(scanning)} onClick={handleScan} disabled={scanning}>
+            {scanning ? "Scanning..." : "Scan Last 24h"}
+          </button>
+          {metrics && (
+            <div style={metricRow}>
+              <MetricChip label="Active" value={metrics.active} color="#3b82f6" />
+              <MetricChip label="Resolved" value={metrics.resolved} color="#22c55e" />
+              <MetricChip label="Noise" value={metrics.noise} color="#6b7280" />
               <MetricChip
-                label="Avg MTTR"
-                value={mttr(metrics.avg_mttr_seconds)}
-                color="#a855f7"
+                label="False +ve"
+                value={`${(metrics.false_positive_rate * 100).toFixed(0)}%`}
+                color="#94a3b8"
               />
-            )}
-          </div>
-        )}
+              {metrics.avg_mttr_seconds !== null && (
+                <MetricChip
+                  label="Avg MTTR"
+                  value={mttr(metrics.avg_mttr_seconds)}
+                  color="#a855f7"
+                />
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <div style={list}>
@@ -224,3 +253,26 @@ const prLink: React.CSSProperties = {
   textDecoration: "none",
   fontWeight: 600,
 };
+
+const scanBtn = (loading: boolean): React.CSSProperties => ({
+  background: loading ? "#1e2d40" : "#1e3a5f",
+  border: `1px solid ${loading ? "#2d4a6a" : "#3b82f6"}`,
+  color: loading ? "#4b5563" : "#60a5fa",
+  borderRadius: 6,
+  padding: "5px 14px",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: loading ? "not-allowed" : "pointer",
+  whiteSpace: "nowrap" as const,
+});
+
+const scanResultBadge = (found: boolean): React.CSSProperties => ({
+  fontSize: 11,
+  fontWeight: 600,
+  color: found ? "#22c55e" : "#64748b",
+  background: found ? "rgba(34,197,94,0.1)" : "#161927",
+  border: `1px solid ${found ? "rgba(34,197,94,0.3)" : "#2d3149"}`,
+  borderRadius: 6,
+  padding: "4px 10px",
+  whiteSpace: "nowrap" as const,
+});
