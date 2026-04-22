@@ -9,9 +9,38 @@ GET /debug/rag/corpus
     List every document currently indexed in the incident collection.
     Shows incident_id, status, service, and the exact text that was embedded.
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 router = APIRouter(prefix="/debug", tags=["debug"])
+
+
+@router.post("/rag/index")
+async def index_codebase(background_tasks: BackgroundTasks):
+    """
+    Trigger codebase indexing into the RAG vector store.
+
+    Reads CODEBASE_PATH from settings and indexes all supported code files.
+    Runs in the background — returns immediately. Check corpus size via
+    GET /debug/rag/corpus once complete.
+    """
+    from app.core.config import settings
+
+    if not settings.codebase_path:
+        raise HTTPException(status_code=400, detail="CODEBASE_PATH not configured in .env")
+
+    try:
+        from app.services.rag import RAGService
+        rag = RAGService()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"RAG unavailable: {exc}")
+
+    async def _index():
+        count = await rag.index_directory(settings.codebase_path)
+        import logging
+        logging.getLogger(__name__).info("[RAG] Indexed %d chunks from %s", count, settings.codebase_path)
+
+    background_tasks.add_task(_index)
+    return {"status": "indexing_started", "path": settings.codebase_path}
 
 
 @router.get("/rag")
@@ -87,6 +116,35 @@ async def debug_rag_corpus():
         "count": count,
         "avg_text_length": round(sum(d["indexed_text_length"] for d in docs) / count),
         "documents": docs,
+    }
+
+
+@router.get("/rag/corpus/codebase")
+async def debug_codebase_corpus():
+    """List stats for the indexed codebase collection (file paths + chunk counts)."""
+    try:
+        from app.services.rag import RAGService
+        rag = RAGService()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"RAG unavailable: {exc}")
+
+    count = rag._collection.count()
+    if count == 0:
+        return {"count": 0, "files": []}
+
+    raw = rag._collection.get(include=["metadatas"])
+    file_chunks: dict[str, int] = {}
+    for meta in raw["metadatas"]:
+        fp = meta["file_path"]
+        file_chunks[fp] = file_chunks.get(fp, 0) + 1
+
+    return {
+        "total_chunks": count,
+        "total_files": len(file_chunks),
+        "files": [
+            {"file_path": fp, "chunks": n}
+            for fp, n in sorted(file_chunks.items())
+        ],
     }
 
 
