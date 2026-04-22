@@ -9,6 +9,7 @@ Flow (direct sequential calls — no ReAct loop):
 
 import json
 import logging
+from pathlib import Path
 
 from app.agents.base import AgentResult, BaseAgent
 from app.services.github import FileDiff, GitHubError, GitHubService, PRDetails
@@ -20,6 +21,28 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _extract_rag_query(filename: str, patch: str) -> str:
+    """Build a search query from the filename stem + function/class names in the diff."""
+    terms = [Path(filename).stem.replace("_", " ").replace("-", " ")]
+    for line in (patch or "").splitlines():
+        stripped = line.lstrip("+-").strip()
+        if stripped.startswith(("def ", "async def ", "class ", "function ")):
+            name = stripped.split("(")[0].split(" ")[-1]
+            if name and name not in terms:
+                terms.append(name)
+        if len(terms) >= 6:
+            break
+    return " ".join(terms)
+
+
+def _format_rag_context(chunks) -> str:
+    """Format codebase RAG results as a context block for the LLM prompt."""
+    lines = ["Related codebase context (files semantically related to this diff):"]
+    for chunk in chunks:
+        lines.append(f"\n--- {chunk.file_path} (lines {chunk.start_line}–{chunk.end_line}, score={chunk.score:.2f}) ---")
+        lines.append(chunk.content[:600])  # cap per chunk to avoid prompt bloat
+    return "\n".join(lines)
 
 def _format_pr(pr: PRDetails, files: list[FileDiff]) -> str:
     changed = "\n".join(
@@ -72,6 +95,7 @@ async def analyze_file(
     filename: str,
     github: GitHubService,
     llm: LLMService,
+    rag=None,
 ) -> str:
     """Deep-dive analysis of a single changed file's diff."""
     files: dict[str, FileDiff] = getattr(github, "_cached_files", {})
@@ -79,11 +103,25 @@ async def analyze_file(
         available = ", ".join(files.keys()) or "none (call fetch_pr first)"
         return f"File '{filename}' not found in cached diff. Available: {available}"
 
-    diff_text = _format_file_diff(files[filename])
+    diff = files[filename]
+    diff_text = _format_file_diff(diff)
+
+    rag_section = ""
+    if rag is not None:
+        try:
+            if rag._collection.count() > 0:
+                query = _extract_rag_query(filename, diff.patch or "")
+                chunks = await rag.search(query, n_results=4)
+                # exclude chunks from the file being reviewed — already in the diff
+                chunks = [c for c in chunks if c.file_path != filename][:3]
+                if chunks:
+                    rag_section = "\n\n" + _format_rag_context(chunks)
+        except Exception as exc:
+            logger.debug("[CodeReview] RAG context skipped: %s", exc)
 
     prompt = f"""You are a senior code reviewer. Analyze this file diff for issues.
 
-{diff_text}
+{diff_text}{rag_section}
 
 Check for:
 1. BUGS       — logic errors, off-by-one, null/undefined dereferences, wrong conditions,
@@ -93,6 +131,9 @@ Check for:
 3. PERFORMANCE — N+1 queries, O(n²) loops, missing indexes hinted by the code,
                  unnecessary allocations, synchronous blocking in async context
 4. TESTING    — missing tests for new logic, untested edge cases, missing error path tests
+5. CROSS-FILE — if related codebase context is provided above: duplicate logic that already
+                exists elsewhere, callers that may break due to signature changes, patterns
+                that contradict how the rest of the codebase handles the same concern
 
 For each issue found output exactly:
 ISSUE | <severity: CRITICAL/HIGH/MEDIUM/LOW> | line <N or range> | <category> | <concise description>
@@ -226,6 +267,12 @@ class CodeReviewAgent(BaseAgent):
     def __init__(self, github: GitHubService | None = None) -> None:
         super().__init__()
         self._github = github or GitHubService()
+        self._rag = None
+        try:
+            from app.services.rag import RAGService
+            self._rag = RAGService()
+        except Exception:
+            pass  # no OpenAI key or ChromaDB — reviews still work, just without codebase context
 
     async def run(self, user_input: str) -> AgentResult:
         """
@@ -251,7 +298,7 @@ class CodeReviewAgent(BaseAgent):
         files: dict = getattr(self._github, "_cached_files", {})
         analysis_parts: list[str] = []
         for filename in files:
-            analysis = await analyze_file(filename, self._github, self._llm)
+            analysis = await analyze_file(filename, self._github, self._llm, self._rag)
             analysis_parts.append(f"### {filename}\n{analysis}")
 
         file_analyses = "\n\n".join(analysis_parts) if analysis_parts else "No files to analyze."
