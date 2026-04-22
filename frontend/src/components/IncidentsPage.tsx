@@ -137,6 +137,23 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
         </div>
       )}
 
+      {/* Pipeline dedup stats */}
+      {metrics?.pipeline_stats && (() => {
+        const s = metrics.pipeline_stats!;
+        const total = s.sql_dedup + s.regression + s.rag_hit + s.cold_start;
+        if (total === 0) return null;
+        return (
+          <div style={pipelineBar}>
+            <span style={pipelineLabel}>Pipeline</span>
+            <PipelineSegment pct={s.sql_dedup_pct}  count={s.sql_dedup}  label="SQL dedup"   color="#3b82f6" />
+            <PipelineSegment pct={s.regression_pct} count={s.regression} label="Regression"  color="#f59e0b" />
+            <PipelineSegment pct={s.rag_hit_pct}    count={s.rag_hit}    label="RAG hit"     color="#a855f7" />
+            <PipelineSegment pct={s.cold_start_pct} count={s.cold_start} label="Cold start"  color="#22c55e" />
+            <span style={pipelineTotal}>{total} events</span>
+          </div>
+        );
+      })()}
+
       {/* Scan log */}
       {scanLog.length > 0 && (
         <div style={scanLogBox}>
@@ -471,3 +488,33 @@ const scanLogMsg = (level: ScanLogEntry["level"]): React.CSSProperties => ({
     : level === "done" ? "#60a5fa"
     : "#64748b",
 });
+
+// ── Pipeline dedup stats bar ──────────────────────────────────────────────────
+
+function PipelineSegment({ pct, count, label, color }: { pct: number; count: number; label: string; color: string }) {
+  if (count === 0) return null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+      <span style={{ fontSize: 11, color, fontWeight: 600 }}>{pct.toFixed(0)}%</span>
+      <span style={{ fontSize: 10, color: "#475569" }}>{label}</span>
+      <span style={{ fontSize: 10, color: "#2d3149" }}>({count})</span>
+    </div>
+  );
+}
+
+const pipelineBar: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" as const,
+  background: "#161927", border: "1px solid #2d3149",
+  borderRadius: 8, padding: "8px 16px",
+};
+
+const pipelineLabel: React.CSSProperties = {
+  fontSize: 10, fontWeight: 700, color: "#334155",
+  letterSpacing: "0.08em", textTransform: "uppercase" as const,
+  marginRight: 4,
+};
+
+const pipelineTotal: React.CSSProperties = {
+  fontSize: 10, color: "#2d3149", marginLeft: "auto",
+};
