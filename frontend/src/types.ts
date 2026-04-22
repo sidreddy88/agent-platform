@@ -55,6 +55,17 @@ export interface QueueStats {
   total_dequeued: number;
 }
 
+export interface PipelineStats {
+  sql_dedup: number;
+  regression: number;
+  rag_hit: number;
+  cold_start: number;
+  sql_dedup_pct: number;
+  regression_pct: number;
+  rag_hit_pct: number;
+  cold_start_pct: number;
+}
+
 export interface IncidentMetrics {
   total: number;
   active: number;
@@ -63,6 +74,7 @@ export interface IncidentMetrics {
   duplicate: number;
   avg_mttr_seconds: number | null;
   false_positive_rate: number;
+  pipeline_stats?: PipelineStats;
 }
 
 export interface EC2Instance {
