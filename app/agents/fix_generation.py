@@ -131,9 +131,33 @@ class FixGenerationAgent(BaseAgent):
             steps.append(f"✓ Fetched {file_path} (sha={file_sha[:8]}, {len(content)} chars)")
             logger.info("[FixGen] Fetched %s (%d chars)", file_path, len(content))
         except GitHubError as exc:
-            steps.append(f"✗ get_file_contents failed: {exc}")
-            logger.error("[FixGen] Failed to fetch file: %s", exc)
-            return _fail(f"Could not fetch {file_path}: {exc}", branch=branch_name)
+            # 404 — try to find the file elsewhere in the repo by basename
+            if "404" in str(exc):
+                basename = file_path.rsplit("/", 1)[-1]
+                steps.append(f"⚠ {file_path} not found — searching repo for '{basename}'")
+                matches = await self._github.find_files_by_name(
+                    self._owner, self._repo, basename, ref=default_branch
+                )
+                if matches:
+                    file_path = matches[0]
+                    steps.append(f"✓ Found at {file_path} — retrying fetch")
+                    logger.info("[FixGen] Resolved path via tree search: %s", file_path)
+                    try:
+                        content, file_sha = await self._github.get_file_contents(
+                            self._owner, self._repo, file_path, ref=default_branch
+                        )
+                        steps.append(f"✓ Fetched {file_path} ({len(content)} chars)")
+                        test_candidates, default_test_path = self._test_file_candidates(file_path)
+                    except GitHubError as exc2:
+                        steps.append(f"✗ Retry failed: {exc2}")
+                        return _fail(f"Could not fetch {file_path}: {exc2}", branch=branch_name)
+                else:
+                    steps.append(f"✗ '{basename}' not found anywhere in repo")
+                    return _fail(f"File '{basename}' not found in repo", branch=branch_name)
+            else:
+                steps.append(f"✗ get_file_contents failed: {exc}")
+                logger.error("[FixGen] Failed to fetch file: %s", exc)
+                return _fail(f"Could not fetch {file_path}: {exc}", branch=branch_name)
 
         # ── 3. Generate fix via LLM ────────────────────────────────────
         try:

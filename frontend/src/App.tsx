@@ -10,18 +10,18 @@ import { DOPillar } from "./components/DOPillar";
 import { CloudfarePillar } from "./components/CloudfarePillar";
 import { MongoDBPillar } from "./components/MongoDBPillar";
 import { GitHubPillar } from "./components/GitHubPillar";
-import { IncidentFeed } from "./components/IncidentFeed";
+import { IncidentsPage } from "./components/IncidentsPage";
 import { PRsPage } from "./components/PRsPage";
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "prs" | "logs";
+type Tab = "dashboard" | "incidents" | "prs" | "logs";
 
 export default function App() {
   const { data, loading, error, lastUpdated, refetch } = useDashboard();
-  const { incidents, metrics, agentSnapshot, connected } = useDashboardWS();
+  const { incidents, metrics, agentSnapshot, connected, scanLog } = useDashboardWS();
   const [tab, setTab] = useState<Tab>("dashboard");
 
   return (
@@ -32,9 +32,10 @@ export default function App() {
           <span style={logo}>⚡</span>
           <span style={logoText}>Agent Platform</span>
           <div style={{ display: "flex", gap: 4, marginLeft: 16 }}>
-            <button style={tabBtn(tab === "dashboard")} onClick={() => setTab("dashboard")}>Dashboard</button>
-            <button style={tabBtn(tab === "prs")} onClick={() => setTab("prs")}>Agent PRs</button>
-            <button style={tabBtn(tab === "logs")} onClick={() => setTab("logs")}>Logs</button>
+            <button style={tabBtn(tab === "dashboard")}  onClick={() => setTab("dashboard")}>Dashboard</button>
+            <button style={tabBtn(tab === "incidents")} onClick={() => setTab("incidents")}>Incidents</button>
+            <button style={tabBtn(tab === "prs")}       onClick={() => setTab("prs")}>Agent PRs</button>
+            <button style={tabBtn(tab === "logs")}      onClick={() => setTab("logs")}>Logs</button>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
@@ -56,6 +57,14 @@ export default function App() {
 
       {/* Main content */}
       {tab === "logs" && <LogsPage />}
+      {tab === "incidents" && (
+        <IncidentsPage
+          incidents={incidents}
+          metrics={metrics ?? data?.incidents ?? null}
+          connected={connected}
+          scanLog={scanLog}
+        />
+      )}
       {tab === "prs" && (
         <main style={main}>
           <PRsPage />
@@ -139,14 +148,6 @@ export default function App() {
               </section>
             )}
 
-            {/* Incident Feed */}
-            <section>
-              <IncidentFeed
-                incidents={incidents}
-                metrics={metrics ?? data.incidents}
-                connected={connected}
-              />
-            </section>
           </>
         )}
       </main>}

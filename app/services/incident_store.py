@@ -33,6 +33,7 @@ class IncidentStore:
         incident = IncidentState(error_event=error_event, detected_at=datetime.utcnow())
         self._incidents[incident.id] = incident
         self._upsert_incident(incident)
+        self._broadcast(incident)
         return incident
 
     def get(self, incident_id: str) -> Optional[IncidentState]:
@@ -41,7 +42,26 @@ class IncidentStore:
     def update(self, incident: IncidentState) -> IncidentState:
         self._incidents[incident.id] = incident
         self._upsert_incident(incident)
+        self._broadcast(incident)
         return incident
+
+    def _broadcast(self, incident: IncidentState) -> None:
+        try:
+            import asyncio
+            from app.api.websocket_dashboard import broadcast
+            payload = {
+                "type": "incident_update",
+                "incident": {
+                    **incident.model_dump(mode="json"),
+                    "mttr_seconds": incident.mttr_seconds,
+                    "age_seconds": incident.age_seconds,
+                },
+            }
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(broadcast(payload))
+        except Exception:
+            pass
 
     def list_all(self) -> List[IncidentState]:
         return sorted(self._incidents.values(), key=lambda i: i.detected_at, reverse=True)
@@ -50,16 +70,18 @@ class IncidentStore:
         terminal = {IncidentStatus.RESOLVED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
         return [i for i in self.list_all() if i.status not in terminal]
 
-    def get_open_pr_for_error(self, error_type: str, service: str) -> Optional[str]:
-        """Return PR URL if an open incident for this error_type + service already has a PR."""
+    def get_open_pr_for_error(self, error_type: str, service: str, description: str = "") -> Optional[str]:
+        """Return PR URL if an open incident matches error_type + service + description prefix."""
         closed = {IncidentStatus.RESOLVED, IncidentStatus.REJECTED,
                   IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
+        desc_key = description[:100].strip()
         for incident in self._incidents.values():
+            if incident.status in closed or not incident.pr_url:
+                continue
             if (
                 incident.error_event.error_type == error_type
                 and incident.error_event.service == service
-                and incident.pr_url
-                and incident.status not in closed
+                and incident.error_event.description[:100].strip() == desc_key
             ):
                 return incident.pr_url
         return None

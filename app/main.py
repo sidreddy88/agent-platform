@@ -72,7 +72,8 @@ async def _agent_status_broadcaster() -> None:
 @app.on_event("startup")
 async def _startup():
     init_db()
-    asyncio.create_task(detection_service.run_forever())
+    # Detection runs on-demand via POST /incidents/scan, not on a background loop
+    # asyncio.create_task(detection_service.run_forever())
     asyncio.create_task(threshold_monitor.run_forever())
     asyncio.create_task(orchestrator.run_forever())
     asyncio.create_task(drift_detector.run_forever())
@@ -81,7 +82,7 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    detection_service.stop()
+    # detection_service.stop()
     threshold_monitor.stop()
     orchestrator.stop()
     drift_detector.stop()
