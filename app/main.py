@@ -14,6 +14,7 @@ from app.api.routes import drift as drift_routes
 from app.api.routes import evals as evals_routes
 from app.api.routes import monitors as monitors_routes
 from app.api.routes import agents as agents_routes
+from app.api.routes import debug as debug_routes
 from app.api import websocket
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.database import init_db
@@ -50,6 +51,7 @@ app.include_router(drift_routes.router)
 app.include_router(evals_routes.router)
 app.include_router(monitors_routes.router)
 app.include_router(agents_routes.router)
+app.include_router(debug_routes.router)
 
 
 async def _agent_status_broadcaster() -> None:
