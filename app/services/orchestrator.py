@@ -195,8 +195,9 @@ class MasterOrchestrator:
         return "incident", "P2"
 
     def _dedup_key(self, pipeline: str, event: ErrorEvent) -> str:
-        """Unique key for in-flight deduplication."""
-        return f"{pipeline}:{event.error_type or event.title}:{event.service}"
+        """Unique key for in-flight deduplication — includes description prefix to differentiate same error_type."""
+        desc_prefix = (event.description or "")[:80].strip()
+        return f"{pipeline}:{event.error_type or event.title}:{event.service}:{desc_prefix}"
 
     # ------------------------------------------------------------------
     # Dispatch

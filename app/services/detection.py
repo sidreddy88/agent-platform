@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import List
 
 from app.core.config import settings
@@ -304,9 +305,83 @@ class DetectionService:
         return events
 
     # ------------------------------------------------------------------ #
-    # Pillar 5 — CloudWatch log filter patterns (application-level errors)
+    # Pillar 5 — ECS log group error scan (general errors)
     # ------------------------------------------------------------------ #
-    async def _detect_cloudwatch_log_filters(self) -> List[ErrorEvent]:
+    async def _detect_ecs_log_errors(self, window_minutes: int | None = None) -> List[ErrorEvent]:
+        """Scan ECS_LOG_GROUPS for ERROR/Exception/FATAL entries.
+
+        Configured via ECS_LOG_GROUPS env var (comma-separated log group names):
+          ECS_LOG_GROUPS=/ecs/TaskAllInterviews,/ecs/OtherService
+
+        Emits at most 5 distinct error events per log group to avoid flooding
+        the pipeline. TriageAgent sets severity.
+        """
+        events: List[ErrorEvent] = []
+        raw: str = getattr(settings, "ecs_log_groups", "")
+        if not raw:
+            return events
+
+        minutes = window_minutes if window_minutes is not None else max(self._poll_interval // 60, 5)
+        log_groups = [g.strip() for g in raw.split(",") if g.strip()]
+
+        for log_group in log_groups:
+            service = log_group.rstrip("/").split("/")[-1]
+            try:
+                matches = self._aws.get_error_logs(log_group, minutes=minutes, limit=50)
+                if not matches:
+                    continue
+
+                seen: set[str] = set()
+                for log in matches:
+                    msg = log["message"]
+                    normalized = re.sub(r'\b\d+\b', 'N', msg[:120]).strip()
+                    sig = normalized[:80]
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    # Try to extract a specific exception/error class name first
+                    exc_match = re.search(r'\b([A-Z][a-zA-Z0-9]*(?:Error|Exception|Fault|Warning))\b', msg)
+                    if exc_match:
+                        error_type = exc_match.group(1).upper()
+                    else:
+                        error_type = next(
+                            (kw for kw in ("FATAL", "CRITICAL", "EXCEPTION", "ERROR", "Error")
+                             if kw in msg),
+                            "ECS_ERROR",
+                        ).upper()
+
+                    stream_parts = log["stream"].rsplit("/", 1)
+                    task_id = stream_parts[-1] if len(stream_parts) > 1 else log["stream"]
+
+                    events.append(ErrorEvent(
+                        source=EventSource.CLOUDWATCH,
+                        severity=None,
+                        error_type=error_type,
+                        task_id=task_id,
+                        title=f"{error_type} in {service}",
+                        description=msg[:300],
+                        service=service,
+                        resource_id=log_group,
+                        metadata={
+                            "log_group": log_group,
+                            "task_id": task_id,
+                            "timestamp": log["timestamp"],
+                            "match_count": len(matches),
+                        },
+                    ))
+
+                    if len(seen) >= 5:
+                        break
+
+            except Exception as exc:
+                logger.warning("ECS log error detection failed for %s: %s", log_group, exc)
+
+        return events
+
+    # ------------------------------------------------------------------ #
+    # Pillar 6 — CloudWatch log filter patterns (application-level errors)
+    # ------------------------------------------------------------------ #
+    async def _detect_cloudwatch_log_filters(self, window_minutes: int | None = None) -> List[ErrorEvent]:
         """Emit ErrorEvents for application errors matched by custom CloudWatch filter patterns.
 
         Configured via CW_LOG_FILTERS env var (JSON array):
@@ -326,7 +401,7 @@ class DetectionService:
             logger.warning("CW_LOG_FILTERS is not valid JSON — skipping pillar")
             return events
 
-        window_minutes = max(self._poll_interval // 60, 1)
+        window_minutes = window_minutes if window_minutes is not None else max(self._poll_interval // 60, 1)
 
         for f in filters:
             log_group = f.get("log_group", "")
@@ -377,7 +452,7 @@ class DetectionService:
     # ------------------------------------------------------------------ #
     # Orchestration
     # ------------------------------------------------------------------ #
-    async def poll_once(self) -> List[ErrorEvent]:
+    async def poll_once(self, window_minutes: int | None = None) -> List[ErrorEvent]:
         """Run all pillars concurrently, enqueue results."""
         results = await asyncio.gather(
             self._detect_ecs(),
@@ -385,7 +460,8 @@ class DetectionService:
             self._detect_ec2(),
             self._detect_digitalocean(),
             self._detect_cloudflare(),
-            self._detect_cloudwatch_log_filters(),
+            self._detect_ecs_log_errors(window_minutes=window_minutes),
+            self._detect_cloudwatch_log_filters(window_minutes=window_minutes),
             return_exceptions=True,
         )
         all_events: List[ErrorEvent] = []
