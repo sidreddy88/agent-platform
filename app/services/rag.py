@@ -139,6 +139,10 @@ class RAGService:
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
+        self._incident_collection = self._chroma.get_or_create_collection(
+            name="incidents",
+            metadata={"hnsw:space": "cosine"},
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -256,6 +260,74 @@ class RAGService:
                 seen.add(fp)
                 paths.append(fp)
         return sorted(paths)
+
+    # ------------------------------------------------------------------
+    # Incident embeddings (Layer 3 semantic search)
+    # ------------------------------------------------------------------
+
+    async def index_incident(self, incident) -> None:
+        """Embed and store a terminal incident for future similarity retrieval."""
+        if not incident.diagnosis:
+            return
+        text = (
+            f"{incident.error_event.title} | {incident.error_event.error_type} | "
+            f"{incident.error_event.service} | {incident.error_event.description[:200]} | "
+            f"Root cause: {incident.diagnosis}"
+        )
+        if incident.fix_description:
+            text += f" | Fix: {incident.fix_description}"
+        text += f" | Outcome: {incident.status.value}"
+
+        try:
+            embedding = await self._embed([text])
+            self._incident_collection.upsert(
+                ids=[incident.id],
+                documents=[text],
+                embeddings=embedding,
+                metadatas=[{
+                    "incident_id": incident.id,
+                    "status": incident.status.value,
+                    "error_type": incident.error_event.error_type or "",
+                    "service": incident.error_event.service or "",
+                    "pr_url": incident.pr_url or "",
+                }],
+            )
+        except Exception as exc:
+            logger.warning("[RAG] Failed to index incident %s: %s", incident.id, exc)
+
+    async def search_incidents(self, query: str, n_results: int = 3, min_score: float = 0.80) -> list[dict]:
+        """Semantic search over indexed incidents. Returns matches above min_score, best first."""
+        count = self._incident_collection.count()
+        if count == 0:
+            return []
+        try:
+            embedding = await self._embed([query])
+            results = self._incident_collection.query(
+                query_embeddings=embedding,
+                n_results=min(n_results, count),
+                include=["documents", "metadatas", "distances"],
+            )
+            matches = []
+            for doc, meta, dist in zip(
+                results["documents"][0],
+                results["metadatas"][0],
+                results["distances"][0],
+            ):
+                score = round(1 - dist, 4)
+                if score >= min_score:
+                    matches.append({
+                        "incident_id": meta["incident_id"],
+                        "status": meta["status"],
+                        "error_type": meta["error_type"],
+                        "service": meta["service"],
+                        "pr_url": meta["pr_url"],
+                        "text": doc,
+                        "score": score,
+                    })
+            return matches
+        except Exception as exc:
+            logger.warning("[RAG] Incident search failed: %s", exc)
+            return []
 
     def clear(self) -> None:
         """Delete all indexed chunks (wipes the collection)."""
