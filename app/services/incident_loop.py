@@ -185,6 +185,16 @@ class IncidentLoop:
             self._rag: RAGService | None = RAGService()
         except Exception:
             self._rag = None
+        self._dedup_stats: dict[str, int] = {
+            "sql_dedup": 0,
+            "regression": 0,
+            "rag_hit": 0,
+            "cold_start": 0,
+        }
+
+    @property
+    def dedup_stats(self) -> dict[str, int]:
+        return dict(self._dedup_stats)
 
     # ------------------------------------------------------------------ #
     # Step 1 — Triage
@@ -307,6 +317,7 @@ class IncidentLoop:
                     "[IncidentLoop] Dropping %s (%s / %s) — open PR already exists: %s",
                     event.id, event.error_type, event.service, existing_pr,
                 )
+                self._dedup_stats["sql_dedup"] += 1
                 return
 
         # ── Layer 2: regression check (SQL) ──────────────────────────
@@ -323,6 +334,7 @@ class IncidentLoop:
                     f"Past fix: {past.fix_description or '(none recorded)'}\n"
                     f"Past PR: {past.pr_url or '(none)'}"
                 )
+                self._dedup_stats["regression"] += 1
                 logger.info(
                     "[IncidentLoop] Regression detected for %s/%s — prior: %s",
                     event.error_type, event.service, past.id,
@@ -344,12 +356,16 @@ class IncidentLoop:
                             f"    PR: {s['pr_url'] or 'none'} | Outcome: {s['status']}"
                         )
                     prior_context = "\n".join(lines)
+                    self._dedup_stats["rag_hit"] += 1
                     logger.info(
                         "[IncidentLoop] RAG found %d similar incident(s) for %s",
                         len(similar), event.id,
                     )
             except Exception as exc:
                 logger.debug("[IncidentLoop] RAG search skipped: %s", exc)
+
+        if prior_context is None:
+            self._dedup_stats["cold_start"] += 1
 
         # ── Triage ────────────────────────────────────────────────────
         incident = incident_store.create(event)
