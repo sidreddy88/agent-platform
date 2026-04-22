@@ -88,6 +88,12 @@ async def approve(request_id: str, body: ApproveBody):
                     golden_dataset_builder.capture(incident)
                 except Exception:
                     pass
+                try:
+                    import asyncio
+                    from app.services.rag import RAGService
+                    asyncio.ensure_future(RAGService().index_incident(incident))
+                except Exception:
+                    pass
 
     return req
 
@@ -121,6 +127,12 @@ async def reject(request_id: str, body: RejectBody):
                 logging.getLogger(__name__).warning(
                     "[Approvals] Failed to log preference pair: %s", exc
                 )
+            try:
+                import asyncio
+                from app.services.rag import RAGService
+                asyncio.ensure_future(RAGService().index_incident(incident))
+            except Exception:
+                pass
 
             # Capture terminal state for golden dataset
             try:

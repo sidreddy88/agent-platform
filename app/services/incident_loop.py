@@ -180,6 +180,11 @@ class IncidentLoop:
         self._diagnosis = DiagnosisAgent()
         self._fix_agent = FixGenerationAgent()
         self._review_agent = CodeReviewAgent()
+        try:
+            from app.services.rag import RAGService
+            self._rag: RAGService | None = RAGService()
+        except Exception:
+            self._rag = None
 
     # ------------------------------------------------------------------ #
     # Step 1 — Triage
@@ -247,9 +252,17 @@ class IncidentLoop:
             logger.error("[IncidentLoop] CodeReviewAgent failed: %s", exc)
             return None
 
-    async def _run_diagnosis(self, incident: IncidentState) -> DiagnosisResult:
+    async def _index_to_rag(self, incident: IncidentState) -> None:
+        if self._rag is None:
+            return
         try:
-            result = await self._diagnosis.diagnose(incident)
+            await self._rag.index_incident(incident)
+        except Exception as exc:
+            logger.debug("[IncidentLoop] RAG index skipped for %s: %s", incident.id, exc)
+
+    async def _run_diagnosis(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
+        try:
+            result = await self._diagnosis.diagnose(incident, prior_context=prior_context)
             return handoff_validator.validate_diagnosis(result)
         except HandoffValidationError as exc:
             logger.error("[IncidentLoop] DiagnosisResult schema invalid: %s", exc)
@@ -283,7 +296,7 @@ class IncidentLoop:
             )
             return
 
-        # ── Deduplication gate ────────────────────────────────────────
+        # ── Layer 1: open PR dedup gate ───────────────────────────────
         # Drop if an open PR already exists for same error_type + service + description.
         if event.error_type and event.service:
             existing_pr = incident_store.get_open_pr_for_error(
@@ -295,6 +308,48 @@ class IncidentLoop:
                     event.id, event.error_type, event.service, existing_pr,
                 )
                 return
+
+        # ── Layer 2: regression check (SQL) ──────────────────────────
+        # If this exact error_type + service was previously resolved, surface
+        # the past root cause and fix as context for DiagnosisAgent.
+        prior_context: str | None = None
+        if event.error_type and event.service:
+            past = incident_store.get_resolved_for_error(event.error_type, event.service)
+            if past:
+                prior_context = (
+                    f"REGRESSION: This error was previously resolved "
+                    f"(incident {past.id}, resolved {past.resolved_at}).\n"
+                    f"Past root cause: {past.diagnosis}\n"
+                    f"Past fix: {past.fix_description or '(none recorded)'}\n"
+                    f"Past PR: {past.pr_url or '(none)'}"
+                )
+                logger.info(
+                    "[IncidentLoop] Regression detected for %s/%s — prior: %s",
+                    event.error_type, event.service, past.id,
+                )
+
+        # ── Layer 3: RAG semantic search ──────────────────────────────
+        # Only fires when Layer 2 found nothing. Costs one embedding API call.
+        # Surfaces semantically similar past incidents (score ≥ 0.80) across
+        # all services, not just exact error_type matches.
+        if prior_context is None and self._rag is not None:
+            try:
+                query = f"{event.title} {event.description[:200]}"
+                similar = await self._rag.search_incidents(query, min_score=0.80)
+                if similar:
+                    lines = ["Semantically similar past incidents (RAG, score ≥ 0.80):"]
+                    for s in similar:
+                        lines.append(
+                            f"  [{s['score']:.2f}] {s['text'][:200]}\n"
+                            f"    PR: {s['pr_url'] or 'none'} | Outcome: {s['status']}"
+                        )
+                    prior_context = "\n".join(lines)
+                    logger.info(
+                        "[IncidentLoop] RAG found %d similar incident(s) for %s",
+                        len(similar), event.id,
+                    )
+            except Exception as exc:
+                logger.debug("[IncidentLoop] RAG search skipped: %s", exc)
 
         # ── Triage ────────────────────────────────────────────────────
         incident = incident_store.create(event)
@@ -324,6 +379,7 @@ class IncidentLoop:
                 golden_dataset_builder.capture(incident)
             except Exception:
                 pass
+            await self._index_to_rag(incident)
             return
 
         if triage.decision == "noise":
@@ -335,6 +391,7 @@ class IncidentLoop:
                 golden_dataset_builder.capture(incident)
             except Exception:
                 pass
+            await self._index_to_rag(incident)
             return
 
         # Real incident — set severity and proceed
@@ -352,7 +409,7 @@ class IncidentLoop:
         )
 
         # ── Diagnosis ─────────────────────────────────────────────────
-        diagnosis = await self._run_diagnosis(incident)
+        diagnosis = await self._run_diagnosis(incident, prior_context=prior_context)
 
         incident.diagnosis = diagnosis.root_cause
         incident.confidence = diagnosis.confidence

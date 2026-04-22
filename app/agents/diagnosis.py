@@ -309,11 +309,15 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
 
-    async def diagnose(self, incident: IncidentState) -> DiagnosisResult:
+    async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
         event = incident.error_event
         log_group = event.metadata.get("log_group", "")
         pattern = event.metadata.get("pattern", event.error_type or event.title)
+
+        prior_section = ""
+        if prior_context:
+            prior_section = f"\nPRIOR KNOWLEDGE (from past incidents — treat as strong evidence):\n{prior_context}\n"
 
         prompt = f"""You are a senior SRE diagnosing a production incident. A triage agent has already
 confirmed this is real. Your job is to find the root cause and a fix approach.
@@ -330,7 +334,7 @@ INCIDENT:
   occurrences_24h : {incident.occurrences_24h}
   blast_radius    : {incident.blast_radius}
   triage_reasoning: {incident.triage_reasoning}
-
+{prior_section}
 STEPS — call tools in this order:
 1. get_error_samples — see the actual error messages (log_group="{log_group}", pattern="{pattern}", minutes=120)
 2. check_still_occurring — confirm if error is ongoing (log_group="{log_group}", pattern="{pattern}")
