@@ -86,6 +86,19 @@ class IncidentStore:
                 return incident.pr_url
         return None
 
+    def get_resolved_for_error(self, error_type: str, service: str) -> Optional["IncidentState"]:
+        """Return the most recently resolved incident for this error_type + service (regression check)."""
+        candidates = [
+            i for i in self._incidents.values()
+            if i.status == IncidentStatus.RESOLVED
+            and i.error_event.error_type == error_type
+            and i.error_event.service == service
+            and i.diagnosis
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda i: i.resolved_at or i.detected_at)
+
     def clear(self) -> int:
         """Delete all incidents. Returns count deleted."""
         count = len(self._incidents)
