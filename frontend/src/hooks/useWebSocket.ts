@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AgentSnapshot, Incident, IncidentMetrics, WSMessage } from "../types";
+import type { AgentSnapshot, Incident, IncidentMetrics, ScanLogEntry, WSMessage } from "../types";
 
 const PING_MS = 25_000;
 const RECONNECT_MS = 3_000;
@@ -9,6 +9,7 @@ export function useDashboardWS() {
   const [metrics, setMetrics] = useState<IncidentMetrics | null>(null);
   const [agentSnapshot, setAgentSnapshot] = useState<AgentSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
+  const [scanLog, setScanLog] = useState<ScanLogEntry[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -40,6 +41,13 @@ export function useDashboardWS() {
         });
       } else if (msg.type === "agent_status") {
         setAgentSnapshot(msg.agents);
+      } else if (msg.type === "scan_progress") {
+        setScanLog((prev) => {
+          const entry: ScanLogEntry = { ts: msg.ts, level: msg.level, message: msg.message };
+          // Clear on "Scan started" so each scan gets a fresh log
+          if (msg.message.startsWith("Scan started")) return [entry];
+          return [...prev, entry];
+        });
       } else if (msg.type === "event") {
         // New raw error event — will become an incident shortly
       }
@@ -62,5 +70,5 @@ export function useDashboardWS() {
     };
   }, [connect]);
 
-  return { incidents, metrics, agentSnapshot, connected };
+  return { incidents, metrics, agentSnapshot, connected, scanLog };
 }

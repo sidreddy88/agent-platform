@@ -284,10 +284,11 @@ class IncidentLoop:
             return
 
         # ── Deduplication gate ────────────────────────────────────────
-        # If an open PR already exists for this exact error_type + service,
-        # drop the event entirely — no incident created, no agents run.
+        # Drop if an open PR already exists for same error_type + service + description.
         if event.error_type and event.service:
-            existing_pr = incident_store.get_open_pr_for_error(event.error_type, event.service)
+            existing_pr = incident_store.get_open_pr_for_error(
+                event.error_type, event.service, event.description
+            )
             if existing_pr:
                 logger.info(
                     "[IncidentLoop] Dropping %s (%s / %s) — open PR already exists: %s",
@@ -438,9 +439,14 @@ class IncidentLoop:
         incident.status = IncidentStatus.REVIEWING
         incident_store.update(incident)
 
-        # Store PR for idempotency — any future duplicate triage event will see this
+        # Store PR for idempotency keyed on error_type + service + description prefix
         if fix.pr_url and incident.error_event.error_type:
-            incident_store.set_pr_for_resource(incident.error_event.error_type, fix.pr_url)
+            key = (
+                f"{incident.error_event.error_type}"
+                f":{incident.error_event.service}"
+                f":{incident.error_event.description[:100]}"
+            )
+            incident_store.set_pr_for_resource(key, fix.pr_url)
 
         logger.info(
             "[IncidentLoop] %s — PR created: %s — running CodeReviewAgent",
