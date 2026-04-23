@@ -80,11 +80,22 @@ interface Props {
 export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props) {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ events_found: number } | null>(null);
+  const [clearing, setClearing] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [scanLog]);
+
+  async function handleClear() {
+    if (!window.confirm("Delete all incidents? This cannot be undone.")) return;
+    setClearing(true);
+    try {
+      await fetch("/incidents", { method: "DELETE" });
+    } finally {
+      setClearing(false);
+    }
+  }
 
   async function handleScan() {
     setScanning(true);
@@ -118,6 +129,9 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
           )}
           <button style={scanBtn(scanning)} onClick={handleScan} disabled={scanning}>
             {scanning ? "Scanning..." : "Scan Last 24h"}
+          </button>
+          <button style={clearBtn(clearing)} onClick={handleClear} disabled={clearing}>
+            {clearing ? "Clearing..." : "Clear All"}
           </button>
         </div>
       </div>
@@ -186,6 +200,17 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
 // ── Incident card ─────────────────────────────────────────────────────────────
 
 function IncidentCard({ inc }: { inc: Incident }) {
+  const [restarting, setRestarting] = useState(false);
+
+  async function handleRestart() {
+    setRestarting(true);
+    try {
+      await fetch(`/incidents/${inc.id}/restart`, { method: "POST" });
+    } finally {
+      setRestarting(false);
+    }
+  }
+
   return (
     <div style={card}>
       {/* Top row */}
@@ -217,23 +242,24 @@ function IncidentCard({ inc }: { inc: Incident }) {
       )}
 
       {/* Bottom meta */}
-      {(inc.pr_url || inc.human_decision || inc.mttr_seconds !== null) && (
-        <div style={bottomRow}>
-          {inc.pr_url && (
-            <a href={inc.pr_url} target="_blank" rel="noreferrer" style={prLink}>
-              PR #{inc.pr_number}
-            </a>
-          )}
-          {inc.human_decision && (
-            <span style={decisionBadge(inc.human_decision)}>
-              {inc.human_decision === "approved" ? "Approved" : "Rejected"}
-            </span>
-          )}
-          {inc.mttr_seconds !== null && (
-            <span style={metaPill}>MTTR {mttr(inc.mttr_seconds)}</span>
-          )}
-        </div>
-      )}
+      <div style={bottomRow}>
+        {inc.pr_url && (
+          <a href={inc.pr_url} target="_blank" rel="noreferrer" style={prLink}>
+            PR #{inc.pr_number}
+          </a>
+        )}
+        {inc.human_decision && (
+          <span style={decisionBadge(inc.human_decision)}>
+            {inc.human_decision === "approved" ? "Approved" : "Rejected"}
+          </span>
+        )}
+        {inc.mttr_seconds !== null && (
+          <span style={metaPill}>MTTR {mttr(inc.mttr_seconds)}</span>
+        )}
+        <button style={restartBtn(restarting)} onClick={handleRestart} disabled={restarting} title="Restart pipeline from the beginning">
+          {restarting ? "↺ Restarting..." : "↺ Restart"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -326,6 +352,14 @@ const scanBtn = (loading: boolean): React.CSSProperties => ({
   background: loading ? "#1e2d40" : "#1e3a5f",
   border: `1px solid ${loading ? "#2d4a6a" : "#3b82f6"}`,
   color: loading ? "#4b5563" : "#60a5fa",
+  borderRadius: 6, padding: "6px 16px", fontSize: 13, fontWeight: 600,
+  cursor: loading ? "not-allowed" : "pointer",
+});
+
+const clearBtn = (loading: boolean): React.CSSProperties => ({
+  background: loading ? "#1e2130" : "rgba(239,68,68,0.08)",
+  border: `1px solid ${loading ? "#2d3149" : "rgba(239,68,68,0.35)"}`,
+  color: loading ? "#4b5563" : "#f87171",
   borderRadius: 6, padding: "6px 16px", fontSize: 13, fontWeight: 600,
   cursor: loading ? "not-allowed" : "pointer",
 });
@@ -439,6 +473,15 @@ const decisionBadge = (d: string): React.CSSProperties => ({
   background: d === "approved" ? "rgba(34,197,94,0.1)" : "rgba(248,113,113,0.1)",
   border: `1px solid ${d === "approved" ? "rgba(34,197,94,0.3)" : "rgba(248,113,113,0.3)"}`,
   borderRadius: 4, padding: "2px 8px",
+});
+
+const restartBtn = (loading: boolean): React.CSSProperties => ({
+  marginLeft: "auto",
+  background: "transparent",
+  border: `1px solid ${loading ? "#2d3149" : "#334155"}`,
+  color: loading ? "#374151" : "#64748b",
+  borderRadius: 4, padding: "2px 10px", fontSize: 11, fontWeight: 600,
+  cursor: loading ? "not-allowed" : "pointer",
 });
 
 const metaPill: React.CSSProperties = {

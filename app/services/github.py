@@ -302,6 +302,62 @@ class GitHubService:
             await self._raise_for_status(response)
             return response.json()["default_branch"]
 
+    async def search_code(self, owner: str, repo: str, query: str) -> list[dict]:
+        """
+        Search file *contents* in the repo using GitHub Code Search API.
+
+        Returns a list of dicts with 'path' and 'fragment' (matched code snippet).
+        Skips node_modules and test files. Max 5 results.
+        """
+        _SKIP = ("node_modules", ".test.", ".spec.", "dist/", "build/")
+        try:
+            async with self._client() as client:
+                resp = await client.get(
+                    "/search/code",
+                    params={"q": f"{query} repo:{owner}/{repo}", "per_page": 10},
+                    headers={"Accept": "application/vnd.github.v3.text-match+json"},
+                )
+                if resp.status_code != 200:
+                    return []
+                items = resp.json().get("items", [])
+                results = []
+                for item in items:
+                    path = item.get("path", "")
+                    if any(s in path for s in _SKIP):
+                        continue
+                    fragment = ""
+                    matches = item.get("text_matches", [])
+                    if matches:
+                        fragment = matches[0].get("fragment", "")[:200]
+                    results.append({"path": path, "fragment": fragment})
+                    if len(results) >= 5:
+                        break
+                return results
+        except Exception:
+            return []
+
+    async def search_files_by_keyword(self, owner: str, repo: str, keyword: str, ref: str = "main") -> list[str]:
+        """Return all blob paths in the repo whose path contains keyword (case-insensitive). Max 50 results."""
+        try:
+            async with self._client() as client:
+                ref_resp = await client.get(f"/repos/{owner}/{repo}/git/ref/heads/{ref}")
+                if ref_resp.status_code != 200:
+                    return []
+                tree_sha = ref_resp.json()["object"]["sha"]
+                tree_resp = await client.get(
+                    f"/repos/{owner}/{repo}/git/trees/{tree_sha}",
+                    params={"recursive": "1"},
+                )
+                if tree_resp.status_code != 200:
+                    return []
+                kw = keyword.lower()
+                return [
+                    item["path"] for item in tree_resp.json().get("tree", [])
+                    if item.get("type") == "blob" and (not kw or kw in item["path"].lower())
+                ][:50]
+        except Exception:
+            return []
+
     async def find_files_by_name(self, owner: str, repo: str, filename: str, ref: str = "main") -> list[str]:
         """Return all repo paths whose basename matches filename (recursive tree search)."""
         try:

@@ -485,7 +485,12 @@ class AWSService:
         return sorted(events, key=lambda e: e["timestamp"], reverse=True)
 
     def get_error_logs(self, log_group: str, minutes: int = 60, limit: int = 100) -> list[dict]:
-        """Fetch error-level log events from a CloudWatch log group using filter_log_events."""
+        """Fetch error-level log events from a CloudWatch log group.
+
+        For each matching error line, fetches the next 20 lines from the same
+        log stream within a 5-second window to capture Node.js / Python stack
+        traces that appear on the lines immediately following the error.
+        """
         logs = self._client("logs")
         from datetime import timedelta
 
@@ -507,10 +512,33 @@ class AWSService:
         events = []
         for ev in resp.get("events", []):
             ts = datetime.fromtimestamp(ev["timestamp"] / 1000, tz=timezone.utc).isoformat()
+            message = ev.get("message", "").rstrip()
+
+            # Fetch context lines after the error to capture stack traces.
+            # Stack frames ("at functionName (/app/...)") appear on subsequent
+            # lines and won't match the error filter pattern above.
+            try:
+                ctx_resp = logs.get_log_events(
+                    logGroupName=log_group,
+                    logStreamName=ev["logStreamName"],
+                    startTime=ev["timestamp"],
+                    endTime=ev["timestamp"] + 5000,  # 5-second window
+                    limit=25,
+                    startFromHead=True,
+                )
+                ctx_lines = [e.get("message", "").rstrip() for e in ctx_resp.get("events", [])]
+                # Drop the first line if it's the error line itself (same message)
+                if ctx_lines and ctx_lines[0].strip() == message.strip():
+                    ctx_lines = ctx_lines[1:]
+                if ctx_lines:
+                    message = message + "\n" + "\n".join(ctx_lines[:20])
+            except (BotoCoreError, ClientError):
+                pass  # context is best-effort; proceed with just the error line
+
             events.append({
                 "timestamp": ts,
                 "stream": ev.get("logStreamName", ""),
-                "message": ev.get("message", "").rstrip(),
+                "message": message,
                 "log_group": log_group,
             })
 
