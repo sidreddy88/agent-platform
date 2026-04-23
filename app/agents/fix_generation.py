@@ -293,16 +293,185 @@ class FixGenerationAgent(BaseAgent):
     # Target resolution
     # ------------------------------------------------------------------
 
+    def _parse_stack_trace(self, incident: IncidentState) -> tuple[str | None, str | None]:
+        """
+        Extract the first relevant file path and function name from a stack trace
+        in the error description or diagnosis.
+
+        Handles Node.js format:
+          at functionName (/app/routes/helper/file.js:42:5)
+          at /app/routes/helper/file.js:42:5
+
+        Returns (repo_relative_path, function_name_or_None).
+        """
+        text = f"{incident.error_event.description or ''}\n{incident.diagnosis or ''}"
+
+        # Match Node.js stack frames
+        frame_re = re.compile(
+            r"at\s+"
+            r"(?:([\w.<>$]+(?:\.[\w.<>$]+)*)\s+\()?"   # optional: functionName (
+            r"([^\s()]+\.(?:js|ts|jsx|tsx|py|rb|go))"   # file path with extension
+            r":\d+(?::\d+)?\)?",                         # :line or :line:col
+            re.MULTILINE,
+        )
+
+        _SKIP = ("node:internal", "node_modules", "internal/process", "<anonymous>",
+                 "node:events", "node:stream", "timers")
+        _CONTAINER_PREFIXES = ("/app/", "/usr/src/app/", "/home/app/", "/srv/app/")
+
+        for m in frame_re.finditer(text):
+            fn_name = m.group(1)
+            raw_path = m.group(2).strip()
+
+            if any(s in raw_path for s in _SKIP):
+                continue
+
+            # Strip Docker/container absolute prefix to get repo-relative path
+            for prefix in _CONTAINER_PREFIXES:
+                if raw_path.startswith(prefix):
+                    raw_path = raw_path[len(prefix):]
+                    break
+
+            # Reject remaining absolute paths — they can't be in the repo
+            if raw_path.startswith("/"):
+                continue
+
+            logger.info("[FixGen] Stack trace → file=%s  fn=%s", raw_path, fn_name)
+            return raw_path, fn_name
+
+        return None, None
+
+    async def _resolve_function_name(self, file_path: str, snippet: str, incident: IncidentState) -> str:
+        """Given a confirmed file path and a matched code snippet, ask the LLM which function to fix."""
+        prompt = (
+            f"A production incident occurred in '{file_path}'.\n\n"
+            f"Error type: {incident.error_event.error_type or 'unknown'}\n"
+            f"Diagnosis: {incident.diagnosis or 'none'}\n"
+            f"Matched code snippet from the file:\n{snippet}\n\n"
+            f"What is the name of the function that should be fixed? "
+            f"Return ONLY the function name, nothing else."
+        )
+        try:
+            fn = await self._llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                system="Return only the function name as a single word. No explanation.",
+            )
+            return fn.strip().split()[0]
+        except Exception:
+            return "the function handling this error"
+
+    def _extract_keywords(self, incident: IncidentState) -> list[str]:
+        """Extract searchable keyword terms from incident title, error type, and diagnosis."""
+        raw = f"{incident.error_event.title} {incident.error_event.error_type or ''} {incident.diagnosis or ''}"
+        tokens = re.split(r"[\s\-_./\\|:,()]+", raw)
+        keywords: list[str] = []
+        seen: set[str] = set()
+        for t in tokens:
+            # Split camelCase and PascalCase
+            split1 = re.sub(r"([a-z])([A-Z])", r"\1 \2", t)
+            # Split sequences of caps followed by a cap+lower: "TOKENEXPIREDERROR" → best-effort word boundaries
+            split2 = re.sub(r"([A-Z]{2,})([A-Z][a-z])", r"\1 \2", split1)
+            for p in split2.split():
+                lp = p.lower()
+                if len(lp) > 3 and lp not in seen:
+                    seen.add(lp)
+                    keywords.append(lp)
+        return keywords[:10]
+
     async def _resolve_target(self, incident: IncidentState) -> tuple[str | None, str | None]:
-        """Ask the LLM which file and function to fix based on the incident."""
+        """
+        Resolve the file and function to fix.
+
+        Strategy (in order):
+          1. Stack trace parsing — exact path from log, no LLM needed
+          2. GitHub Code Search — search file contents for the error type string
+          3. Keyword search + full server file list → LLM picks from real candidates
+        """
         event = incident.error_event
+
+        default_branch = "main"
+        try:
+            default_branch = await self._github.get_default_branch(self._owner, self._repo)
+        except Exception:
+            pass
+
+        # ── 1. Stack trace (fastest, most accurate) ────────────────────
+        st_path, st_fn = self._parse_stack_trace(incident)
+        if st_path:
+            # Validate the path actually exists in the repo
+            try:
+                await self._github.get_file_contents(self._owner, self._repo, st_path, ref=default_branch)
+                logger.info("[FixGen] Stack trace resolved: %s → %s", st_path, st_fn)
+                # If no function name from stack trace, still pass it to let LLM figure out fn
+                return st_path, st_fn or "the function handling this error"
+            except Exception:
+                logger.info("[FixGen] Stack trace path '%s' not found in repo — falling back to search", st_path)
+
+        # ── 2. GitHub Code Search — search file contents for the error type ──
+        error_query = (incident.error_event.error_type or "").replace("_", " ")
+        if error_query:
+            code_results = await self._github.search_code(self._owner, self._repo, error_query)
+            if code_results:
+                top = code_results[0]
+                logger.info("[FixGen] Code search resolved: %s (fragment: %s…)", top["path"], top["fragment"][:60])
+                # Ask LLM for function name only — file path is confirmed real
+                fn = await self._resolve_function_name(top["path"], top["fragment"], incident)
+                return top["path"], fn
+
+        # ── 3. Keyword search + full server file list ──────────────────
+        keywords = self._extract_keywords(incident)
+        logger.info("[FixGen] Searching repo with keywords: %s", keywords)
+
+        _SKIP = ("node_modules", "package-lock", ".min.", "dist/", "build/", ".test.", ".spec.",
+                 ".ttf", ".woff", ".png", ".jpg", ".svg", ".ico", "README", ".npmrc", ".env")
+        _SOURCE_EXTS = (".js", ".ts", ".jsx", ".tsx", ".py", ".rb", ".go", ".java", ".cs")
+        _CLIENT_DIRS = ("client/", "frontend/", "public/", "static/", "assets/")
+
+        def _is_source(path: str) -> bool:
+            return (
+                not any(x in path for x in _SKIP)
+                and any(path.endswith(e) for e in _SOURCE_EXTS)
+            )
+
+        def _is_server(path: str) -> bool:
+            return _is_source(path) and not any(path.startswith(d) for d in _CLIENT_DIRS)
+
+        # Always start with the full list of server-side source files
+        all_files = await self._github.search_files_by_keyword(
+            self._owner, self._repo, "", ref=default_branch
+        )
+        all_server = [f for f in all_files if _is_server(f)]
+
+        # Promote keyword matches to the top so the LLM sees the most relevant files first
+        keyword_matches: list[str] = []
+        for kw in keywords:
+            for f in all_server:
+                if kw in f.lower() and f not in keyword_matches:
+                    keyword_matches.append(f)
+
+        # keyword matches first, then remaining server files
+        candidates = keyword_matches + [f for f in all_server if f not in keyword_matches]
+        candidates = candidates[:50]
+
+        logger.info("[FixGen] %d server source file(s) for LLM (%d keyword matches): %s",
+                    len(candidates), len(keyword_matches), keyword_matches[:5] or candidates[:5])
+
+        candidate_section = ""
+        if candidates:
+            listed = "\n".join(f"  {p}" for p in candidates)
+            candidate_section = (
+                f"\nAll server-side source files in the repo (files listed first are keyword matches "
+                f"— you MUST choose file_path from this list):\n{listed}"
+            )
+
         prompt = (
             f"A production incident needs a code fix. Based on the details below, "
             f"identify the exact file path and function name that needs to be changed.\n\n"
             f"Title: {event.title}\n"
             f"Error type: {event.error_type or 'unknown'}\n"
             f"Description: {event.description or 'none'}\n"
-            f"Root cause: {incident.diagnosis or 'none'}\n\n"
+            f"Root cause: {incident.diagnosis or 'none'}\n"
+            f"{candidate_section}\n"
             f'Return ONLY a JSON object: {{"file_path": "...", "function_name": "..."}}\n'
             f"No explanation, no markdown."
         )
@@ -314,7 +483,22 @@ class FixGenerationAgent(BaseAgent):
             response = re.sub(r"^```(?:json)?\n?", "", response.strip())
             response = re.sub(r"\n?```$", "", response)
             data = json.loads(response.strip())
-            return data["file_path"], data["function_name"]
+            file_path = data["file_path"]
+            function_name = data["function_name"]
+
+            # Reject hallucinated paths — LLM must pick from the real candidate list
+            if candidates and file_path not in candidates:
+                logger.warning(
+                    "[FixGen] LLM returned '%s' which is not in the candidate list — rejecting",
+                    file_path,
+                )
+                # Fall back to the top keyword match if available, otherwise fail cleanly
+                if keyword_matches:
+                    logger.info("[FixGen] Falling back to top keyword match: %s", keyword_matches[0])
+                    return keyword_matches[0], function_name
+                return None, None
+
+            return file_path, function_name
         except Exception as exc:
             logger.error("[FixGen] Failed to resolve target file/function: %s", exc)
             return None, None
@@ -475,36 +659,50 @@ class FixGenerationAgent(BaseAgent):
 
     async def _generate_fix(self, content: str, function_name: str, incident: IncidentState) -> tuple[str, str]:
         """
-        Extract the function using brace-counting, then use an LLM call to generate the fix.
-        Returns (old_function_text, new_function_text).
+        Ask the LLM to locate the function in the file and return (old_text, fixed_text).
+
+        Passes the full file content so the LLM can handle any function syntax —
+        arrow functions, object methods, class methods, exports, etc.
+        Returns ("", "") if the function cannot be located.
         """
-        old_function = self._extract_js_function(content, function_name)
-        if not old_function:
-            logger.error("[FixGen] %s not found in file", function_name)
-            return "", ""
-
-        logger.info("[FixGen] Extracted function (%d chars)", len(old_function))
-
         prompt = (
-            f"Fix this function based on the following diagnosis.\n\n"
+            f"You are fixing a production bug. The file below contains the function "
+            f"'{function_name}' (or the closest handler for this error).\n\n"
             f"DIAGNOSIS: {incident.diagnosis}\n"
             f"ERROR TYPE: {incident.error_event.error_type or 'unknown'}\n\n"
-            f"CURRENT FUNCTION:\n{old_function}\n\n"
-            f"Apply the minimal change needed to fix the root cause. "
-            f"Preserve the function signature and all unrelated logic.\n\n"
-            f"Return ONLY the complete fixed function — no explanation, no markdown fences."
+            f"FILE CONTENT:\n{content}\n\n"
+            f"Instructions:\n"
+            f"1. Find the function or handler responsible for this error (named '{function_name}' or similar).\n"
+            f"2. Apply the minimal change needed to fix the root cause.\n"
+            f"3. Return a JSON object with exactly two keys:\n"
+            f'   - "old": the exact verbatim text of the function as it appears in the file\n'
+            f'   - "new": the complete fixed version\n'
+            f"The 'old' value must be copy-pasted exactly from the file — no changes to whitespace or quotes.\n"
+            f"Return ONLY the JSON object. No explanation, no markdown fences."
         )
 
-        new_function = await self._llm.complete(
-            messages=[{"role": "user", "content": prompt}],
-            system=(
-                "You are a software engineer. "
-                "Return ONLY the complete fixed function code, nothing else. "
-                "No markdown, no backticks, no explanation."
-            ),
-        )
+        try:
+            response = await self._llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                system="You are a software engineer. Return only valid JSON with 'old' and 'new' keys.",
+            )
+            response = re.sub(r"^```(?:json)?\n?", "", response.strip())
+            response = re.sub(r"\n?```$", "", response)
+            data = json.loads(response.strip())
+            old_function = data.get("old", "")
+            new_function = data.get("new", "")
+        except Exception as exc:
+            logger.error("[FixGen] LLM fix generation failed: %s", exc)
+            return "", ""
 
-        new_function = re.sub(r"^```(?:javascript|js|python|py|ts)?\n?", "", new_function.strip())
-        new_function = re.sub(r"\n?```$", "", new_function)
+        if not old_function:
+            logger.error("[FixGen] LLM returned empty 'old' function for %s", function_name)
+            return "", ""
 
+        # Verify old_function actually appears in the file before returning
+        if old_function not in content and old_function.strip() not in content:
+            logger.error("[FixGen] LLM-returned 'old' text not found verbatim in file — likely hallucinated")
+            return "", ""
+
+        logger.info("[FixGen] Generated fix (old=%d chars, new=%d chars)", len(old_function), len(new_function))
         return old_function, new_function.strip()
