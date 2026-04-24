@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import boto3
+import certifi
 from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -122,7 +123,11 @@ class AWSService:
             self._session_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
 
     def _client(self, service: str):
-        return boto3.client(service, **self._session_kwargs)
+        # Bypass Agent Vault's HTTPS proxy and CA — AWS SigV4 signing breaks
+        # under MITM TLS interception, and Agent Vault's SSL_CERT_FILE doesn't
+        # include real AWS certs when proxy is bypassed.
+        config = BotocoreConfig(proxies={"https": "", "http": ""})
+        return boto3.client(service, config=config, verify=certifi.where(), **self._session_kwargs)
 
     # ------------------------------------------------------------------
     # ECS
