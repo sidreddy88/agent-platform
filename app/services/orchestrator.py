@@ -250,11 +250,11 @@ class MasterOrchestrator:
         """Execute the chosen pipeline, with optional parallel enrichment."""
         if pipeline == "incident":
             self._stats["incident_pipeline"] += 1
-            if enrich:
-                self._stats["enrichment_fired"] += 1
-                await self._run_incident_with_enrichment(event)
-            else:
-                await self._incident_loop._process(event)
+            # if enrich:
+            #     self._stats["enrichment_fired"] += 1
+            #     await self._run_incident_with_enrichment(event)
+            # else:
+            await self._incident_loop._process(event)
 
         elif pipeline == "performance":
             self._stats["performance_pipeline"] += 1

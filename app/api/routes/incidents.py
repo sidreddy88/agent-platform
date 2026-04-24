@@ -113,7 +113,7 @@ async def scan_last_24h() -> Dict[str, Any]:
                     error_type=error_type,
                     task_id=task_id,
                     title=f"{error_type} in {service}",
-                    description=msg[:300],
+                    description=msg[:600],
                     service=service,
                     resource_id=log_group,
                     metadata={
@@ -180,6 +180,45 @@ async def clear_incidents() -> Dict[str, Any]:
     """Delete all incidents from the store (memory + disk)."""
     count = incident_store.clear()
     return {"deleted": count}
+
+
+@router.post("/{incident_id}/restart")
+async def restart_incident(incident_id: str) -> Dict[str, Any]:
+    """
+    Restart the pipeline for a stuck or failed incident.
+
+    Resets the incident status to OPEN, clears all pipeline fields,
+    and re-queues the original error event so the full pipeline runs again.
+    """
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    from app.models.events import IncidentStatus
+    incident.status = IncidentStatus.OPEN
+    incident.triage_decision = None
+    incident.diagnosis = None
+    incident.confidence = None
+    incident.pr_url = None
+    incident.pr_number = None
+    incident.pr_branch = None
+    incident.pr_files_changed = []
+    incident.pr_test_added = False
+    incident.fix_description = None
+    incident.fix_attempted = None
+    incident.human_decision = None
+    incident.outcome = None
+    incident.resolved_at = None
+    incident.triage_completed_at = None
+    incident.diagnosis_completed_at = None
+    incident.pr_created_at = None
+    incident_store.update(incident)
+
+    # Mark as restarted so the staleness gate doesn't drop it
+    incident.error_event.metadata["restarted"] = True
+    incident.error_event.detected_at = datetime.now(timezone.utc)
+    await event_queue.enqueue(incident.error_event)
+    return {"status": "restarted", "incident_id": incident_id}
 
 
 @router.get("/{incident_id}")

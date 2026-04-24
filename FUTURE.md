@@ -75,3 +75,46 @@ Adds one extra LLM reasoning step per cold-start incident. Worthwhile once the c
 ## CodeReviewAgent — Codebase-Aware Reviews
 
 Implemented in `feat/codebase-aware-code-review`. Shipped.
+
+---
+
+## FixGenerationAgent — GitHub Code Search + RAG File Resolution
+
+**Context:** See `temp-notes.md` for full analysis. Stack trace parsing is implemented (Strategy 1). Two more layers remain.
+
+### Strategy 2 — GitHub Code Search API
+Search file *contents* for the error type string — finds the actual handler file regardless of its name.
+
+```
+GET /search/code?q={error_type}+repo:{owner}/{repo}&type=code
+```
+
+Add `search_code(owner, repo, query)` to `GitHubService`, call it in `_resolve_target` after stack trace parsing fails. Pass top-3 results with matched snippets to the LLM.
+
+Files: `app/services/github.py`, `app/agents/fix_generation.py:_resolve_target`
+
+### Strategy 3 — RAG Semantic Search for Fix Target
+When the codebase is indexed, search semantically using the diagnosis text. Returns the actual code chunk — inject directly into the fix prompt instead of fetching the whole file.
+
+Pre-condition: `CODEBASE_PATH` set + `POST /debug/rag/index` called.
+
+File: `app/agents/fix_generation.py:_resolve_target`
+
+---
+
+## Auto Re-index Codebase on PR Merge
+
+**Problem:** The codebase RAG index goes stale as code changes. New files aren't indexed, refactored files leave ghost chunks, deleted files remain as dead weight.
+
+**Why time-based re-indexing is wrong:** A weekly cron re-indexes even when nothing changed (wasteful) and misses rapid-change periods (stale). The right trigger is a PR merging to main.
+
+**How to implement:**
+1. In `app/api/routes/webhooks.py`, handle `pull_request` events with `action: closed` and `merged: true`
+2. Fire `rag.index_directory(settings.codebase_path)` in the background via `asyncio.ensure_future`
+3. Log chunk count so you can see drift over time
+
+**Why re-indexing is cheap:** `index_directory` uses `upsert` keyed on `sha256(file_path:start_line)`. Unchanged files are a no-op at the ChromaDB level — only actually-modified chunks cost an embedding API call.
+
+**Pre-condition:** The target repo must be checked out locally at `CODEBASE_PATH` and kept up to date (e.g. a `git pull` before indexing, also triggered by the webhook).
+
+File: `app/api/routes/webhooks.py`
