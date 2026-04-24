@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.agents.code_review import CodeReviewAgent
 from app.agents.diagnosis import CONFIDENCE_THRESHOLD, DiagnosisAgent, DiagnosisResult
@@ -228,12 +228,18 @@ class IncidentLoop:
             "github_api", failure_threshold=3, timeout_seconds=120.0
         )
         try:
-            return await cb.call(self._fix_agent.fix(incident))
-        except CircuitOpenError as exc:
+            fix, steps = await cb.call(self._fix_agent.fix_with_steps(incident))
+            if not fix.pr_url and not fix.blast_radius_violation:
+                logger.error(
+                    "[IncidentLoop] FixGenerationAgent failed for %s — steps:\n%s",
+                    incident.id, "\n".join(steps),
+                )
+            return fix
+        except CircuitOpenError:
             logger.warning("[IncidentLoop] GitHub circuit breaker OPEN — skipping fix for %s", incident.id)
             return None
         except Exception as exc:
-            logger.error("[IncidentLoop] FixGenerationAgent failed: %s", exc)
+            logger.error("[IncidentLoop] FixGenerationAgent raised exception for %s: %s", incident.id, exc)
             return None
 
     async def _run_review(self, incident: IncidentState, fix: FixResult) -> str | None:
@@ -298,7 +304,8 @@ class IncidentLoop:
         # Only process events detected within the last 30 minutes.
         # Stale events (replayed, delayed, or from before the server started)
         # are dropped silently to avoid acting on outdated data.
-        age_minutes = (datetime.utcnow() - event.detected_at).total_seconds() / 60
+        detected = event.detected_at if event.detected_at.tzinfo else event.detected_at.replace(tzinfo=timezone.utc)
+        age_minutes = (datetime.now(timezone.utc) - detected).total_seconds() / 60
         if age_minutes > 30:
             logger.info(
                 "[IncidentLoop] Dropping stale event %s (%.0fm old) — outside 30-minute window",
@@ -383,7 +390,7 @@ class IncidentLoop:
         incident.triage_reasoning = triage.reasoning
         incident.blast_radius = triage.blast_radius
         incident.occurrences_24h = triage.occurrences_24h
-        incident.triage_completed_at = datetime.utcnow()
+        incident.triage_completed_at = datetime.now(timezone.utc)
 
         if triage.decision == "duplicate":
             incident.status = IncidentStatus.DUPLICATE
@@ -430,7 +437,7 @@ class IncidentLoop:
         incident.diagnosis = diagnosis.root_cause
         incident.confidence = diagnosis.confidence
         incident.reproduction_confirmed = diagnosis.reproduction_confirmed
-        incident.diagnosis_completed_at = datetime.utcnow()
+        incident.diagnosis_completed_at = datetime.now(timezone.utc)
 
         if diagnosis.escalate:
             event = incident.error_event
@@ -498,7 +505,9 @@ class IncidentLoop:
             return
 
         if not fix.pr_url and not fix.pr_number:
-            logger.error("[IncidentLoop] %s — fix generation failed, leaving in FIXING", incident.id)
+            incident.fix_attempted = fix.fix_description[:200]
+            incident_store.update(incident)
+            logger.error("[IncidentLoop] %s — fix generation failed: %s", incident.id, fix.fix_description)
             return
 
         incident.pr_url = fix.pr_url
@@ -506,7 +515,7 @@ class IncidentLoop:
         incident.pr_branch = fix.branch
         incident.pr_files_changed = fix.files_changed
         incident.pr_test_added = fix.test_added
-        incident.pr_created_at = datetime.utcnow()
+        incident.pr_created_at = datetime.now(timezone.utc)
         incident.fix_attempted = fix.fix_description[:200]
         incident.fix_description = fix.fix_description
         incident.status = IncidentStatus.REVIEWING
@@ -603,7 +612,9 @@ class IncidentLoop:
             return
 
         if not fix.pr_url and not fix.pr_number:
-            logger.error("[IncidentLoop] %s — fix generation produced no PR after resume", incident_id)
+            incident.fix_attempted = fix.fix_description[:200]
+            incident_store.update(incident)
+            logger.error("[IncidentLoop] %s — fix generation produced no PR after resume: %s", incident_id, fix.fix_description)
             return
 
         incident.pr_url = fix.pr_url
@@ -611,7 +622,7 @@ class IncidentLoop:
         incident.pr_branch = fix.branch
         incident.pr_files_changed = fix.files_changed
         incident.pr_test_added = fix.test_added
-        incident.pr_created_at = datetime.utcnow()
+        incident.pr_created_at = datetime.now(timezone.utc)
         incident.fix_attempted = fix.fix_description[:200]
         incident.fix_description = fix.fix_description
         incident.status = IncidentStatus.REVIEWING
