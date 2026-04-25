@@ -13,16 +13,17 @@ const STEPS = [
 ];
 
 const STATUS_STEP: Record<string, number> = {
-  open:              -1,
-  triaging:           0,
-  diagnosing:         1,
-  fixing:             2,
-  reviewing:          3,
-  awaiting_approval:  4,
-  resolved:           5,
-  rejected:           5,
-  noise:              1,
-  duplicate:          1,
+  open:                    -1,
+  triaging:                 0,
+  diagnosing:               1,
+  fixing:                   2,
+  awaiting_fix_approval:    2,
+  reviewing:                3,
+  awaiting_approval:        4,
+  resolved:                 5,
+  rejected:                 5,
+  noise:                    1,
+  duplicate:                1,
 };
 
 type StepState = "done" | "active" | "pending" | "skipped";
@@ -201,11 +202,18 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
 
 function IncidentCard({ inc }: { inc: Incident }) {
   const [restarting, setRestarting] = useState(false);
-
+  const [showNotes, setShowNotes] = useState(false);
+  const [notes, setNotes] = useState("");
   async function handleRestart() {
     setRestarting(true);
+    setShowNotes(false);
     try {
-      await fetch(`/incidents/${inc.id}/restart`, { method: "POST" });
+      await fetch(`/incidents/${inc.id}/restart`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: notes.trim() || null }),
+      });
+      setNotes("");
     } finally {
       setRestarting(false);
     }
@@ -241,6 +249,31 @@ function IncidentCard({ inc }: { inc: Incident }) {
         </div>
       )}
 
+      {/* Human notes (existing) */}
+      {inc.human_notes && (
+        <div style={{ ...diagBox, borderColor: "#d97706", background: "rgba(217,119,6,0.06)" }}>
+          <span style={{ ...diagLabel, color: "#d97706" }}>Human feedback</span>
+          <span style={diagText}>{inc.human_notes}</span>
+        </div>
+      )}
+
+      {/* Restart notes input */}
+      {showNotes && (
+        <div style={{ marginTop: 8 }}>
+          <textarea
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            placeholder="Explain what was wrong with the previous fix and how it should be corrected..."
+            rows={3}
+            style={{
+              width: "100%", boxSizing: "border-box" as const, padding: "6px 8px",
+              fontSize: 12, borderRadius: 6, border: "1px solid #d1d5db",
+              resize: "vertical" as const, fontFamily: "inherit",
+            }}
+          />
+        </div>
+      )}
+
       {/* Bottom meta */}
       <div style={bottomRow}>
         {inc.pr_url && (
@@ -256,9 +289,20 @@ function IncidentCard({ inc }: { inc: Incident }) {
         {inc.mttr_seconds !== null && (
           <span style={metaPill}>MTTR {mttr(inc.mttr_seconds)}</span>
         )}
-        <button style={restartBtn(restarting)} onClick={handleRestart} disabled={restarting} title="Restart pipeline from the beginning">
-          {restarting ? "↺ Restarting..." : "↺ Restart"}
-        </button>
+        {showNotes ? (
+          <>
+            <button style={restartBtn(restarting)} onClick={handleRestart} disabled={restarting}>
+              {restarting ? "↺ Restarting..." : "↺ Confirm Restart"}
+            </button>
+            <button style={{ ...restartBtn(false), background: "#6b7280" }} onClick={() => setShowNotes(false)}>
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button style={restartBtn(restarting)} onClick={() => setShowNotes(true)} disabled={restarting} title="Restart pipeline with optional feedback">
+            ↺ Restart
+          </button>
+        )}
       </div>
     </div>
   );
@@ -561,3 +605,4 @@ const pipelineLabel: React.CSSProperties = {
 const pipelineTotal: React.CSSProperties = {
   fontSize: 10, color: "#2d3149", marginLeft: "auto",
 };
+

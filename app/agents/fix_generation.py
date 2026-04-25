@@ -31,6 +31,8 @@ from app.services.llm import LLMService
 
 logger = logging.getLogger(__name__)
 
+PR_BASE = "staging"  # all fix PRs target this branch; fix branches are created from its tip
+
 
 # ---------------------------------------------------------------------------
 # Result
@@ -71,6 +73,12 @@ class FixGenerationAgent(BaseAgent):
         super().__init__(llm=LLMService())
         self._github = github or GitHubService()
         self._owner, self._repo = settings.fix_target_repo.split("/", 1)
+        self._rag = None
+        try:
+            from app.services.rag import RAGService
+            self._rag = RAGService()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -80,6 +88,92 @@ class FixGenerationAgent(BaseAgent):
         """Generate a fix and open a GitHub PR."""
         result, _ = await self.fix_with_steps(incident)
         return result
+
+    async def commit_approved_fix(self, incident: IncidentState) -> tuple[FixResult, list[str]]:
+        """
+        Commit a previously generated and human-approved diff to GitHub and open a PR.
+        Called after the human approves the pending diff via POST /incidents/{id}/approve-fix.
+        """
+        steps: list[str] = []
+        event = incident.error_event
+        sev = str(event.severity).split(".")[-1] if event.severity else "P2"
+
+        def _fail(desc: str, issue_url: str | None = None, branch: str = "") -> tuple[FixResult, list[str]]:
+            return FixResult(issue_url=issue_url, pr_url=None, pr_number=None, branch=branch,
+                             fix_description=desc), steps
+
+        file_path = incident.pending_fix_file
+        old_function = incident.pending_fix_old
+        new_function = incident.pending_fix_new
+        branch_name = incident.pending_fix_branch
+        issue_url = incident.pending_fix_issue_url
+        issue_number = incident.pending_fix_issue_number
+        function_name = incident.pending_fix_function or "the function handling this error"
+
+        if not all([file_path, old_function, new_function, branch_name]):
+            return _fail("No pending fix found — generate a fix first")
+
+        try:
+            content, file_sha = await self._github.get_file_contents(
+                self._owner, self._repo, file_path, ref=PR_BASE
+            )
+        except GitHubError as exc:
+            return _fail(f"Could not fetch {file_path}: {exc}", issue_url, branch_name)
+
+        if old_function in content:
+            new_content = content.replace(old_function, new_function, 1)
+        elif old_function.strip() in content:
+            new_content = content.replace(old_function.strip(), new_function.strip(), 1)
+        else:
+            return _fail("old_function no longer found verbatim — file may have changed", issue_url, branch_name)
+
+        pr_body = (
+            f"## Summary\n"
+            f"- **Root cause:** {incident.diagnosis}\n"
+            f"- **Fix:** Updated `{function_name}` in `{file_path}`\n"
+            f"- **Human approved:** yes\n\n"
+            f"{f'Fixes #{issue_number}' if issue_number else ''}\n\n"
+            f"**Incident ID:** {incident.id}  \n"
+            f"**Agent confidence:** {incident.confidence:.0%}"
+        )
+
+        try:
+            base_sha = await self._github.get_branch_sha(self._owner, self._repo, PR_BASE)
+            await self._github.create_branch(self._owner, self._repo, branch_name, base_sha)
+            steps.append(f"✓ Created branch {branch_name}")
+
+            commit_sha = await self._github.update_file(
+                self._owner, self._repo, file_path, new_content,
+                f"fix: {function_name} in {file_path.split('/')[-1]}\n\n{f'Fixes #{issue_number}' if issue_number else ''}",
+                branch_name, file_sha,
+            )
+            steps.append(f"✓ Committed fix (sha={commit_sha[:8]})")
+
+            pr_number, pr_url = await self._github.create_pull_request(
+                self._owner, self._repo,
+                title=f"fix({file_path.split('/')[-1]}): {event.title}",
+                body=pr_body,
+                head=branch_name,
+                base="staging",
+                labels=["bug", "ai-generated-fix", "awaiting-review"],
+            )
+            steps.append(f"✓ Created PR #{pr_number}: {pr_url}")
+            logger.info("[FixGen] Approved fix committed — PR #%d: %s", pr_number, pr_url)
+
+        except GitHubError as exc:
+            steps.append(f"✗ GitHub error: {exc}")
+            return _fail(str(exc), issue_url, branch_name)
+
+        return FixResult(
+            issue_url=issue_url,
+            pr_url=pr_url,
+            pr_number=pr_number,
+            branch=branch_name,
+            fix_description=f"Fix applied to {function_name} in {file_path}",
+            files_changed=[file_path],
+            test_added=False,
+            commit_sha=commit_sha,
+        ), steps
 
     async def fix_with_steps(self, incident: IncidentState) -> tuple[FixResult, list[str]]:
         """
@@ -115,28 +209,20 @@ class FixGenerationAgent(BaseAgent):
         )
         test_candidates, default_test_path = self._test_file_candidates(file_path)
 
-        # ── 2. Resolve default branch + fetch the file ─────────────────
-        try:
-            default_branch = await self._github.get_default_branch(self._owner, self._repo)
-            steps.append(f"✓ Default branch: {default_branch}")
-            logger.info("[FixGen] Default branch: %s", default_branch)
-        except GitHubError as exc:
-            default_branch = "main"
-            steps.append(f"⚠ Could not detect default branch ({exc}) — assuming '{default_branch}'")
-
+        # ── 2. Fetch the file from PR_BASE (staging) ───────────────────
         try:
             content, file_sha = await self._github.get_file_contents(
-                self._owner, self._repo, file_path, ref=default_branch
+                self._owner, self._repo, file_path, ref=PR_BASE
             )
-            steps.append(f"✓ Fetched {file_path} (sha={file_sha[:8]}, {len(content)} chars)")
-            logger.info("[FixGen] Fetched %s (%d chars)", file_path, len(content))
+            steps.append(f"✓ Fetched {file_path} from {PR_BASE} (sha={file_sha[:8]}, {len(content)} chars)")
+            logger.info("[FixGen] Fetched %s (%d chars) from %s", file_path, len(content), PR_BASE)
         except GitHubError as exc:
             # 404 — try to find the file elsewhere in the repo by basename
             if "404" in str(exc):
                 basename = file_path.rsplit("/", 1)[-1]
                 steps.append(f"⚠ {file_path} not found — searching repo for '{basename}'")
                 matches = await self._github.find_files_by_name(
-                    self._owner, self._repo, basename, ref=default_branch
+                    self._owner, self._repo, basename, ref=PR_BASE
                 )
                 if matches:
                     file_path = matches[0]
@@ -144,7 +230,7 @@ class FixGenerationAgent(BaseAgent):
                     logger.info("[FixGen] Resolved path via tree search: %s", file_path)
                     try:
                         content, file_sha = await self._github.get_file_contents(
-                            self._owner, self._repo, file_path, ref=default_branch
+                            self._owner, self._repo, file_path, ref=PR_BASE
                         )
                         steps.append(f"✓ Fetched {file_path} ({len(content)} chars)")
                         test_candidates, default_test_path = self._test_file_candidates(file_path)
@@ -161,7 +247,7 @@ class FixGenerationAgent(BaseAgent):
 
         # ── 3. Generate fix via LLM ────────────────────────────────────
         try:
-            old_function, new_function = await self._generate_fix(content, function_name, incident)
+            old_function, new_function = await self._generate_fix(content, function_name, incident, file_path)
         except Exception as exc:
             steps.append(f"✗ LLM fix generation failed: {exc}")
             logger.error("[FixGen] LLM error: %s", exc)
@@ -185,15 +271,16 @@ class FixGenerationAgent(BaseAgent):
             steps.append(f"✗ Blast radius violated: {br_result.reason}")
             logger.warning("[FixGen] Blast radius violation: %s", br_result.reason)
             return FixResult(
-                issue_url=None,
-                pr_url=None,
-                pr_number=None,
-                branch=branch_name,
+                issue_url=None, pr_url=None, pr_number=None, branch=branch_name,
                 fix_description=f"BLAST_RADIUS_VIOLATION: {br_result.reason}",
-                blast_radius_violation=True,
-                blast_radius_violations=br_result.violations,
+                blast_radius_violation=True, blast_radius_violations=br_result.violations,
             ), steps
         steps.append(f"✓ Blast radius OK ({len(files_to_touch)} files, +{additions}/-{deletions} lines)")
+
+        # ── 3c. Self-critique — verify fix addresses root cause ────────
+        critique = await self._critique_fix(old_function, new_function, incident, file_path)
+        steps.append(f"✓ Self-critique: {critique[:120]}")
+        logger.info("[FixGen] Self-critique: %s", critique[:200])
 
         # ── 4. Create GitHub Issue ─────────────────────────────────────
         issue_url: str | None = None
@@ -222,60 +309,50 @@ class FixGenerationAgent(BaseAgent):
             steps.append(f"✗ create_issue failed (continuing without issue link): {exc}")
             logger.warning("[FixGen] Issue creation failed: %s", exc)
 
-        # ── 5. Apply fix, commit on branch, open PR ────────────────────
-        if old_function in content:
-            new_content = content.replace(old_function, new_function, 1)
-        elif old_function.strip() in content:
+        # ── 5. Commit fix and open PR ──────────────────────────────────
+        new_content = content.replace(old_function, new_function, 1)
+        if new_content == content:
             new_content = content.replace(old_function.strip(), new_function.strip(), 1)
-        else:
-            steps.append("✗ old_function not found verbatim in file — cannot apply patch")
-            logger.error("[FixGen] old_function not found in content")
-            return _fail("old_function not found in file — LLM may have altered it", issue_url, branch_name)
 
         pr_body = (
             f"## Summary\n"
             f"- **Root cause:** {incident.diagnosis}\n"
-            f"- **Fix:** Updated `{function_name}` in `{file_path}`\n\n"
+            f"- **Fix:** Updated `{function_name}` in `{file_path}`\n"
+            f"- **Self-critique:** {critique[:300]}\n\n"
             f"{f'Fixes #{issue_number}' if issue_number else ''}\n\n"
             f"**Incident ID:** {incident.id}  \n"
             f"**Agent confidence:** {incident.confidence:.0%}"
         )
 
-        try:
-            base_sha = await self._github.get_branch_sha(
-                self._owner, self._repo, default_branch
-            )
-            await self._github.create_branch(self._owner, self._repo, branch_name, base_sha)
-            steps.append(f"✓ Created branch {branch_name} from {default_branch}")
+        pr_number: int | None = None
+        pr_url: str | None = None
+        commit_sha: str | None = None
 
-            issue_ref = f"Fixes #{issue_number}" if issue_number else ""
+        try:
+            base_sha = await self._github.get_branch_sha(self._owner, self._repo, PR_BASE)
+            await self._github.create_branch(self._owner, self._repo, branch_name, base_sha)
+            steps.append(f"✓ Created branch {branch_name}")
+
             commit_sha = await self._github.update_file(
                 self._owner, self._repo, file_path, new_content,
-                f"fix: {function_name} in {file_path.split('/')[-1]}\n\n{issue_ref}",
+                f"fix: {function_name} in {file_path.split('/')[-1]}\n\n{f'Fixes #{issue_number}' if issue_number else ''}",
                 branch_name, file_sha,
             )
             steps.append(f"✓ Committed fix (sha={commit_sha[:8]})")
-            logger.info("[FixGen] Committed fix on branch %s", branch_name)
-
-            # ── 5b. Add test file ──────────────────────────────────────
-            test_added = await self._commit_test(
-                branch_name, new_function, incident, test_candidates, default_test_path, steps
-            )
 
             pr_number, pr_url = await self._github.create_pull_request(
                 self._owner, self._repo,
                 title=f"fix({file_path.split('/')[-1]}): {event.title}",
                 body=pr_body,
                 head=branch_name,
-                base=default_branch,
+                base=PR_BASE,
                 labels=["bug", "ai-generated-fix", "awaiting-review"],
             )
             steps.append(f"✓ Created PR #{pr_number}: {pr_url}")
-            logger.info("[FixGen] Created PR #%d: %s", pr_number, pr_url)
+            logger.info("[FixGen] PR #%d created: %s", pr_number, pr_url)
 
         except GitHubError as exc:
-            steps.append(f"✗ GitHub error during PR creation: {exc}")
-            logger.error("[FixGen] GitHub error: %s", exc)
+            steps.append(f"✗ GitHub error: {exc}")
             return _fail(str(exc), issue_url, branch_name)
 
         return FixResult(
@@ -284,8 +361,8 @@ class FixGenerationAgent(BaseAgent):
             pr_number=pr_number,
             branch=branch_name,
             fix_description=f"Fix applied to {function_name} in {file_path}",
-            files_changed=[file_path, default_test_path] if test_added else [file_path],
-            test_added=test_added,
+            files_changed=[file_path],
+            test_added=False,
             commit_sha=commit_sha,
         ), steps
 
@@ -389,119 +466,22 @@ class FixGenerationAgent(BaseAgent):
         """
         event = incident.error_event
 
-        default_branch = "main"
-        try:
-            default_branch = await self._github.get_default_branch(self._owner, self._repo)
-        except Exception:
-            pass
-
         # ── 1. Stack trace (fastest, most accurate) ────────────────────
         st_path, st_fn = self._parse_stack_trace(incident)
         if st_path:
-            # Validate the path actually exists in the repo
+            # Validate the path actually exists in the repo (check against PR_BASE)
             try:
-                await self._github.get_file_contents(self._owner, self._repo, st_path, ref=default_branch)
+                await self._github.get_file_contents(self._owner, self._repo, st_path, ref=PR_BASE)
                 logger.info("[FixGen] Stack trace resolved: %s → %s", st_path, st_fn)
                 # If no function name from stack trace, still pass it to let LLM figure out fn
                 return st_path, st_fn or "the function handling this error"
             except Exception:
                 logger.info("[FixGen] Stack trace path '%s' not found in repo — falling back to search", st_path)
 
-        # ── 2. GitHub Code Search — search file contents for the error type ──
-        error_query = (incident.error_event.error_type or "").replace("_", " ")
-        if error_query:
-            code_results = await self._github.search_code(self._owner, self._repo, error_query)
-            if code_results:
-                top = code_results[0]
-                logger.info("[FixGen] Code search resolved: %s (fragment: %s…)", top["path"], top["fragment"][:60])
-                # Ask LLM for function name only — file path is confirmed real
-                fn = await self._resolve_function_name(top["path"], top["fragment"], incident)
-                return top["path"], fn
-
-        # ── 3. Keyword search + full server file list ──────────────────
-        keywords = self._extract_keywords(incident)
-        logger.info("[FixGen] Searching repo with keywords: %s", keywords)
-
-        _SKIP = ("node_modules", "package-lock", ".min.", "dist/", "build/", ".test.", ".spec.",
-                 ".ttf", ".woff", ".png", ".jpg", ".svg", ".ico", "README", ".npmrc", ".env")
-        _SOURCE_EXTS = (".js", ".ts", ".jsx", ".tsx", ".py", ".rb", ".go", ".java", ".cs")
-        _CLIENT_DIRS = ("client/", "frontend/", "public/", "static/", "assets/")
-
-        def _is_source(path: str) -> bool:
-            return (
-                not any(x in path for x in _SKIP)
-                and any(path.endswith(e) for e in _SOURCE_EXTS)
-            )
-
-        def _is_server(path: str) -> bool:
-            return _is_source(path) and not any(path.startswith(d) for d in _CLIENT_DIRS)
-
-        # Always start with the full list of server-side source files
-        all_files = await self._github.search_files_by_keyword(
-            self._owner, self._repo, "", ref=default_branch
-        )
-        all_server = [f for f in all_files if _is_server(f)]
-
-        # Promote keyword matches to the top so the LLM sees the most relevant files first
-        keyword_matches: list[str] = []
-        for kw in keywords:
-            for f in all_server:
-                if kw in f.lower() and f not in keyword_matches:
-                    keyword_matches.append(f)
-
-        # keyword matches first, then remaining server files
-        candidates = keyword_matches + [f for f in all_server if f not in keyword_matches]
-        candidates = candidates[:50]
-
-        logger.info("[FixGen] %d server source file(s) for LLM (%d keyword matches): %s",
-                    len(candidates), len(keyword_matches), keyword_matches[:5] or candidates[:5])
-
-        candidate_section = ""
-        if candidates:
-            listed = "\n".join(f"  {p}" for p in candidates)
-            candidate_section = (
-                f"\nAll server-side source files in the repo (files listed first are keyword matches "
-                f"— you MUST choose file_path from this list):\n{listed}"
-            )
-
-        prompt = (
-            f"A production incident needs a code fix. Based on the details below, "
-            f"identify the exact file path and function name that needs to be changed.\n\n"
-            f"Title: {event.title}\n"
-            f"Error type: {event.error_type or 'unknown'}\n"
-            f"Description: {event.description or 'none'}\n"
-            f"Root cause: {incident.diagnosis or 'none'}\n"
-            f"{candidate_section}\n"
-            f'Return ONLY a JSON object: {{"file_path": "...", "function_name": "..."}}\n'
-            f"No explanation, no markdown."
-        )
-        try:
-            response = await self._llm.complete(
-                messages=[{"role": "user", "content": prompt}],
-                system="You are a software engineer. Return only valid JSON with file_path and function_name.",
-            )
-            response = re.sub(r"^```(?:json)?\n?", "", response.strip())
-            response = re.sub(r"\n?```$", "", response)
-            data = json.loads(response.strip())
-            file_path = data["file_path"]
-            function_name = data["function_name"]
-
-            # Reject hallucinated paths — LLM must pick from the real candidate list
-            if candidates and file_path not in candidates:
-                logger.warning(
-                    "[FixGen] LLM returned '%s' which is not in the candidate list — rejecting",
-                    file_path,
-                )
-                # Fall back to the top keyword match if available, otherwise fail cleanly
-                if keyword_matches:
-                    logger.info("[FixGen] Falling back to top keyword match: %s", keyword_matches[0])
-                    return keyword_matches[0], function_name
-                return None, None
-
-            return file_path, function_name
-        except Exception as exc:
-            logger.error("[FixGen] Failed to resolve target file/function: %s", exc)
-            return None, None
+        # No stack trace → skip fix generation entirely.
+        # Fallback file search produces too many false matches (wrong file, wrong fix).
+        logger.info("[FixGen] No stack trace file found — skipping fix generation")
+        return None, None
 
     def _test_file_candidates(self, file_path: str) -> tuple[list[str], str]:
         """Derive test file path candidates from the source file path."""
@@ -657,46 +637,88 @@ class FixGenerationAgent(BaseAgent):
 
         return ""
 
-    async def _generate_fix(self, content: str, function_name: str, incident: IncidentState) -> tuple[str, str]:
+    async def _generate_fix(
+        self, content: str, function_name: str, incident: IncidentState, file_path: str = ""
+    ) -> tuple[str, str]:
         """
         Ask the LLM to locate the function in the file and return (old_text, fixed_text).
 
-        Passes the full file content so the LLM can handle any function syntax —
-        arrow functions, object methods, class methods, exports, etc.
+        Passes the full file content + RAG context so the LLM can reason about callers
+        and dependencies, not just the crash site.
         Returns ("", "") if the function cannot be located.
         """
+        human_notes_section = ""
+        if incident.human_notes:
+            human_notes_section = (
+                f"\nHUMAN FEEDBACK (from previous fix attempt — you MUST follow this):\n"
+                f"{incident.human_notes}\n"
+            )
+
+        rag_section = ""
+        if self._rag is not None and file_path:
+            try:
+                if self._rag._collection.count() > 0:
+                    query = f"{file_path} {function_name} {incident.diagnosis or ''}"
+                    chunks = await self._rag.search(query, n_results=6)
+                    chunks = [c for c in chunks if c.file_path != file_path][:4]
+                    if chunks:
+                        lines = ["\nRELATED CODEBASE CONTEXT (callers, dependencies, related modules):"]
+                        for c in chunks:
+                            lines.append(f"\n--- {c.file_path} (lines {c.start_line}–{c.end_line}) ---")
+                            lines.append(c.content[:500])
+                        rag_section = "\n".join(lines)
+            except Exception as exc:
+                logger.debug("[FixGen] RAG context skipped: %s", exc)
+
         prompt = (
-            f"You are fixing a production bug. The file below contains the function "
-            f"'{function_name}' (or the closest handler for this error).\n\n"
-            f"DIAGNOSIS: {incident.diagnosis}\n"
-            f"ERROR TYPE: {incident.error_event.error_type or 'unknown'}\n\n"
-            f"FILE CONTENT:\n{content}\n\n"
-            f"Instructions:\n"
-            f"1. Find the function or handler responsible for this error (named '{function_name}' or similar).\n"
-            f"2. Apply the minimal change needed to fix the root cause.\n"
-            f"3. Return a JSON object with exactly two keys:\n"
-            f'   - "old": the exact verbatim text of the function as it appears in the file\n'
-            f'   - "new": the complete fixed version\n'
-            f"The 'old' value must be copy-pasted exactly from the file — no changes to whitespace or quotes.\n"
-            f"Return ONLY the JSON object. No explanation, no markdown fences."
+            f"You are fixing a production bug. Study the root cause carefully before writing any code.\n\n"
+            f"ROOT CAUSE: {incident.diagnosis}\n"
+            f"ERROR TYPE: {incident.error_event.error_type or 'unknown'}\n"
+            f"ERROR DETAIL: {incident.error_event.description or ''}\n"
+            f"{human_notes_section}"
+            f"{rag_section}\n\n"
+            f"FILE TO FIX ({file_path}):\n{content}\n\n"
+            f"RULES — read these before writing the fix:\n"
+            f"1. Fix the ROOT CAUSE, not the symptom. Ask yourself: 'Am I eliminating the\n"
+            f"   reason this error occurs, or just catching/converting/hiding it?'\n"
+            f"   - BAD: wrapping JSON.parse in try/catch, adding input sanitization after the fact,\n"
+            f"     silencing exceptions, converting invalid values instead of rejecting them.\n"
+            f"   - GOOD: fixing the upstream source (e.g. API call config, schema validation,\n"
+            f"     correct algorithm, proper error propagation).\n"
+            f"2. If the related context above shows the real fix belongs in a different layer\n"
+            f"   (e.g. the API call should use structured output, or validation belongs at ingestion),\n"
+            f"   fix it at that layer within the target function — do not patch the crash site.\n"
+            f"3. The fix must handle ALL invalid inputs, not just the specific value that triggered this error.\n"
+            f"4. Do not add logging, comments, or unrelated cleanup.\n\n"
+            f"Find the function '{function_name}' (or the closest handler for this error) and fix it.\n"
+            f"Return your answer using EXACTLY these delimiters — do NOT use JSON or markdown:\n\n"
+            f"<OLD>\n"
+            f"exact verbatim text of the function as it appears in the file\n"
+            f"</OLD>\n"
+            f"<NEW>\n"
+            f"complete fixed version\n"
+            f"</NEW>\n\n"
+            f"The text inside <OLD> must be copy-pasted exactly — no changes to whitespace or quotes."
         )
 
         try:
             response = await self._llm.complete(
                 messages=[{"role": "user", "content": prompt}],
-                system="You are a software engineer. Return only valid JSON with 'old' and 'new' keys.",
+                system="You are a senior software engineer who always fixes root causes, never symptoms. Use only <OLD> and <NEW> delimiters as instructed.",
             )
-            response = re.sub(r"^```(?:json)?\n?", "", response.strip())
-            response = re.sub(r"\n?```$", "", response)
-            data = json.loads(response.strip())
-            old_function = data.get("old", "")
-            new_function = data.get("new", "")
+            old_match = re.search(r"<OLD>\s*(.*?)\s*</OLD>", response, re.DOTALL)
+            new_match = re.search(r"<NEW>\s*(.*?)\s*</NEW>", response, re.DOTALL)
+            old_function = old_match.group(1) if old_match else ""
+            new_function = new_match.group(1) if new_match else ""
         except Exception as exc:
             logger.error("[FixGen] LLM fix generation failed: %s", exc)
             return "", ""
 
         if not old_function:
-            logger.error("[FixGen] LLM returned empty 'old' function for %s", function_name)
+            logger.error(
+                "[FixGen] LLM returned empty 'old' function for %s — raw response (first 500 chars): %s",
+                function_name, response[:500] if "response" in dir() else "no response",
+            )
             return "", ""
 
         # Verify old_function actually appears in the file before returning
@@ -706,3 +728,51 @@ class FixGenerationAgent(BaseAgent):
 
         logger.info("[FixGen] Generated fix (old=%d chars, new=%d chars)", len(old_function), len(new_function))
         return old_function, new_function.strip()
+
+    async def _critique_fix(
+        self, old_code: str, new_code: str, incident: IncidentState, file_path: str = ""
+    ) -> str:
+        """
+        Self-critique pass (Haiku) with RAG context. Asks: does the fix address the
+        root cause or just suppress the symptom? Returns a short plain-text assessment.
+        """
+        rag_section = ""
+        if self._rag is not None and file_path:
+            try:
+                if self._rag._collection.count() > 0:
+                    # Search for callers and related code — crucial for catching symptom fixes
+                    query = f"{file_path} {incident.diagnosis or ''}"
+                    chunks = await self._rag.search(query, n_results=5)
+                    chunks = [c for c in chunks if c.file_path != file_path][:4]
+                    if chunks:
+                        lines = ["\nRELATED CODEBASE CONTEXT (callers, dependencies):"]
+                        for c in chunks:
+                            lines.append(f"\n--- {c.file_path} (lines {c.start_line}–{c.end_line}) ---")
+                            lines.append(c.content[:400])
+                        rag_section = "\n".join(lines)
+            except Exception as exc:
+                logger.debug("[FixGen] Critique RAG skipped: %s", exc)
+
+        prompt = (
+            f"A production fix was generated. Assess whether it correctly addresses the root cause.\n\n"
+            f"ROOT CAUSE: {incident.diagnosis}\n"
+            f"ERROR: {incident.error_event.description or incident.error_event.title}\n\n"
+            f"OLD CODE:\n{old_code[:800]}\n\n"
+            f"NEW CODE:\n{new_code[:800]}\n"
+            f"{rag_section}\n\n"
+            f"Answer in 2-3 sentences:\n"
+            f"1. Does the fix address the root cause, or does it just suppress/convert the error?\n"
+            f"   If related context above shows the real fix should be upstream (e.g. API call config,\n"
+            f"   input validation at source), flag it as a symptom fix.\n"
+            f"2. What edge cases or risks does the fix introduce?\n"
+            f"3. Verdict: LOOKS CORRECT / NEEDS REVIEW / LIKELY WRONG"
+        )
+        try:
+            return await self._llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                system="You are a skeptical senior engineer reviewing an AI-generated fix. Be concise and critical.",
+                model="claude-haiku-4-5-20251001",
+            )
+        except Exception as exc:
+            logger.warning("[FixGen] Critique failed: %s", exc)
+            return "Critique unavailable"

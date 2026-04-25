@@ -177,6 +177,7 @@ export type IncidentStatus =
   | "triaging"
   | "diagnosing"
   | "fixing"
+  | "awaiting_fix_approval"
   | "reviewing"
   | "awaiting_approval"
   | "resolved"
@@ -205,6 +206,11 @@ export interface Incident {
   pr_url: string | null;
   pr_number: number | null;
   human_decision: string | null;
+  human_notes: string | null;
+  pending_fix_file: string | null;
+  pending_fix_old: string | null;
+  pending_fix_new: string | null;
+  pending_fix_critique: string | null;
   outcome: string | null;
   detected_at: string;
   resolved_at: string | null;

@@ -18,13 +18,7 @@ tests/             # pytest test suite
 
 ## Running the Server
 
-Agent Vault must be running before starting the server — it proxies credentials for Anthropic, GitHub, OpenAI, Langfuse, Cloudflare, and DigitalOcean.
-
 ```bash
-# Start Agent Vault server (one-time, runs in background)
-agent-vault server -d
-
-# Start backend + frontend together
 npm run dev
 ```
 
