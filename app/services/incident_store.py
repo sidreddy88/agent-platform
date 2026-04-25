@@ -8,6 +8,7 @@ auto-migrated to the DB on first run and renamed to .incidents.json.migrated.
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -70,18 +71,23 @@ class IncidentStore:
         terminal = {IncidentStatus.RESOLVED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
         return [i for i in self.list_all() if i.status not in terminal]
 
+    @staticmethod
+    def _normalize_desc(description: str) -> str:
+        """Normalize variable tokens (numbers, hashes, IDs) so similar errors match."""
+        return re.sub(r'\b[a-f0-9]{8,}\b|\b\d+[a-zA-Z]*\b', 'X', description[:100]).strip()
+
     def get_open_pr_for_error(self, error_type: str, service: str, description: str = "") -> Optional[str]:
-        """Return PR URL if an open incident matches error_type + service + description prefix."""
+        """Return PR URL if an open incident matches error_type + service + normalized description."""
         closed = {IncidentStatus.RESOLVED, IncidentStatus.REJECTED,
                   IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
-        desc_key = description[:100].strip()
+        desc_key = self._normalize_desc(description)
         for incident in self._incidents.values():
             if incident.status in closed or not incident.pr_url:
                 continue
             if (
                 incident.error_event.error_type == error_type
                 and incident.error_event.service == service
-                and incident.error_event.description[:100].strip() == desc_key
+                and self._normalize_desc(incident.error_event.description or "") == desc_key
             ):
                 return incident.pr_url
         return None

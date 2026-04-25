@@ -182,13 +182,18 @@ async def clear_incidents() -> Dict[str, Any]:
     return {"deleted": count}
 
 
+class RestartBody(BaseModel):
+    notes: Optional[str] = None
+
+
 @router.post("/{incident_id}/restart")
-async def restart_incident(incident_id: str) -> Dict[str, Any]:
+async def restart_incident(incident_id: str, body: RestartBody = RestartBody()) -> Dict[str, Any]:
     """
     Restart the pipeline for a stuck or failed incident.
 
     Resets the incident status to OPEN, clears all pipeline fields,
     and re-queues the original error event so the full pipeline runs again.
+    Optional notes are stored on the incident and injected into the fix prompt.
     """
     incident = incident_store.get(incident_id)
     if not incident:
@@ -212,6 +217,7 @@ async def restart_incident(incident_id: str) -> Dict[str, Any]:
     incident.triage_completed_at = None
     incident.diagnosis_completed_at = None
     incident.pr_created_at = None
+    incident.human_notes = body.notes or None
     incident_store.update(incident)
 
     # Mark as restarted so the staleness gate doesn't drop it
@@ -219,6 +225,76 @@ async def restart_incident(incident_id: str) -> Dict[str, Any]:
     incident.error_event.detected_at = datetime.now(timezone.utc)
     await event_queue.enqueue(incident.error_event)
     return {"status": "restarted", "incident_id": incident_id}
+
+
+@router.post("/{incident_id}/approve-fix")
+async def approve_fix(incident_id: str) -> Dict[str, Any]:
+    """
+    Approve the pending diff for an incident in AWAITING_FIX_APPROVAL state.
+    Commits the fix to GitHub and opens a PR.
+    """
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if not incident.pending_fix_old:
+        raise HTTPException(status_code=400, detail="No pending fix to approve")
+
+    from app.agents.fix_generation import FixGenerationAgent
+    from app.models.events import IncidentStatus
+    agent = FixGenerationAgent()
+    fix, steps = await agent.commit_approved_fix(incident)
+
+    if not fix.pr_url:
+        raise HTTPException(status_code=500, detail=f"Commit failed: {fix.fix_description}")
+
+    incident.pr_url = fix.pr_url
+    incident.pr_number = fix.pr_number
+    incident.pr_branch = fix.branch
+    incident.pr_files_changed = fix.files_changed
+    incident.fix_description = fix.fix_description
+    incident.status = IncidentStatus.REVIEWING
+    # Clear pending diff
+    incident.pending_fix_old = None
+    incident.pending_fix_new = None
+    incident.pending_fix_file = None
+    incident.pending_fix_branch = None
+    incident.pending_fix_issue_url = None
+    incident.pending_fix_issue_number = None
+    incident.pending_fix_function = None
+    incident.pending_fix_critique = None
+    incident_store.update(incident)
+
+    # Kick off code review in background
+    from app.services.incident_loop import incident_loop
+    import asyncio
+    asyncio.ensure_future(incident_loop._run_post_fix(incident, fix))
+
+    return {"status": "approved", "pr_url": fix.pr_url, "pr_number": fix.pr_number}
+
+
+@router.post("/{incident_id}/reject-fix")
+async def reject_fix(incident_id: str, body: RestartBody = RestartBody()) -> Dict[str, Any]:
+    """
+    Reject the pending diff and optionally provide notes for a better fix.
+    Clears the pending diff — use the Restart endpoint to re-run with notes.
+    """
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    from app.models.events import IncidentStatus
+    incident.pending_fix_old = None
+    incident.pending_fix_new = None
+    incident.pending_fix_file = None
+    incident.pending_fix_branch = None
+    incident.pending_fix_issue_url = None
+    incident.pending_fix_issue_number = None
+    incident.pending_fix_function = None
+    incident.pending_fix_critique = None
+    incident.human_notes = body.notes or incident.human_notes
+    incident.status = IncidentStatus.FIXING
+    incident_store.update(incident)
+    return {"status": "rejected", "incident_id": incident_id}
 
 
 @router.get("/{incident_id}")
