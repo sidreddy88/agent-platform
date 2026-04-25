@@ -119,18 +119,29 @@ async def analyze_file(
         except Exception as exc:
             logger.debug("[CodeReview] RAG context skipped: %s", exc)
 
+    ai_fix_warning = ""
+    if "ai-generated-fix" in (diff_text.lower()) or "awaiting-review" in diff_text.lower():
+        ai_fix_warning = """
+⚠️  THIS IS AN AI-GENERATED FIX. Be especially skeptical.
+Key questions to answer:
+- Does the fix address the ROOT CAUSE or does it just suppress/convert the error?
+- Would a human engineer write it this way, or is it a workaround?
+- Does it handle ALL invalid inputs, not just the specific bad value that triggered the error?
+"""
+
     prompt = f"""You are a senior code reviewer. Analyze this file diff for issues.
 
-{diff_text}{rag_section}
+{diff_text}{rag_section}{ai_fix_warning}
 
 Check for:
-1. BUGS       — logic errors, off-by-one, null/undefined dereferences, wrong conditions,
+1. CORRECTNESS — does the fix address the actual root cause, or does it just suppress the symptom?
+                 (e.g. converting invalid input instead of rejecting it is a symptom fix)
+2. BUGS       — logic errors, off-by-one, null/undefined dereferences, wrong conditions,
                 unhandled exceptions, incorrect error propagation
-2. SECURITY   — SQL injection, XSS, command injection, hardcoded secrets or tokens,
+3. SECURITY   — SQL injection, XSS, command injection, hardcoded secrets or tokens,
                 insecure deserialization, path traversal, missing auth checks
-3. PERFORMANCE — N+1 queries, O(n²) loops, missing indexes hinted by the code,
+4. PERFORMANCE — N+1 queries, O(n²) loops, missing indexes hinted by the code,
                  unnecessary allocations, synchronous blocking in async context
-4. TESTING    — missing tests for new logic, untested edge cases, missing error path tests
 5. CROSS-FILE — if related codebase context is provided above: duplicate logic that already
                 exists elsewhere, callers that may break due to signature changes, patterns
                 that contradict how the rest of the codebase handles the same concern
