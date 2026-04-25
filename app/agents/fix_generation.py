@@ -245,9 +245,15 @@ class FixGenerationAgent(BaseAgent):
                 logger.error("[FixGen] Failed to fetch file: %s", exc)
                 return _fail(f"Could not fetch {file_path}: {exc}", branch=branch_name)
 
+        # ── 2b. Fetch call chain — imports + callers ───────────────────
+        call_chain = await self._fetch_call_chain(file_path, function_name, content)
+        if call_chain:
+            steps.append(f"✓ Call chain: {len(call_chain.splitlines())} lines of context fetched")
+            logger.info("[FixGen] Call chain context fetched for %s", file_path)
+
         # ── 3. Generate fix via LLM ────────────────────────────────────
         try:
-            old_function, new_function = await self._generate_fix(content, function_name, incident, file_path)
+            old_function, new_function = await self._generate_fix(content, function_name, incident, file_path, call_chain)
         except Exception as exc:
             steps.append(f"✗ LLM fix generation failed: {exc}")
             logger.error("[FixGen] LLM error: %s", exc)
@@ -637,8 +643,96 @@ class FixGenerationAgent(BaseAgent):
 
         return ""
 
+    async def _fetch_call_chain(self, file_path: str, function_name: str, content: str) -> str:
+        """
+        Fetch context from files that are imported by the target file and files that call
+        the target function. Returns a formatted string to inject before the fix prompt.
+
+        Two sources:
+        1. Local imports parsed from the file — what the broken function depends on
+        2. Callers found via GitHub code search — what passes data into the broken function
+        """
+        sections: list[str] = []
+
+        # ── 1. Parse local imports from the file ──────────────────────
+        import_paths = self._parse_local_imports(file_path, content)
+        fetched_imports = 0
+        for imp_path in import_paths[:4]:
+            try:
+                imp_content, _ = await self._github.get_file_contents(
+                    self._owner, self._repo, imp_path, ref=PR_BASE
+                )
+                # Cap each imported file to 1200 chars — enough for config/setup context
+                sections.append(f"--- IMPORT: {imp_path} ---\n{imp_content[:1200]}")
+                fetched_imports += 1
+                logger.debug("[FixGen] Call chain: fetched import %s", imp_path)
+            except Exception:
+                pass
+
+        # ── 2. Find callers via code search ───────────────────────────
+        try:
+            caller_results = await self._github.search_code(
+                self._owner, self._repo, function_name
+            )
+            _SKIP = (file_path, "node_modules", ".test.", ".spec.", "dist/", "build/")
+            for result in caller_results[:3]:
+                path = result.get("path", "")
+                if any(s in path for s in _SKIP):
+                    continue
+                try:
+                    caller_content, _ = await self._github.get_file_contents(
+                        self._owner, self._repo, path, ref=PR_BASE
+                    )
+                    sections.append(f"--- CALLER: {path} ---\n{caller_content[:1200]}")
+                    logger.debug("[FixGen] Call chain: fetched caller %s", path)
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("[FixGen] Call chain search failed: %s", exc)
+
+        return "\n\n".join(sections)
+
+    def _parse_local_imports(self, file_path: str, content: str) -> list[str]:
+        """
+        Parse local (relative) import paths from JS/TS/Python file content and resolve
+        them to repo-relative paths.
+        """
+        file_dir = file_path.rsplit("/", 1)[0] if "/" in file_path else ""
+        ext = "." + file_path.rsplit(".", 1)[-1] if "." in file_path else ".js"
+        raw_paths: list[str] = []
+
+        # JS/TS: import X from './y'  |  const X = require('./y')
+        for m in re.finditer(r"""(?:import\s+.*?\s+from\s+|require\s*\(\s*)['"]([^'"]+)['"]""", content):
+            raw_paths.append(m.group(1))
+
+        # Python: from .module import X  |  from ../module import X
+        for m in re.finditer(r"""from\s+['"]?(\.[^'";\s]+)['"]?\s+import""", content):
+            raw_paths.append(m.group(1))
+
+        resolved: list[str] = []
+        for raw in raw_paths:
+            if not raw.startswith("."):
+                continue  # skip node_modules / stdlib
+            # Resolve relative to file_dir
+            parts = (file_dir + "/" + raw).split("/")
+            norm: list[str] = []
+            for p in parts:
+                if p == "..":
+                    if norm:
+                        norm.pop()
+                elif p and p != ".":
+                    norm.append(p)
+            resolved_path = "/".join(norm)
+            # Add extension if missing
+            if "." not in resolved_path.rsplit("/", 1)[-1]:
+                resolved_path += ext
+            resolved.append(resolved_path)
+
+        return resolved
+
     async def _generate_fix(
-        self, content: str, function_name: str, incident: IncidentState, file_path: str = ""
+        self, content: str, function_name: str, incident: IncidentState,
+        file_path: str = "", call_chain: str = ""
     ) -> tuple[str, str]:
         """
         Ask the LLM to locate the function in the file and return (old_text, fixed_text).
@@ -670,12 +764,15 @@ class FixGenerationAgent(BaseAgent):
             except Exception as exc:
                 logger.debug("[FixGen] RAG context skipped: %s", exc)
 
+        call_chain_section = f"\nCALL CHAIN CONTEXT (files that import or call this function — read before writing the fix):\n{call_chain}\n" if call_chain else ""
+
         prompt = (
             f"You are fixing a production bug. Study the root cause carefully before writing any code.\n\n"
             f"ROOT CAUSE: {incident.diagnosis}\n"
             f"ERROR TYPE: {incident.error_event.error_type or 'unknown'}\n"
             f"ERROR DETAIL: {incident.error_event.description or ''}\n"
             f"{human_notes_section}"
+            f"{call_chain_section}"
             f"{rag_section}\n\n"
             f"FILE TO FIX ({file_path}):\n{content}\n\n"
             f"RULES — read these before writing the fix:\n"
