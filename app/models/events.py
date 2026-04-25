@@ -40,6 +40,7 @@ class IncidentStatus(str, Enum):
     TRIAGING = "triaging"
     DIAGNOSING = "diagnosing"
     FIXING = "fixing"
+    AWAITING_FIX_APPROVAL = "awaiting_fix_approval"  # diff generated, waiting for human to approve before commit
     REVIEWING = "reviewing"
     AWAITING_APPROVAL = "awaiting_approval"
     RESOLVED = "resolved"
@@ -67,6 +68,14 @@ class IncidentState(BaseModel):
     # Fix
     fix_attempted: Optional[str] = None
     fix_description: Optional[str] = None   # full FixResult.fix_description (for RLHF logging)
+    pending_fix_file: Optional[str] = None   # file path of pending diff awaiting approval
+    pending_fix_old: Optional[str] = None    # verbatim old code awaiting approval
+    pending_fix_new: Optional[str] = None    # proposed new code awaiting approval
+    pending_fix_branch: Optional[str] = None  # branch + issue already created for pending fix
+    pending_fix_issue_url: Optional[str] = None
+    pending_fix_issue_number: Optional[int] = None
+    pending_fix_function: Optional[str] = None
+    pending_fix_critique: Optional[str] = None  # self-critique result
     pr_url: Optional[str] = None
     pr_number: Optional[int] = None
     pr_branch: Optional[str] = None
@@ -78,6 +87,7 @@ class IncidentState(BaseModel):
     # Human decision
     human_decision: Optional[str] = None  # "approved" | "rejected"
     human_decision_reason: Optional[str] = None
+    human_notes: Optional[str] = None  # human feedback injected into fix prompt on restart
     outcome: Optional[str] = None
 
     # Tracing

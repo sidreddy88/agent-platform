@@ -504,6 +504,14 @@ class IncidentLoop:
             )
             return
 
+        # Pending approval gate — diff generated, waiting for human to approve before commit
+        if incident.pending_fix_old and not fix.pr_url:
+            incident.fix_attempted = fix.fix_description[:200]
+            incident.status = IncidentStatus.AWAITING_FIX_APPROVAL
+            incident_store.update(incident)
+            logger.info("[IncidentLoop] %s — diff ready, awaiting human approval", incident.id)
+            return
+
         if not fix.pr_url and not fix.pr_number:
             incident.fix_attempted = fix.fix_description[:200]
             incident_store.update(incident)
@@ -515,13 +523,11 @@ class IncidentLoop:
         incident.pr_branch = fix.branch
         incident.pr_files_changed = fix.files_changed
         incident.pr_test_added = fix.test_added
-        incident.pr_created_at = datetime.now(timezone.utc)
         incident.fix_attempted = fix.fix_description[:200]
         incident.fix_description = fix.fix_description
         incident.status = IncidentStatus.REVIEWING
         incident_store.update(incident)
 
-        # Store PR for idempotency keyed on error_type + service + description prefix
         if fix.pr_url and incident.error_event.error_type:
             key = (
                 f"{incident.error_event.error_type}"
@@ -530,21 +536,19 @@ class IncidentLoop:
             )
             incident_store.set_pr_for_resource(key, fix.pr_url)
 
-        logger.info(
-            "[IncidentLoop] %s — PR created: %s — running CodeReviewAgent",
-            incident.id, fix.pr_url,
-        )
+        logger.info("[IncidentLoop] %s — PR created: %s — running CodeReviewAgent", incident.id, fix.pr_url)
+        await self._run_post_fix(incident, fix)
 
-        # ── Code Review ───────────────────────────────────────────────
+    async def _run_post_fix(self, incident: IncidentState, fix) -> None:
+        """Run code review + approval gate after a fix PR has been created (shared by pipeline and approve-fix endpoint)."""
+        incident.pr_created_at = datetime.now(timezone.utc)
+        incident_store.update(incident)
+
         review_text = await self._run_review(incident, fix)
         if review_text:
             incident.review_posted = True
             incident_store.update(incident)
-            logger.info("[IncidentLoop] %s — code review posted to GitHub PR", incident.id)
-        else:
-            logger.warning("[IncidentLoop] %s — code review skipped or failed", incident.id)
 
-        # ── Human Approval Gate ───────────────────────────────────────
         event = incident.error_event
         sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
         approval_req = await approval_service.request_approval(
@@ -564,16 +568,10 @@ class IncidentLoop:
                 f"PR: {fix.pr_url}"
             ),
         )
-
         incident.approval_id = approval_req.id
         incident.status = IncidentStatus.AWAITING_APPROVAL
         incident_store.update(incident)
-
         await _notify_fix_ready(incident, fix, approval_req.id)
-        logger.info(
-            "[IncidentLoop] %s — approval %s sent to Slack",
-            incident.id, approval_req.id,
-        )
 
     async def resume_fix(self, incident_id: str) -> None:
         """Resume the pipeline from fix generation after a human approves a low-confidence escalation."""
@@ -609,6 +607,13 @@ class IncidentLoop:
                 "[IncidentLoop] %s — blast radius violation after resume: %s",
                 incident_id, fix.fix_description,
             )
+            return
+
+        if incident.pending_fix_old and not fix.pr_url:
+            incident.fix_attempted = fix.fix_description[:200]
+            incident.status = IncidentStatus.AWAITING_FIX_APPROVAL
+            incident_store.update(incident)
+            logger.info("[IncidentLoop] %s — diff ready after resume, awaiting human approval", incident_id)
             return
 
         if not fix.pr_url and not fix.pr_number:
