@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import health, approvals
 from app.api.routes import dashboard, incidents, webhooks, logs
+from app.api.routes import events as events_routes
 from app.api.routes import metrics as metrics_routes
 from app.api.routes import orchestrator as orchestrator_routes
 from app.api.routes import circuit_breaker as circuit_breaker_routes
@@ -41,6 +42,7 @@ app.include_router(ws_dashboard_router)
 app.include_router(approvals.router)
 app.include_router(dashboard.router)
 app.include_router(incidents.router)
+app.include_router(events_routes.router)
 app.include_router(webhooks.router)
 app.include_router(logs.router)
 app.include_router(orchestrator_routes.router)
