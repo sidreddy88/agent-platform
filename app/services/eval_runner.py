@@ -264,7 +264,8 @@ class EvalRunner:
 
         Defaults to Haiku (A) vs Sonnet (B).
         """
-        from app.services.llm import HAIKU_MODEL, MODEL as SONNET_MODEL  # noqa: PLC0415
+        from app.services.llm import HAIKU_MODEL  # noqa: PLC0415
+        from app.services.llm import MODEL as SONNET_MODEL
         model_a = model_a or HAIKU_MODEL
         model_b = model_b or SONNET_MODEL
 

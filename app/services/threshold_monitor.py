@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.core.config import settings
 from app.services.alerting import Alert, Severity, alerting_service

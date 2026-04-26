@@ -10,10 +10,10 @@ from app.core.config import settings
 from app.services.aws import AWSService
 from app.services.cloudflare_service import cloudflare_service
 from app.services.digitalocean import do_service
-from app.services.mongodb_atlas import atlas_service
-from app.services.github_actions import github_actions_service
 from app.services.event_queue import event_queue
+from app.services.github_actions import github_actions_service
 from app.services.incident_store import incident_store
+from app.services.mongodb_atlas import atlas_service
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 

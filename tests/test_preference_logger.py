@@ -7,14 +7,11 @@ Run:
 from __future__ import annotations
 
 import json
-import tempfile
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 
 from app.services.preference_logger import PreferenceLogger, preference_logger
-
 
 # ---------------------------------------------------------------------------
 # Helpers — build minimal IncidentState
@@ -239,12 +236,11 @@ class TestApprovalsEndpointIntegration:
     @pytest.mark.asyncio
     async def test_reject_endpoint_logs_preference_pair(self, tmp_path):
         """POST /approvals/{id}/reject triggers preference_logger.log_rejection."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from fastapi.testclient import TestClient
 
         from app.api.routes.approvals import router
-        from app.models.events import IncidentStatus
         from app.services.approvals import ApprovalRequest, RiskLevel
 
         # Build a rejected approval request linked to an incident

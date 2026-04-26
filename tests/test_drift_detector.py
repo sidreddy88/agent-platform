@@ -6,21 +6,18 @@ Run:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.services.drift_detector import (
     DRIFT_THRESHOLD,
-    FLOOR_RATE,
-    MIN_CURRENT_SAMPLES,
     DayStats,
     DriftDetector,
     DriftResult,
     drift_detector,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers — build minimal IncidentState objects
@@ -310,7 +307,6 @@ class TestCheckAndAlert:
 
     @pytest.mark.asyncio
     async def test_cooldown_prevents_second_alert(self):
-        from datetime import timezone
 
         det = DriftDetector()
         drift = DriftResult(
@@ -340,6 +336,7 @@ class TestDriftRoutes:
     def test_get_drift_returns_expected_keys(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
+
         from app.api.routes.drift import router
 
         app = FastAPI()
@@ -368,6 +365,7 @@ class TestDriftRoutes:
     def test_get_drift_stats_returns_list(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
+
         from app.api.routes.drift import router
 
         app = FastAPI()

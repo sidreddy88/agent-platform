@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from app.core.config import settings
-from app.services.circuit_breaker import CircuitOpenError, circuit_breaker_registry
+from app.services.circuit_breaker import circuit_breaker_registry
 
 if TYPE_CHECKING:
     from app.services.tracing import TracingContext

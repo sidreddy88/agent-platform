@@ -8,12 +8,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from pathlib import Path
-
-import pytest
 
 from app.services.golden_dataset_builder import GoldenDatasetBuilder, golden_dataset_builder
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,7 +28,7 @@ def _make_incident(
     pr_url: str | None = None,
     pr_number: int | None = None,
 ):
-    from app.models.events import ErrorEvent, EventSource, IncidentState, IncidentStatus, Severity
+    from app.models.events import ErrorEvent, EventSource, IncidentState, Severity
     event = ErrorEvent(
         source=EventSource.APPLICATION,
         error_type=error_type,
