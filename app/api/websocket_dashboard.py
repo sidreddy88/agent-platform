@@ -21,6 +21,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.services.agent_tracker import agent_tracker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
+from app.services.pending_events import pending_event_store
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -56,6 +57,9 @@ async def dashboard_ws(websocket: WebSocket) -> None:
             "metrics": incident_store.metrics(),
             "queue": event_queue.stats,
             "agents": agent_tracker.snapshot(),
+            "pending_events": [
+                pending_event_store.serialize(pe) for pe in pending_event_store.list_all()
+            ],
             "timestamp": datetime.utcnow().isoformat(),
         })
 

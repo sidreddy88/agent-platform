@@ -16,6 +16,7 @@ from app.models.events import ErrorEvent, EventSource
 from app.services.aws import AWSService
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
+from app.services.pending_events import pending_event_store
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
@@ -122,9 +123,10 @@ async def scan_last_24h() -> Dict[str, Any]:
                         "timestamp": log["timestamp"],
                     },
                 )
-                await event_queue.enqueue(event)
+                pe = pending_event_store.add(event)
+                await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
                 queued.append({"id": event.id, "title": event.title, "service": service})
-                await _scan_log(f"  → queued: [{error_type}] {msg[:80].strip()}", level="event")
+                await _scan_log(f"  → pending approval: [{error_type}] {msg[:80].strip()}", level="event")
 
                 if len(seen) >= 10:
                     await _scan_log(f"  Reached 10-event cap for {log_group}")
@@ -134,7 +136,7 @@ async def scan_last_24h() -> Dict[str, Any]:
             errors.append({"log_group": log_group, "error": str(exc)})
             await _scan_log(f"  Error scanning {log_group}: {exc}", level="error")
 
-    summary = f"Scan complete — {len(queued)} event(s) queued into pipeline"
+    summary = f"Scan complete — {len(queued)} event(s) awaiting approval"
     if not queued:
         summary = "Scan complete — no new errors detected"
     await _scan_log(summary, level="done")
@@ -295,6 +297,31 @@ async def reject_fix(incident_id: str, body: RestartBody = RestartBody()) -> Dic
     incident.status = IncidentStatus.FIXING
     incident_store.update(incident)
     return {"status": "rejected", "incident_id": incident_id}
+
+
+@router.post("/{incident_id}/archive")
+async def archive_incident(incident_id: str) -> Dict[str, Any]:
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    incident.archived = True
+    incident_store.update(incident)
+    return {"status": "archived", "incident_id": incident_id}
+
+
+class WrongFixBody(BaseModel):
+    notes: str
+
+
+@router.post("/{incident_id}/mark-wrong-fix")
+async def mark_wrong_fix(incident_id: str, body: WrongFixBody) -> Dict[str, Any]:
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    incident.wrong_fix = True
+    incident.wrong_fix_notes = body.notes
+    incident_store.update(incident)
+    return {"status": "marked", "incident_id": incident_id}
 
 
 @router.get("/{incident_id}")

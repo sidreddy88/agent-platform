@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useDashboard } from "./hooks/useDashboard";
 import { useDashboardWS } from "./hooks/useWebSocket";
 import { LogsPage } from "./components/LogsPage";
@@ -11,18 +11,48 @@ import { CloudfarePillar } from "./components/CloudfarePillar";
 import { MongoDBPillar } from "./components/MongoDBPillar";
 import { GitHubPillar } from "./components/GitHubPillar";
 import { IncidentsPage } from "./components/IncidentsPage";
+import { IncidentsTablePage } from "./components/IncidentsTablePage";
+import { EventApprovalPage } from "./components/EventApprovalPage";
 import { PRsPage } from "./components/PRsPage";
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "incidents" | "prs" | "logs";
+type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "logs";
+
+interface CBInfo { name: string; state: string; failure_count: number; total_rejected: number }
 
 export default function App() {
   const { data, loading, error, lastUpdated, refetch } = useDashboard();
-  const { incidents, metrics, agentSnapshot, connected, scanLog } = useDashboardWS();
+  const { incidents, metrics, agentSnapshot, connected, scanLog, pendingEvents } = useDashboardWS();
   const [tab, setTab] = useState<Tab>("dashboard");
+  const [breakers, setBreakers] = useState<CBInfo[]>([]);
+  const [resetting, setResetting] = useState<string | null>(null);
+
+  useEffect(() => {
+    function fetchBreakers() {
+      fetch("/api/circuit-breakers")
+        .then((r) => r.json())
+        .then((data: CBInfo[]) => setBreakers(data))
+        .catch(() => {});
+    }
+    fetchBreakers();
+    const id = setInterval(fetchBreakers, 10_000);
+    return () => clearInterval(id);
+  }, []);
+
+  async function resetBreaker(name: string) {
+    setResetting(name);
+    try {
+      await fetch(`/api/circuit-breakers/${name}/reset`, { method: "POST" });
+      setBreakers((prev) => prev.map((b) => b.name === name ? { ...b, state: "closed", failure_count: 0 } : b));
+    } finally {
+      setResetting(null);
+    }
+  }
+
+  const openBreakers = breakers.filter((b) => b.state === "open");
 
   return (
     <div style={layout}>
@@ -33,7 +63,11 @@ export default function App() {
           <span style={logoText}>Agent Platform</span>
           <div style={{ display: "flex", gap: 4, marginLeft: 16 }}>
             <button style={tabBtn(tab === "dashboard")}  onClick={() => setTab("dashboard")}>Dashboard</button>
+            <button style={tabBtn(tab === "events")}    onClick={() => setTab("events")}>
+              Events{pendingEvents.length > 0 && <span style={pendingDot}>{pendingEvents.length}</span>}
+            </button>
             <button style={tabBtn(tab === "incidents")} onClick={() => setTab("incidents")}>Incidents</button>
+            <button style={tabBtn(tab === "table")}     onClick={() => setTab("table")}>Table</button>
             <button style={tabBtn(tab === "prs")}       onClick={() => setTab("prs")}>Agent PRs</button>
             <button style={tabBtn(tab === "logs")}      onClick={() => setTab("logs")}>Logs</button>
           </div>
@@ -55,8 +89,33 @@ export default function App() {
         </div>
       </header>
 
+      {/* Circuit breaker alert banner */}
+      {openBreakers.length > 0 && (
+        <div style={cbBanner}>
+          <span style={cbBannerIcon}>⚡</span>
+          <span style={cbBannerText}>
+            Circuit breaker{openBreakers.length > 1 ? "s" : ""} OPEN:{" "}
+            {openBreakers.map((b) => b.name).join(", ")} — LLM calls are being rejected
+          </span>
+          <div style={{ display: "flex", gap: 6 }}>
+            {openBreakers.map((b) => (
+              <button
+                key={b.name}
+                style={cbResetBtn(resetting === b.name)}
+                onClick={() => resetBreaker(b.name)}
+                disabled={resetting === b.name}
+              >
+                {resetting === b.name ? "Resetting…" : `Reset ${b.name}`}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Main content */}
       {tab === "logs" && <LogsPage />}
+      {tab === "events" && <EventApprovalPage events={pendingEvents} />}
+      {tab === "table" && <IncidentsTablePage incidents={incidents} />}
       {tab === "incidents" && (
         <IncidentsPage
           incidents={incidents}
@@ -199,6 +258,13 @@ const tabBtn = (active: boolean): React.CSSProperties => ({
   cursor: "pointer",
 });
 
+const pendingDot: React.CSSProperties = {
+  display: "inline-flex", alignItems: "center", justifyContent: "center",
+  marginLeft: 6, minWidth: 16, height: 16, borderRadius: 8,
+  background: "#f59e0b", color: "#000",
+  fontSize: 10, fontWeight: 700, padding: "0 4px",
+};
+
 const refreshBtn: React.CSSProperties = {
   background: "#2d3149",
   border: "1px solid #3d4166",
@@ -332,3 +398,23 @@ const activeAgentMeta: React.CSSProperties = {
   fontSize: 11,
   color: "#4b5563",
 };
+
+const cbBanner: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+  background: "rgba(239,68,68,0.08)", borderBottom: "1px solid rgba(239,68,68,0.3)",
+  padding: "10px 24px",
+};
+
+const cbBannerIcon: React.CSSProperties = { fontSize: 14 };
+
+const cbBannerText: React.CSSProperties = {
+  fontSize: 13, color: "#fca5a5", fontWeight: 600, flex: 1,
+};
+
+const cbResetBtn = (busy: boolean): React.CSSProperties => ({
+  background: busy ? "transparent" : "rgba(239,68,68,0.12)",
+  border: "1px solid rgba(239,68,68,0.4)",
+  color: busy ? "#6b7280" : "#f87171",
+  borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 700,
+  cursor: busy ? "not-allowed" : "pointer",
+});

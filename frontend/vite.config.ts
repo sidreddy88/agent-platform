@@ -11,6 +11,7 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/api/, ""),
       },
       "/incidents": { target: "http://127.0.0.1:8000" },
+      "/events":    { target: "http://127.0.0.1:8000" },
       "/approvals":  { target: "http://127.0.0.1:8000" },
       "/agents":     { target: "http://127.0.0.1:8000" },
       "/monitors":   { target: "http://127.0.0.1:8000" },
