@@ -16,7 +16,6 @@ import pytest
 from app.models.events import ErrorEvent, EventSource
 from app.services.orchestrator import MasterOrchestrator
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

@@ -6,11 +6,10 @@ from datetime import datetime
 
 from fastapi import APIRouter
 
-from app.models.events import ErrorEvent, EventSource
+from app.models.events import ErrorEvent, EventSource, IncidentStatus
 from app.services.agent_tracker import agent_tracker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
-from app.models.events import IncidentStatus
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 

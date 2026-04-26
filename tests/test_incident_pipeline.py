@@ -19,9 +19,8 @@ import pytest
 from app.agents.diagnosis import DiagnosisResult
 from app.agents.fix_generation import FixResult
 from app.agents.triage import TriageResult
-from app.models.events import ErrorEvent, EventSource, IncidentStatus, Severity
+from app.models.events import ErrorEvent, EventSource, IncidentStatus
 from app.services.incident_store import IncidentStore
-
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -324,11 +323,8 @@ class TestApprovalResolution:
 
     @pytest.mark.asyncio
     async def test_approve_resolves_incident(self):
-        from httpx import AsyncClient
-        from fastapi.testclient import TestClient
-        from app.main import app
-        from app.services.approvals import ApprovalRequest, ApprovalStatus, RiskLevel, _store
         from app.models.events import IncidentStatus
+        from app.services.approvals import ApprovalRequest, ApprovalStatus, RiskLevel, _store
 
         # Seed an incident in AWAITING_APPROVAL
         store = IncidentStore.__new__(IncidentStore)
@@ -359,9 +355,8 @@ class TestApprovalResolution:
             approval.status = ApprovalStatus.APPROVED
             approval.decided_by = "siddharth"
 
-            from app.api.routes.approvals import approve
-            from app.api.routes.approvals import ApproveBody
-            result = await approve(approval.id, ApproveBody(approver="siddharth"))
+            from app.api.routes.approvals import ApproveBody, approve
+            await approve(approval.id, ApproveBody(approver="siddharth"))
 
         assert incident.status == IncidentStatus.RESOLVED
         assert incident.human_decision == "approved"
@@ -398,8 +393,8 @@ class TestApprovalResolution:
             approval.decided_by = "siddharth"
             approval.rejection_reason = "Fix too aggressive — try scoping to NoSuchKey only"
 
-            from app.api.routes.approvals import reject, RejectBody
-            result = await reject(
+            from app.api.routes.approvals import RejectBody, reject
+            await reject(
                 approval.id,
                 RejectBody(approver="siddharth", reason="Fix too aggressive — try scoping to NoSuchKey only"),
             )
@@ -434,7 +429,7 @@ class TestApprovalResolution:
             patch("app.api.routes.approvals.approval_service") as mock_svc,
         ):
             mock_svc.approve.return_value = approval
-            from app.api.routes.approvals import approve, ApproveBody
+            from app.api.routes.approvals import ApproveBody, approve
             result = await approve(approval.id, ApproveBody(approver="siddharth"))
 
         # No incident updated, no crash
@@ -448,7 +443,7 @@ class TestApprovalResolution:
 class TestTriggerEndpoint:
     @pytest.mark.asyncio
     async def test_trigger_enqueues_event(self):
-        from app.api.routes.incidents import trigger_incident, TriggerBody
+        from app.api.routes.incidents import TriggerBody, trigger_incident
 
         with patch("app.api.routes.incidents.event_queue") as mock_queue:
             mock_queue.enqueue = AsyncMock()
@@ -469,12 +464,12 @@ class TestTriggerEndpoint:
 
     @pytest.mark.asyncio
     async def test_trigger_with_log_group(self):
-        from app.api.routes.incidents import trigger_incident, TriggerBody
+        from app.api.routes.incidents import TriggerBody, trigger_incident
 
         with patch("app.api.routes.incidents.event_queue") as mock_queue:
             mock_queue.enqueue = AsyncMock()
             body = TriggerBody(log_group="/ecs/image-service")
-            result = await trigger_incident(body)
+            await trigger_incident(body)
 
         enqueued_event = mock_queue.enqueue.call_args[0][0]
         assert enqueued_event.metadata["log_group"] == "/ecs/image-service"

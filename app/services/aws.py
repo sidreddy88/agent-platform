@@ -16,16 +16,14 @@ Credentials are resolved in the standard boto3 order:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import boto3
-from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core.config import settings
-
 
 # ---------------------------------------------------------------------------
 # Data classes

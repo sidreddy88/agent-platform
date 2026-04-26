@@ -13,17 +13,17 @@ import logging
 import re
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 # Set this before awaiting any agent to link its runs to an incident in the tracker.
 # incident_loop.py sets it once per _process() task; all awaited agents inherit it.
 incident_id_ctx: ContextVar[str | None] = ContextVar("incident_id", default=None)
 
-from app.services.checkpoint import context_checkpointer
-from app.services.llm import LLMService
-from app.services.preferences import build_preferences_prompt
-from app.services.tracing import TracingContext, trace_agent, trace_tool_call
+from app.services.checkpoint import context_checkpointer  # noqa: E402
+from app.services.llm import LLMService  # noqa: E402
+from app.services.preferences import build_preferences_prompt  # noqa: E402
+from app.services.tracing import TracingContext, trace_agent, trace_tool_call  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

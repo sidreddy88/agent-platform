@@ -75,6 +75,7 @@ async def approve(request_id: str, body: ApproveBody):
         if incident:
             if req.action == "approve_diagnosis_escalation":
                 import asyncio
+
                 from app.services.incident_loop import incident_loop
                 asyncio.create_task(incident_loop.resume_fix(incident_id))
             else:
@@ -90,6 +91,7 @@ async def approve(request_id: str, body: ApproveBody):
                     pass
                 try:
                     import asyncio
+
                     from app.services.rag import RAGService
                     asyncio.ensure_future(RAGService().index_incident(incident))
                 except Exception:
@@ -129,6 +131,7 @@ async def reject(request_id: str, body: RejectBody):
                 )
             try:
                 import asyncio
+
                 from app.services.rag import RAGService
                 asyncio.ensure_future(RAGService().index_incident(incident))
             except Exception:

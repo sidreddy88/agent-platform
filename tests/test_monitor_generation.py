@@ -7,7 +7,6 @@ Run:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,7 +17,6 @@ from app.agents.monitor_generation import (
     MonitorGenerationResult,
     _parse_monitor_result,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

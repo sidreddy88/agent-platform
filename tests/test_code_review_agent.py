@@ -11,7 +11,7 @@ Run unit tests:
 """
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -22,7 +22,6 @@ from app.agents.code_review import (
     generate_review,
 )
 from app.services.github import FileDiff, GitHubError, GitHubService, PRDetails
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

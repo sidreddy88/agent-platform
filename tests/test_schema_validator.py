@@ -15,7 +15,6 @@ from app.services.schema_validator import (
     handoff_validator,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers — minimal stand-ins for the real dataclasses
 # ---------------------------------------------------------------------------

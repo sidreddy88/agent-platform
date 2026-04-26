@@ -4,8 +4,8 @@ Run: python test_requirements_agent.py
 """
 
 import asyncio
-from app.agents.requirements import RequirementsAgent
 
+from app.agents.requirements import RequirementsAgent
 
 REQUIREMENT = (
     "Add a feature that lets users export their dashboard data to CSV. "

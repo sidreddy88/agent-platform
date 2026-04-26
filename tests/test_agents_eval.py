@@ -24,10 +24,8 @@ from app.services.aws import (
     AWSService,
     CloudWatchMetric,
     ECSServiceStatus,
-    LogSummary,
 )
 from app.services.github import FileDiff, GitHubService, PRDetails
-
 
 # ============================================================================
 # Shared helpers
@@ -627,7 +625,12 @@ class TestIncidentAgentEval:
         the ApprovalService is invoked and the final answer references the pending request.
         """
         from app.agents.incident import IncidentResponseAgent
-        from app.services.approvals import ApprovalRequest, ApprovalService, ApprovalStatus, RiskLevel
+        from app.services.approvals import (
+            ApprovalRequest,
+            ApprovalService,
+            ApprovalStatus,
+            RiskLevel,
+        )
 
         # Approval service mock — returns a PENDING request for any HIGH action
         fake_req = ApprovalRequest(

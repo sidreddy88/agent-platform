@@ -4,8 +4,8 @@ Run from project root: python test_agent.py
 """
 
 import asyncio
-from app.agents.base import BaseAgent
 
+from app.agents.base import BaseAgent
 
 # ── Fake tools ────────────────────────────────────────────────────────────────
 

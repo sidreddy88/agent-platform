@@ -13,7 +13,6 @@ import pytest
 
 from app.services.latency import LatencyTracker, _percentile, _stats
 
-
 # ---------------------------------------------------------------------------
 # _percentile helper
 # ---------------------------------------------------------------------------

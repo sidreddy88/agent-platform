@@ -4,22 +4,20 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import health, approvals
-from app.api.routes import dashboard, incidents, webhooks, logs
-from app.api.routes import events as events_routes
-from app.api.routes import metrics as metrics_routes
-from app.api.routes import orchestrator as orchestrator_routes
+from app.api import websocket
+from app.api.routes import agents as agents_routes
+from app.api.routes import approvals, dashboard, health, incidents, logs, webhooks
 from app.api.routes import circuit_breaker as circuit_breaker_routes
-from app.api.routes import injection as injection_routes
+from app.api.routes import debug as debug_routes
 from app.api.routes import drift as drift_routes
 from app.api.routes import evals as evals_routes
+from app.api.routes import events as events_routes
+from app.api.routes import injection as injection_routes
+from app.api.routes import metrics as metrics_routes
 from app.api.routes import monitors as monitors_routes
-from app.api.routes import agents as agents_routes
-from app.api.routes import debug as debug_routes
-from app.api import websocket
+from app.api.routes import orchestrator as orchestrator_routes
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.database import init_db
-from app.services.detection import detection_service
 from app.services.drift_detector import drift_detector
 from app.services.orchestrator import orchestrator
 from app.services.threshold_monitor import threshold_monitor

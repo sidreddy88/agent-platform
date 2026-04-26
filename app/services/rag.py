@@ -14,8 +14,8 @@ Usage:
 import asyncio
 import hashlib
 import logging
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 import chromadb
 from openai import AsyncOpenAI
