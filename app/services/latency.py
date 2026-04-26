@@ -23,10 +23,8 @@ from __future__ import annotations
 import math
 import statistics
 from collections import defaultdict, deque
-from typing import Optional
 
 from app.services.incident_store import incident_store
-
 
 # ---------------------------------------------------------------------------
 # Helpers

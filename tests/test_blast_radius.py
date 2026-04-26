@@ -26,7 +26,6 @@ from app.services.blast_radius import (
     blast_radius_guard,
 )
 
-
 # ---------------------------------------------------------------------------
 # BlastRadiusResult
 # ---------------------------------------------------------------------------
@@ -295,7 +294,7 @@ class TestFixGenerationBlastRadius:
     async def test_protected_file_path_blocks_pr_creation(self):
         """If the target file is in a protected path, FixGen returns without creating a PR."""
         from app.agents.fix_generation import FixGenerationAgent
-        from app.models.events import ErrorEvent, EventSource, IncidentState, IncidentStatus
+        from app.models.events import ErrorEvent, EventSource, IncidentState
 
         event = ErrorEvent(
             source=EventSource.CLOUDWATCH,
@@ -422,7 +421,6 @@ class TestIncidentLoopBlastRadius:
         store._incidents = {}
         store._monitor_pr_map = {}
 
-        from app.agents.base import AgentResult
         from app.agents.diagnosis import DiagnosisResult
         from app.agents.triage import TriageResult
 

@@ -1,7 +1,7 @@
 """
 Logs API — fetch recent error logs from CloudWatch log groups.
 """
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from fastapi import APIRouter, Query
 

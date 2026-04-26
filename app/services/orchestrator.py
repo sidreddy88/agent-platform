@@ -34,15 +34,15 @@ import re
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 
 from app.agents.cicd import CICDAgent
 from app.agents.deployment import DeploymentAgent
 from app.agents.performance import PerformanceAgent
 from app.models.events import ErrorEvent, EventSource
+from app.services.alerting import Alert, alerting_service
+from app.services.alerting import Severity as AlertSeverity
 from app.services.event_queue import event_queue
 from app.services.incident_loop import IncidentLoop
-from app.services.alerting import Alert, Severity as AlertSeverity, alerting_service
 
 logger = logging.getLogger(__name__)
 

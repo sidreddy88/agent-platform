@@ -18,7 +18,7 @@ You can override it with env vars:
 """
 
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -530,7 +530,7 @@ class TestCICDAgent:
 
     @pytest.mark.asyncio
     async def test_run_id_in_input_included_in_prompt(self):
-        agent, llm_mock, _ = self._make_agent([f"Thought: Done.\nAnswer: done"])
+        agent, llm_mock, _ = self._make_agent(["Thought: Done.\nAnswer: done"])
         await agent.run('{"owner": "acme", "repo": "backend", "run_id": 12345}')
         prompt_sent = llm_mock.complete.call_args[1]["messages"][0]["content"]
         assert "12345" in prompt_sent

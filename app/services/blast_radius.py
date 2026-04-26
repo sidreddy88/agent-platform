@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from typing import Sequence
 
-
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
