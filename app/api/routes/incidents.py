@@ -3,6 +3,8 @@ Incident feed API — list, filter, and inspect incidents.
 
 POST /incidents/trigger  — inject a test ErrorEvent directly into the pipeline
 """
+import asyncio
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -12,11 +14,13 @@ from pydantic import BaseModel, Field
 
 from app.api.websocket_dashboard import broadcast
 from app.core.config import settings
-from app.models.events import ErrorEvent, EventSource
+from app.models.events import ErrorEvent, EventSource, IncidentStatus
 from app.services.aws import AWSService
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 from app.services.pending_events import pending_event_store
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 
@@ -62,8 +66,7 @@ def _scan_ts() -> str:
     return datetime.now(timezone.utc).strftime("%H:%M:%S")
 
 
-import logging as _logging
-_scan_logger = _logging.getLogger("scan")
+_scan_logger = logging.getLogger("scan")
 
 async def _scan_log(message: str, level: str = "info") -> None:
     _scan_logger.info("[scan] %s", message)
@@ -201,7 +204,6 @@ async def restart_incident(incident_id: str, body: RestartBody = RestartBody()) 
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
 
-    from app.models.events import IncidentStatus
     incident.status = IncidentStatus.OPEN
     incident.triage_decision = None
     incident.diagnosis = None
@@ -242,7 +244,8 @@ async def approve_fix(incident_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="No pending fix to approve")
 
     from app.agents.fix_generation import FixGenerationAgent
-    from app.models.events import IncidentStatus
+    from app.services.incident_loop import _apply_dod_gate, incident_loop
+
     agent = FixGenerationAgent()
     fix, steps = await agent.commit_approved_fix(incident)
 
@@ -254,8 +257,20 @@ async def approve_fix(incident_id: str) -> Dict[str, Any]:
     incident.pr_branch = fix.branch
     incident.pr_files_changed = fix.files_changed
     incident.fix_description = fix.fix_description
-    incident.status = IncidentStatus.REVIEWING
-    # Clear pending diff
+    incident.issue_url = fix.issue_url
+
+    # Register PR for dedup before DoD gate so monitor_pr_map check can see it
+    if fix.pr_url and incident.error_event.error_type:
+        key = (
+            f"{incident.error_event.error_type}"
+            f":{incident.error_event.service}"
+            f":{incident.error_event.description[:100]}"
+        )
+        incident_store.set_pr_for_resource(key, fix.pr_url)
+        if incident.monitor_id:
+            incident_store.set_pr_for_resource(incident.monitor_id, fix.pr_url)
+
+    # Clear pending diff before DoD gate
     incident.pending_fix_old = None
     incident.pending_fix_new = None
     incident.pending_fix_file = None
@@ -264,11 +279,17 @@ async def approve_fix(incident_id: str) -> Dict[str, Any]:
     incident.pending_fix_issue_number = None
     incident.pending_fix_function = None
     incident.pending_fix_critique = None
+
+    if not await _apply_dod_gate(incident):
+        return {
+            "status": "verification_failed",
+            "incident_id": incident_id,
+            "failed_checks": incident.dod_failed_checks,
+        }
+
+    incident.status = IncidentStatus.REVIEWING
     incident_store.update(incident)
 
-    # Kick off code review in background
-    from app.services.incident_loop import incident_loop
-    import asyncio
     asyncio.ensure_future(incident_loop._run_post_fix(incident, fix))
 
     return {"status": "approved", "pr_url": fix.pr_url, "pr_number": fix.pr_number}
@@ -284,7 +305,6 @@ async def reject_fix(incident_id: str, body: RestartBody = RestartBody()) -> Dic
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
 
-    from app.models.events import IncidentStatus
     incident.pending_fix_old = None
     incident.pending_fix_new = None
     incident.pending_fix_file = None

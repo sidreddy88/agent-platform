@@ -32,6 +32,9 @@ class IncidentStore:
 
     def create(self, error_event: ErrorEvent) -> IncidentState:
         incident = IncidentState(error_event=error_event, detected_at=datetime.utcnow())
+        # Carry the event's resource_id as monitor_id so the DoD gate can check
+        # monitor_pr_map coverage. None for manually-triggered incidents.
+        incident.monitor_id = error_event.resource_id
         self._incidents[incident.id] = incident
         self._upsert_incident(incident)
         self._broadcast(incident)
