@@ -25,7 +25,6 @@ from app.services.github import GitHubError, GitHubService
 from app.services.llm import LLMService
 from app.services.rag import RAGService
 
-
 # ---------------------------------------------------------------------------
 # Failure classification
 # ---------------------------------------------------------------------------

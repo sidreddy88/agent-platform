@@ -52,6 +52,7 @@ class IncidentStore:
     def _broadcast(self, incident: IncidentState) -> None:
         try:
             import asyncio
+
             from app.api.websocket_dashboard import broadcast
             payload = {
                 "type": "incident_update",

@@ -6,8 +6,9 @@ Run:
 """
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.services.circuit_breaker import (
     CircuitBreaker,
@@ -16,7 +17,6 @@ from app.services.circuit_breaker import (
     CircuitState,
     circuit_breaker_registry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -292,8 +292,9 @@ class TestCircuitBreakerRegistry:
 class TestLLMCircuitBreakerIntegration:
     @pytest.mark.asyncio
     async def test_llm_success_passes_through(self):
-        from app.services.llm import LLMService
         from unittest.mock import MagicMock
+
+        from app.services.llm import LLMService
 
         fake_response = MagicMock()
         fake_response.content = [MagicMock(text="hello")]
@@ -312,8 +313,9 @@ class TestLLMCircuitBreakerIntegration:
 
     @pytest.mark.asyncio
     async def test_llm_failure_tracked_by_breaker(self):
-        from app.services.llm import LLMService
         from unittest.mock import MagicMock
+
+        from app.services.llm import LLMService
 
         llm = LLMService.__new__(LLMService)
         llm._model = "test"
@@ -333,8 +335,9 @@ class TestLLMCircuitBreakerIntegration:
 
     @pytest.mark.asyncio
     async def test_open_breaker_raises_circuit_open_error(self):
-        from app.services.llm import LLMService
         from unittest.mock import MagicMock
+
+        from app.services.llm import LLMService
 
         llm = LLMService.__new__(LLMService)
         llm._model = "test"

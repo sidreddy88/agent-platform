@@ -11,7 +11,6 @@ Sends:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, Set

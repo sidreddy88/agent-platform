@@ -6,11 +6,11 @@ Run:
 """
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, patch
 
-from app.services.failure_injection import FailureInjector, FailureScenario, failure_injector
+import pytest
 
+from app.services.failure_injection import FailureInjector, FailureScenario, failure_injector
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -192,8 +192,9 @@ class TestStringInput:
 
 class TestInjectionRoutes:
     def test_list_scenarios_returns_all_three(self):
-        from fastapi.testclient import TestClient
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
         from app.api.routes.injection import router
 
         app = FastAPI()
@@ -208,8 +209,9 @@ class TestInjectionRoutes:
         assert "cascading_failure" in scenarios
 
     def test_trigger_false_positive(self):
-        from fastapi.testclient import TestClient
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
         from app.api.routes.injection import router
 
         app = FastAPI()
@@ -229,8 +231,9 @@ class TestInjectionRoutes:
         assert resp.json()["events_injected"] == 1
 
     def test_trigger_unknown_scenario_returns_422(self):
-        from fastapi.testclient import TestClient
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
         from app.api.routes.injection import router
 
         app = FastAPI()
@@ -247,8 +250,9 @@ class TestInjectionRoutes:
 
 class TestCircuitBreakerRoutes:
     def test_list_breakers_empty(self):
-        from fastapi.testclient import TestClient
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
         from app.api.routes.circuit_breaker import router
         from app.services.circuit_breaker import CircuitBreakerRegistry
 
@@ -263,8 +267,9 @@ class TestCircuitBreakerRoutes:
         assert isinstance(resp.json(), list)
 
     def test_reset_unknown_returns_404(self):
-        from fastapi.testclient import TestClient
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
         from app.api.routes.circuit_breaker import router
         from app.services.circuit_breaker import CircuitBreakerRegistry
 
@@ -278,8 +283,9 @@ class TestCircuitBreakerRoutes:
         assert resp.status_code == 404
 
     def test_reset_known_returns_200(self):
-        from fastapi.testclient import TestClient
         from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
         from app.api.routes.circuit_breaker import router
         from app.services.circuit_breaker import CircuitBreakerRegistry
 

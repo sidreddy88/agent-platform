@@ -5,7 +5,6 @@ Run:
     pytest tests/test_preferences.py -v
 """
 
-import pytest
 
 from app.services.preferences import (
     _DEFAULTS,
@@ -14,7 +13,6 @@ from app.services.preferences import (
     clear_cache,
     load_preferences,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -252,8 +250,9 @@ class TestPreferencesInBaseAgent:
         assert "## User Preferences" in prompt
 
     def test_system_prompt_with_tools_contains_preferences_and_react_format(self):
-        from app.agents.base import _build_system_prompt
         from unittest.mock import AsyncMock
+
+        from app.agents.base import _build_system_prompt
         tools = {"search": (AsyncMock(), "Search for something")}
         prompt = _build_system_prompt(tools)
         assert "## User Preferences" in prompt
@@ -261,8 +260,9 @@ class TestPreferencesInBaseAgent:
         assert "search" in prompt
 
     def test_preferences_come_before_tools(self):
-        from app.agents.base import _build_system_prompt
         from unittest.mock import AsyncMock
+
+        from app.agents.base import _build_system_prompt
         tools = {"mytool": (AsyncMock(), "Does something")}
         prompt = _build_system_prompt(tools)
         pref_idx = prompt.index("## User Preferences")

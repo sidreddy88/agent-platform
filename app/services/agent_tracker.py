@@ -11,8 +11,8 @@ import json
 import logging
 import uuid
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)

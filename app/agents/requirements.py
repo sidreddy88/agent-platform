@@ -7,9 +7,8 @@ Flow (driven by ReAct loop in BaseAgent):
   3. generate_spec        → assembles the final structured spec document
 """
 
-from app.agents.base import BaseAgent, AgentResult
+from app.agents.base import AgentResult, BaseAgent
 from app.services.llm import LLMService
-
 
 # ---------------------------------------------------------------------------
 # Tool implementations

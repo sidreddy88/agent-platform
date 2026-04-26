@@ -25,8 +25,7 @@ from __future__ import annotations
 import json
 import statistics
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import datetime, timedelta, timezone
 
 from app.agents.base import AgentResult, BaseAgent
 from app.services.aws import AWSError, AWSService

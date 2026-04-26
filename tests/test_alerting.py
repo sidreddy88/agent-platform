@@ -14,7 +14,6 @@ import pytest
 
 from app.services.alerting import Alert, AlertingService, Severity
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 Event queue — async queue for ErrorEvents flowing from detection layer to agents.
 """
 import asyncio
+
 from app.models.events import ErrorEvent
 
 

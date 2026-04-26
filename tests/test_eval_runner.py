@@ -17,14 +17,13 @@ from app.services.eval_runner import (
     ABResult,
     CaseResult,
     EvalCase,
-    EvalRunResult,
     EvalRunner,
+    EvalRunResult,
     _EvalAWSStub,
     _EvalStoreStub,
     _percentile,
     eval_runner,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -496,7 +495,8 @@ class TestRunAB:
 
     @pytest.mark.asyncio
     async def test_default_models(self):
-        from app.services.llm import HAIKU_MODEL, MODEL as SONNET_MODEL
+        from app.services.llm import HAIKU_MODEL
+        from app.services.llm import MODEL as SONNET_MODEL
         runner = EvalRunner()
         captured_models = []
 
@@ -536,6 +536,7 @@ class TestEvalsRoutes:
     def _client(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
+
         from app.api.routes.evals import router
 
         app = FastAPI()

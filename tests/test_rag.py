@@ -20,7 +20,6 @@ import pytest
 from app.services.rag import (
     CHUNK_LINES,
     OVERLAP_LINES,
-    CodeChunk,
     RAGService,
     _chunk_file,
 )
@@ -291,7 +290,7 @@ async def test_live_index_and_search():
         print(f"  [{r.score:.3f}] {r.file_path}:{r.start_line}-{r.end_line}")
         print(f"  {r.content[:120].strip()}\n")
 
-    print(f"\nIndexed files:")
+    print("\nIndexed files:")
     for fp in rag.indexed_files():
         print(f"  {fp}")
 
