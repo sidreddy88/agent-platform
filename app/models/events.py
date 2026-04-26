@@ -90,6 +90,11 @@ class IncidentState(BaseModel):
     human_notes: Optional[str] = None  # human feedback injected into fix prompt on restart
     outcome: Optional[str] = None
 
+    # Post-resolution metadata
+    archived: bool = False
+    wrong_fix: bool = False
+    wrong_fix_notes: Optional[str] = None
+
     # Tracing
     trace_id: Optional[str] = None
 
