@@ -6,8 +6,9 @@ Run:
 """
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.services.checkpoint import (
     CHECKPOINT_AT,
@@ -15,7 +16,6 @@ from app.services.checkpoint import (
     ContextCheckpointer,
     context_checkpointer,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -268,7 +268,7 @@ class TestBaseAgentCheckpointIntegration:
         When the LLM reports high input_tokens, compress() is called and the
         agent continues with a shorter messages list.
         """
-        from app.agents.base import AgentResult, BaseAgent, Step
+        from app.agents.base import BaseAgent
         from app.services.checkpoint import ContextCheckpointer
 
         call_count = 0
@@ -316,7 +316,7 @@ class TestBaseAgentCheckpointIntegration:
 
         with patch("app.agents.base.context_checkpointer", cp):
             # BaseAgent.run is decorated with @trace_agent; call underlying method directly
-            result = await BaseAgent.run.__wrapped__(agent, "test input")
+            await BaseAgent.run.__wrapped__(agent, "test input")
 
         assert compress_called, "compress() should have been called"
 

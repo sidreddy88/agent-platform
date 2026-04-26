@@ -16,7 +16,6 @@ Output (FixResult):
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -96,7 +95,6 @@ class FixGenerationAgent(BaseAgent):
         """
         steps: list[str] = []
         event = incident.error_event
-        sev = str(event.severity).split(".")[-1] if event.severity else "P2"
 
         def _fail(desc: str, issue_url: str | None = None, branch: str = "") -> tuple[FixResult, list[str]]:
             return FixResult(issue_url=issue_url, pr_url=None, pr_number=None, branch=branch,
@@ -470,8 +468,6 @@ class FixGenerationAgent(BaseAgent):
           2. GitHub Code Search — search file contents for the error type string
           3. Keyword search + full server file list → LLM picks from real candidates
         """
-        event = incident.error_event
-
         # ── 1. Stack trace (fastest, most accurate) ────────────────────
         st_path, st_fn = self._parse_stack_trace(incident)
         if st_path:
