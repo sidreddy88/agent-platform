@@ -212,6 +212,9 @@ export interface Incident {
   pending_fix_new: string | null;
   pending_fix_critique: string | null;
   outcome: string | null;
+  archived: boolean;
+  wrong_fix: boolean;
+  wrong_fix_notes: string | null;
   detected_at: string;
   resolved_at: string | null;
   mttr_seconds: number | null;
@@ -274,10 +277,23 @@ export interface ScanLogEntry {
   message: string;
 }
 
+export interface PendingEvent {
+  id: string;
+  first_line: string;
+  full_description: string;
+  service: string;
+  error_type: string;
+  log_group: string;
+  detected_at: string;
+}
+
 export type WSMessage =
-  | { type: "init"; incidents: Incident[]; metrics: IncidentMetrics; queue: QueueStats; agents?: AgentSnapshot; timestamp: string }
+  | { type: "init"; incidents: Incident[]; metrics: IncidentMetrics; queue: QueueStats; agents?: AgentSnapshot; pending_events?: PendingEvent[]; timestamp: string }
   | { type: "event"; event: ErrorEvent }
   | { type: "incident_update"; incident: Incident }
   | { type: "agent_status"; agents: AgentSnapshot }
   | { type: "scan_progress"; ts: string; level: ScanLogEntry["level"]; message: string }
+  | { type: "pending_event_added"; event: PendingEvent }
+  | { type: "pending_event_removed"; id: string }
+  | { type: "pending_events_cleared" }
   | { type: "pong" };

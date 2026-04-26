@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AgentSnapshot, Incident, IncidentMetrics, ScanLogEntry, WSMessage } from "../types";
+import type { AgentSnapshot, Incident, IncidentMetrics, PendingEvent, ScanLogEntry, WSMessage } from "../types";
 
 const PING_MS = 25_000;
 const RECONNECT_MS = 3_000;
@@ -10,6 +10,7 @@ export function useDashboardWS() {
   const [agentSnapshot, setAgentSnapshot] = useState<AgentSnapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [scanLog, setScanLog] = useState<ScanLogEntry[]>([]);
+  const [pendingEvents, setPendingEvents] = useState<PendingEvent[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -29,6 +30,7 @@ export function useDashboardWS() {
         setIncidents(msg.incidents);
         setMetrics(msg.metrics);
         if (msg.agents) setAgentSnapshot(msg.agents);
+        if (msg.pending_events) setPendingEvents(msg.pending_events);
       } else if (msg.type === "incident_update") {
         setIncidents((prev) => {
           const idx = prev.findIndex((i) => i.id === msg.incident.id);
@@ -44,12 +46,15 @@ export function useDashboardWS() {
       } else if (msg.type === "scan_progress") {
         setScanLog((prev) => {
           const entry: ScanLogEntry = { ts: msg.ts, level: msg.level, message: msg.message };
-          // Clear on "Scan started" so each scan gets a fresh log
           if (msg.message.startsWith("Scan started")) return [entry];
           return [...prev, entry];
         });
-      } else if (msg.type === "event") {
-        // New raw error event — will become an incident shortly
+      } else if (msg.type === "pending_event_added") {
+        setPendingEvents((prev) => [...prev, msg.event]);
+      } else if (msg.type === "pending_event_removed") {
+        setPendingEvents((prev) => prev.filter((e) => e.id !== msg.id));
+      } else if (msg.type === "pending_events_cleared") {
+        setPendingEvents([]);
       }
     };
 
@@ -70,5 +75,5 @@ export function useDashboardWS() {
     };
   }, [connect]);
 
-  return { incidents, metrics, agentSnapshot, connected, scanLog };
+  return { incidents, metrics, agentSnapshot, connected, scanLog, pendingEvents };
 }
