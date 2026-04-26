@@ -47,6 +47,7 @@ class IncidentStatus(str, Enum):
     REJECTED = "rejected"   # Human rejected the AI fix
     NOISE = "noise"         # Triage determined it's not real
     DUPLICATE = "duplicate"  # Existing PR already covers this
+    VERIFICATION_FAILED = "verification_failed"  # DoD gate blocked REVIEWING transition
 
 
 class IncidentState(BaseModel):
@@ -94,6 +95,11 @@ class IncidentState(BaseModel):
     archived: bool = False
     wrong_fix: bool = False
     wrong_fix_notes: Optional[str] = None
+
+    # Harness / pipeline metadata
+    monitor_id: Optional[str] = None        # resource_id of the monitor/alarm that triggered this incident; None for manually triggered
+    issue_url: Optional[str] = None         # GitHub issue URL created by FixGenerationAgent
+    dod_failed_checks: Optional[Dict[str, str]] = None  # {check_name: evidence} populated when VERIFICATION_FAILED
 
     # Tracing
     trace_id: Optional[str] = None

@@ -33,6 +33,7 @@ from app.services.alerting import Alert, alerting_service
 from app.services.alerting import Severity as AlertSeverity
 from app.services.approvals import RiskLevel, approval_service
 from app.services.circuit_breaker import CircuitOpenError, circuit_breaker_registry
+from app.services.dod_checker import dod_checker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 from app.services.schema_validator import HandoffValidationError, handoff_validator
@@ -165,6 +166,39 @@ async def _notify_diagnosis(incident: IncidentState, result: DiagnosisResult, ap
         source="DiagnosisAgent",
         metadata={"incident_id": incident.id, "confidence": result.confidence, "escalate": result.escalate},
     ))
+
+
+# ---------------------------------------------------------------------------
+# Definition of Done gate
+# ---------------------------------------------------------------------------
+
+async def _apply_dod_gate(incident: IncidentState) -> bool:
+    """
+    Run all DoD checks before advancing an incident to REVIEWING.
+
+    Returns True if all checks pass (caller should proceed to REVIEWING).
+    Returns False if any check failed; the incident is left in VERIFICATION_FAILED
+    and the caller should return without further processing.
+    """
+    results = await dod_checker.run_all(incident)
+    failed = {
+        name: evidence
+        for name, (passed, evidence) in results.items()
+        if not passed
+    }
+    if not failed:
+        return True
+
+    incident.status = IncidentStatus.VERIFICATION_FAILED
+    incident.dod_failed_checks = failed
+    incident_store.update(incident)
+
+    failed_names = ", ".join(failed.keys())
+    logger.warning(
+        "[IncidentLoop] %s — DoD gate FAILED (%s), blocking REVIEWING: %s",
+        incident.id, failed_names, failed,
+    )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -525,9 +559,9 @@ class IncidentLoop:
         incident.pr_test_added = fix.test_added
         incident.fix_attempted = fix.fix_description[:200]
         incident.fix_description = fix.fix_description
-        incident.status = IncidentStatus.REVIEWING
-        incident_store.update(incident)
+        incident.issue_url = fix.issue_url
 
+        # Register PR for dedup before DoD gate so monitor_pr_map check can see it
         if fix.pr_url and incident.error_event.error_type:
             key = (
                 f"{incident.error_event.error_type}"
@@ -535,6 +569,14 @@ class IncidentLoop:
                 f":{incident.error_event.description[:100]}"
             )
             incident_store.set_pr_for_resource(key, fix.pr_url)
+            if incident.monitor_id:
+                incident_store.set_pr_for_resource(incident.monitor_id, fix.pr_url)
+
+        if not await _apply_dod_gate(incident):
+            return
+
+        incident.status = IncidentStatus.REVIEWING
+        incident_store.update(incident)
 
         logger.info("[IncidentLoop] %s — PR created: %s — running CodeReviewAgent", incident.id, fix.pr_url)
         await self._run_post_fix(incident, fix)
@@ -630,11 +672,24 @@ class IncidentLoop:
         incident.pr_created_at = datetime.now(timezone.utc)
         incident.fix_attempted = fix.fix_description[:200]
         incident.fix_description = fix.fix_description
+        incident.issue_url = fix.issue_url
+
+        # Register PR for dedup before DoD gate so monitor_pr_map check can see it
+        if fix.pr_url and incident.error_event.error_type:
+            key = (
+                f"{incident.error_event.error_type}"
+                f":{incident.error_event.service}"
+                f":{incident.error_event.description[:100]}"
+            )
+            incident_store.set_pr_for_resource(key, fix.pr_url)
+            if incident.monitor_id:
+                incident_store.set_pr_for_resource(incident.monitor_id, fix.pr_url)
+
+        if not await _apply_dod_gate(incident):
+            return
+
         incident.status = IncidentStatus.REVIEWING
         incident_store.update(incident)
-
-        if fix.pr_url and incident.error_event.error_type:
-            incident_store.set_pr_for_resource(incident.error_event.error_type, fix.pr_url)
 
         logger.info("[IncidentLoop] %s — PR created: %s — running CodeReviewAgent", incident_id, fix.pr_url)
 
