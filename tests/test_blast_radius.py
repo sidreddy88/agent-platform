@@ -428,6 +428,8 @@ class TestIncidentLoopBlastRadius:
 
         loop = IncidentLoop.__new__(IncidentLoop)
         loop._running = False
+        loop._rag = None
+        loop._dedup_stats = {"sql_dedup": 0, "regression": 0, "rag_hit": 0, "cold_start": 0}
         loop._triage = MagicMock()
         loop._triage.triage = AsyncMock(return_value=TriageResult(
             decision="real", severity="P2", blast_radius="single_service",
@@ -438,7 +440,8 @@ class TestIncidentLoopBlastRadius:
             root_cause="NoSuchKey", confidence=0.85, escalate=False,
         ))
         loop._fix_agent = MagicMock()
-        loop._fix_agent.fix = AsyncMock(return_value=FixResult(
+        # _run_fix calls fix_with_steps; blast_radius violation has no pr_url
+        loop._fix_agent.fix_with_steps = AsyncMock(return_value=(FixResult(
             issue_url=None,
             pr_url=None,
             pr_number=None,
@@ -446,7 +449,7 @@ class TestIncidentLoopBlastRadius:
             fix_description="BLAST_RADIUS_VIOLATION: Protected path 'migrations/001.sql'",
             blast_radius_violation=True,
             blast_radius_violations=["Protected path 'migrations/001.sql' matches 'migrations/**'"],
-        ))
+        ), []))
         loop._review_agent = MagicMock()
 
         with (
