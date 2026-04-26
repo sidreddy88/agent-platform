@@ -270,7 +270,8 @@ class DriftDetector:
     async def _send_alert(self, result: DriftResult) -> None:
         from app.services.alerting import Alert, Severity, alerting_service
 
-        pct = lambda r: f"{r:.0%}" if r is not None else "n/a"
+        def pct(r):
+            return f"{r:.0%}" if r is not None else "n/a"
         drop_str = f"{result.drop:.0%}" if result.drop is not None else "n/a"
 
         await alerting_service.send_alert(Alert(

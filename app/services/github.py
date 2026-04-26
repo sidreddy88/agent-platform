@@ -1,6 +1,5 @@
 import base64
 import gzip
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -264,7 +263,7 @@ class GitHubService:
             failed_jobs = jobs
 
         parts: list[str] = []
-        async with self._client() as client:
+        async with self._client():
             for job in failed_jobs:
                 parts.append(f"\n=== Job: {job['name']} ({job['conclusion']}) ===\n")
                 try:

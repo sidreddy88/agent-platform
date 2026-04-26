@@ -22,16 +22,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import datetime, timedelta, timezone
 
 from app.agents.base import AgentResult, BaseAgent
 from app.core.config import settings
-from app.services.approvals import ApprovalService, approval_service as _default_approval_svc
+from app.services.approvals import ApprovalService
+from app.services.approvals import approval_service as _default_approval_svc
 from app.services.aws import AWSError, AWSService
 from app.services.llm import LLMService
 from app.services.rag import RAGService
-
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -635,7 +634,6 @@ class IncidentResponseAgent(BaseAgent):
             _cfg_log_groups = [g.strip() for g in settings.ecs_log_groups.split(",") if g.strip()]
             log_groups = params.get("log_groups", [log_group] if log_group else _cfg_log_groups)
             time_window = params.get("time_window", 30)
-            hours = params.get("hours", 6)
 
             service_hint = f" Primary service: {service} in cluster {cluster}." if service else ""
             logs_hint = f" Log groups: {log_groups}." if log_groups else ""

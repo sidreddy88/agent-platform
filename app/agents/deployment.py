@@ -19,8 +19,7 @@ Issues detected:
 """
 
 import json
-from dataclasses import asdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from app.agents.base import AgentResult, BaseAgent
 from app.core.config import settings
@@ -475,7 +474,7 @@ class DeploymentAgent(BaseAgent):
             cfg_lines.append(f"ALB names: {', '.join(self._alb_names)}")
         if self._log_groups:
             cfg_lines.append(f"CloudWatch log groups: {', '.join(self._log_groups)}")
-        config_context = "KNOWN AWS RESOURCES (use these — do not guess):\n" + "\n".join(f"  {l}" for l in cfg_lines)
+        config_context = "KNOWN AWS RESOURCES (use these — do not guess):\n" + "\n".join(f"  {line}" for line in cfg_lines)
 
         try:
             params = json.loads(user_input)
