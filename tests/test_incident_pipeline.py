@@ -92,6 +92,8 @@ class TestIncidentPipeline:
 
         loop = IncidentLoop.__new__(IncidentLoop)
         loop._running = False
+        loop._rag = None
+        loop._dedup_stats = {"sql_dedup": 0, "regression": 0, "rag_hit": 0, "cold_start": 0}
 
         triage_agent = MagicMock()
         triage_agent.triage = AsyncMock(return_value=triage_result)
@@ -100,7 +102,8 @@ class TestIncidentPipeline:
         diagnosis_agent.diagnose = AsyncMock(return_value=diagnosis_result)
 
         fix_agent = MagicMock()
-        fix_agent.fix = AsyncMock(return_value=fix_result)
+        # _run_fix calls fix_with_steps, not fix; mock it to return (fix_result, steps)
+        fix_agent.fix_with_steps = AsyncMock(return_value=(fix_result, []))
 
         review_agent = MagicMock()
         from app.agents.base import AgentResult
@@ -153,8 +156,9 @@ class TestIncidentPipeline:
         assert incident.approval_id == "appr-001"
         assert incident.fix_attempted is not None
 
-        # PR is registered for idempotency
-        assert store.get_pr_for_resource("S3_NO_SUCH_KEY") == "https://github.com/org/repo/pull/11"
+        # PR is registered for idempotency using the full dedup key
+        dedup_key = "S3_NO_SUCH_KEY:image-service:S3 throws NoSuchKey on missing key"
+        assert store.get_pr_for_resource(dedup_key) == "https://github.com/org/repo/pull/11"
 
     @pytest.mark.asyncio
     async def test_noise_event_terminates_at_triage(self):
@@ -248,8 +252,10 @@ class TestIncidentPipeline:
         incident = list(store._incidents.values())[0]
         assert incident.status == IncidentStatus.AWAITING_APPROVAL
         assert incident.confidence == pytest.approx(0.45)
-        loop._fix_agent.fix.assert_not_called()
-        mock_approval.request_approval.assert_not_called()
+        # fix_with_steps should not be called — low confidence blocks fix generation
+        loop._fix_agent.fix_with_steps.assert_not_called()
+        # request_approval IS called once (diagnosis escalation to human)
+        mock_approval.request_approval.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_fix_failure_leaves_incident_in_fixing(self):
@@ -263,7 +269,7 @@ class TestIncidentPipeline:
             diagnosis_result=make_diagnosis_result(0.85),
             fix_result=make_fix_result(),
         )
-        loop._fix_agent.fix = AsyncMock(side_effect=RuntimeError("GitHub API timeout"))
+        loop._fix_agent.fix_with_steps = AsyncMock(side_effect=RuntimeError("GitHub API timeout"))
 
         with (
             patch("app.services.incident_loop.incident_store", store),
