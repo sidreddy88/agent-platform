@@ -88,7 +88,14 @@ Root cause: LLM mock responses don't trigger blast radius evaluation; orchestrat
 
 ## Next Steps
 
-1. Continue harness series (currently at session continuity / cross-session artifacts)
-2. Add mypy incrementally once annotations are in place (deferred — see DECISIONS.md)
+1. Continue harness series
+   _Done when:_ PR merged, `make check` passes, temp-notes.md updated with analysis
+
+2. Add mypy incrementally (deferred — see DECISIONS.md)
+   _Done when:_ `mypy app/` runs clean in `make check` with zero suppressed errors
+
 3. Fix the 4 pre-existing test failures (underlying service behavior, not assertions)
-4. See `FUTURE.md` for deferred features (RAG improvements, agentic RAG, session handoff automation)
+   _Done when:_ `make test` shows 589 passing, 0 failures
+
+4. See `FUTURE.md` for deferred features
+   _Done when:_ the pre-condition listed in the relevant FUTURE.md entry is met
