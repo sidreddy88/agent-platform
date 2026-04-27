@@ -5,6 +5,38 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## Initialization Phase Automation
+
+**When to implement:** When the agent is enabled to commit code and the project
+has enough session history to warrant measuring initialization efficiency.
+
+### Warm Start Templates
+
+**What this is:** A pre-seeded project template (directory structure, Makefile,
+test framework, pyproject.toml, .python-version, .nvmrc) that new projects start
+from rather than an empty directory. Bakes the bootstrap contract into every
+new project automatically.
+
+**Why deferred:** No new projects are being started from scratch. All current
+initialization infrastructure already exists in this repo.
+
+**Pre-condition:** Starting a new project where the team would otherwise spend
+the first session on tooling setup.
+
+### Time to First Verification Metric
+
+**What this is:** Instrument the time from session start until the first
+`make check` completion. Tracks whether the bootstrap contract is actually
+achieving the target of sub-3-minute session startup.
+
+**Why deferred:** No structured timing events in agent runs yet. Would need
+the agent to emit timestamps at session boundaries.
+
+**Pre-condition:** Agent emits structured session start/end events that can be
+correlated with `make check` invocations.
+
+---
+
 ## Per-Module PROGRESS.md
 
 **When to implement:** When the repo grows to multiple active services with separate
