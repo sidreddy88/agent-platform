@@ -5,6 +5,38 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## Feature List Automation
+
+**When to implement:** When the agent is enabled to commit code and PROGRESS.md
+needs to be updated programmatically rather than manually.
+
+### Verifier
+
+A script that reads each Next Steps item's `Done when:` command, executes it, and
+updates the state tag automatically (`[not_started]` → `[passing]`). The agent
+submits a "verification request"; the verifier decides the state transition — the
+agent cannot change states directly.
+
+**Pre-condition:** Agent commits enabled.
+
+### Scheduler
+
+Reads PROGRESS.md, finds the next `[not_started]` item (respecting `[blocked]`
+items), and sets it to `[active]`. Enforces WIP=1 automatically — blocks activation
+if any item is already `[active]`.
+
+**Pre-condition:** Agent commits enabled + verifier in place.
+
+### Handoff Reporter
+
+Auto-generates session summary from PROGRESS.md state distribution: how many items
+are passing, active, blocked, not_started. Replaces the manual PROGRESS.md update
+step at session end.
+
+**Pre-condition:** Agent commits enabled + scheduler + verifier in place.
+
+---
+
 ## Task Boundary Automation
 
 **When to implement:** When agent commits are enabled and tasks are managed
