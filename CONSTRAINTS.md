@@ -1,0 +1,103 @@
+# Hard Constraints
+
+Rules that cause **silent failures or data corruption** if violated. Not style — invariants.
+
+---
+
+## Data Model
+
+**MUST NOT remove fields from `IncidentState`** (`app/models/events.py`)
+Existing SQLite rows are deserialized with `model_validate_json`. A missing field causes a
+load failure and crashes the incident store on startup.
+
+**MUST add new `IncidentState` fields as `Optional[...] = None` or with a safe default.**
+Never add a required field without a default.
+
+**MUST NOT DROP or rename columns in SQLite tables.**
+Column values are stored inside JSON blobs, not as raw columns. Renaming is harmless to the
+schema but the JSON field name must match the Pydantic model field name.
+
+---
+
+## Incident Status Transitions
+
+**MUST call `_apply_dod_gate(incident)` before every `REVIEWING` transition.**
+There are exactly 3 call sites — all three must gate:
+1. `app/services/incident_loop.py` — `_process()`
+2. `app/services/incident_loop.py` — `resume_fix()`
+3. `app/api/routes/incidents.py` — `approve-fix` endpoint
+
+**MUST call `incident_store.set_pr_for_resource()` BEFORE the DoD gate, not after.**
+The `monitor_pr_map_updated` DoD check reads from this table. If the PR is registered after
+the gate runs, that check always fails.
+
+**MUST update the frontend when adding a new `IncidentStatus`.**
+Required changes:
+- `frontend/src/types.ts` — add the new value to the union type
+- Status badge component — handle the new value
+- `incident_store.list_active()` — add to active set if it should appear in the active feed
+- `get_open_pr_for_error()` — add to the `closed` set if it is a terminal status
+
+---
+
+## Fix Generation
+
+**MUST mock `fix_with_steps`, not `fix`, in tests.**
+`IncidentLoop._run_fix()` calls `fix_agent.fix_with_steps()`. Mocking `fix` has no effect
+and silently leaves the mock unapplied.
+```python
+# correct
+loop._fix_agent.fix_with_steps = AsyncMock(return_value=(fix_result, []))
+```
+
+**MUST NOT use code search as a file-finding strategy.**
+Only resolve files from stack traces. Code search by error type string produces false positives
+(the error string can appear in comments or logs in unrelated files). If no file can be
+resolved from the stack trace, skip the fix entirely — do not fall back to search.
+
+**MUST NOT generate symptom fixes.** Four patterns to reject:
+- Exception suppression (`try/except` at the crash site without fixing the cause)
+- Input sanitization at the wrong layer (sanitizing output at the consumer instead of fixing the producer)
+- Value coercion instead of rejection (`int(x) if str(x).isdigit() else 0`)
+- Defensive null checks masking missing initialization (`if obj && obj.isReady()`)
+
+---
+
+## Dedup Map Key Format
+
+**`_process()` uses composite key:** `"{error_type}:{service}:{description[:100]}"`
+
+**`resume_fix()` uses error_type only** — pre-existing inconsistency. Do not normalize without
+updating every test that looks up by key.
+
+---
+
+## BaseAgent / ReAct Loop
+
+**MUST NOT modify `BaseAgent._run_loop()` or the ReAct parser** (`app/agents/base.py`).
+Changes here affect every agent in the platform.
+
+**MUST set `incident_id_ctx` before awaiting any agent inside the pipeline.**
+```python
+from app.agents.base import incident_id_ctx
+incident_id_ctx.set(incident.id)
+```
+Without this, agent runs are not linked to their incident in the tracker.
+
+**Tool functions MUST be `async`, accept `**kwargs`, and return `str`.**
+
+---
+
+## External Services
+
+**`GitHubService()` raises `ValueError` at construction if `GITHUB_TOKEN` is unset.**
+In tests, mock at the import site:
+```python
+patch("app.services.incident_loop.GitHubService")
+```
+
+**`circuit_breaker.call()` takes a coroutine, not a function reference.**
+```python
+# correct — pass the coroutine created by the call expression
+result = await cb.call(some_service.method(arg1, arg2))
+```
