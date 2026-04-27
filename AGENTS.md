@@ -54,6 +54,14 @@ make lint        # ruff check app/ tests/
 
 ---
 
+## Work Rules
+
+- Work on exactly one task at a time — finish it before starting the next
+- Do not expand scope mid-task ("also fix X while implementing Y")
+- A task is done when its acceptance criterion passes, not when the code is written
+
+---
+
 ## Topic Docs
 
 Read when the task involves the relevant area.

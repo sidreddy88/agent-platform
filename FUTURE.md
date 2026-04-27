@@ -5,6 +5,38 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## Task Boundary Automation
+
+**When to implement:** When agent commits are enabled and tasks are managed
+programmatically rather than manually updated in PROGRESS.md.
+
+### Scope Surface as Machine-Readable File
+
+**What this is:** A JSON or Markdown DAG tracking all task states: `not_started`,
+`active`, `blocked`, `passing`. Each node includes a task ID, description, acceptance
+criterion (executable command), dependencies, and current state. A new session reads
+this file and immediately knows: what is active, what counts as done, what has passed.
+
+**Why deferred:** With 4 next steps, PROGRESS.md already serves this role with less
+overhead. A structured DAG adds value when there are 10+ concurrent tasks across
+features or multiple people working simultaneously.
+
+**Pre-condition:** 10+ tasks being tracked concurrently, or multiple contributors
+needing a machine-readable format.
+
+### VCR (Verified Completion Rate) Tracking
+
+**What this is:** Continuously track `verified tasks / activated tasks`. Block new
+task activations when VCR < 1.0 — the harness enforces WIP=1 automatically rather
+than relying on the Work Rules being read.
+
+**Why deferred:** Requires programmatic task state management. Without agent commits,
+there is no way to enforce the block or update task state reliably.
+
+**Pre-condition:** Agent commits enabled + scope surface file in place.
+
+---
+
 ## Initialization Phase Automation
 
 **When to implement:** When the agent is enabled to commit code and the project
