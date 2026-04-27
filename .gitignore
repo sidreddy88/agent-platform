@@ -20,3 +20,4 @@ agent_platform.db
 agent_platform.db-wal
 agent_platform.db-shm
 .incidents.json.migrated
+lecture.md
