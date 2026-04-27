@@ -5,6 +5,42 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## Per-Module PROGRESS.md
+
+**When to implement:** When the repo grows to multiple active services with separate
+owners or release cadences.
+
+**What this is:** A PROGRESS.md co-located with each service directory (e.g.
+`app/services/PROGRESS.md`, `frontend/PROGRESS.md`) tracking state at the
+service level rather than the repo level.
+
+**Why deferred:** The current architecture is a single monorepo with one active
+incident pipeline. A root-level PROGRESS.md covers all in-flight work without
+ambiguity. Per-module files add navigation overhead with no benefit at this scale.
+
+**Pre-condition:** Multiple services with independent work streams, or a team
+large enough that different people own different services simultaneously.
+
+---
+
+## ACID State Management / Git Atomicity
+
+**When to implement:** When the agent is enabled to commit code.
+
+**What this is:** Treating each logical unit of work as an atomic transaction —
+the agent commits after each completed step, so session state is always
+recoverable from git history. A new session can find the exact in-progress
+state by reading the last commit message rather than relying on an in-memory
+progress file.
+
+**Why deferred:** All commits are currently manual. Automated git checkpoints
+require the agent to commit code, which is not yet enabled.
+
+**How to implement:** See the "Automated git checkpoints" section under Agent
+Session Handoff below.
+
+---
+
 ## Agent Session Handoff
 
 **When to implement:** When the agent is enabled to commit code and update files at
