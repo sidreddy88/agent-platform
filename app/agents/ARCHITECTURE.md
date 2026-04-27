@@ -109,3 +109,20 @@ loop._fix_agent.fix_with_steps = AsyncMock(return_value=(fix_result, []))
 | All others | `claude-sonnet-4-6` | Default; balance of quality and speed |
 
 Override in `BaseAgent.__init__` by passing `model=` to `LLMService`.
+
+---
+
+## Fix Generation — Root Cause Rules
+
+**Never generate a symptom fix.** The four patterns to reject:
+
+1. **Exception suppression** — wrapping the crash site in `try/catch` without addressing why the exception occurs.
+2. **Input sanitization at the wrong layer** — sanitizing output at the consumer instead of fixing the producer. Example: regex-cleaning JSON inside a parsing function instead of setting `response_format: {type: "json_object"}` at the OpenAI API call site.
+3. **Value coercion instead of rejection** — converting bad input to a default value (`int(x) if str(x).isdigit() else 0`) instead of validating at the entry point.
+4. **Defensive null checks masking missing initialization** — `if obj && obj.isReady()` instead of ensuring the object is always initialized before use.
+
+**The classifyFields reference case:**
+Error was `Unexpected token \ in JSON`. Agent saw the parsing function and added regex sanitization. Correct fix: `response_format: {type: "json_object"}` on the upstream OpenAI call. Lesson: always ask "where does this data come from?" before patching the crash site.
+
+**Stack trace resolution is the only file-finding strategy.**
+Code search by error type string produces false positives — the string can appear in comments or logs in unrelated files. If no file resolves from the stack trace, skip the fix entirely. No fallback.
