@@ -62,6 +62,7 @@ Read when the task involves the relevant area.
 | [CONSTRAINTS.md](CONSTRAINTS.md) | Touching any pipeline code — hard MUST/MUST NOT rules |
 | [app/agents/ARCHITECTURE.md](app/agents/ARCHITECTURE.md) | Adding/modifying agents or fix generation |
 | [app/services/ARCHITECTURE.md](app/services/ARCHITECTURE.md) | Touching services, singletons, or the incident pipeline |
+| [DECISIONS.md](DECISIONS.md) | Before making architectural choices |
 | [PROGRESS.md](PROGRESS.md) | Starting a new feature or need project context |
 
 ---

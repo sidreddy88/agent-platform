@@ -5,6 +5,112 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## Per-Module PROGRESS.md
+
+**When to implement:** When the repo grows to multiple active services with separate
+owners or release cadences.
+
+**What this is:** A PROGRESS.md co-located with each service directory (e.g.
+`app/services/PROGRESS.md`, `frontend/PROGRESS.md`) tracking state at the
+service level rather than the repo level.
+
+**Why deferred:** The current architecture is a single monorepo with one active
+incident pipeline. A root-level PROGRESS.md covers all in-flight work without
+ambiguity. Per-module files add navigation overhead with no benefit at this scale.
+
+**Pre-condition:** Multiple services with independent work streams, or a team
+large enough that different people own different services simultaneously.
+
+---
+
+## ACID State Management / Git Atomicity
+
+**When to implement:** When the agent is enabled to commit code.
+
+**What this is:** Treating each logical unit of work as an atomic transaction —
+the agent commits after each completed step, so session state is always
+recoverable from git history. A new session can find the exact in-progress
+state by reading the last commit message rather than relying on an in-memory
+progress file.
+
+**Why deferred:** All commits are currently manual. Automated git checkpoints
+require the agent to commit code, which is not yet enabled.
+
+**How to implement:** See the "Automated git checkpoints" section under Agent
+Session Handoff below.
+
+---
+
+## Agent Session Handoff
+
+**When to implement:** When the agent is enabled to commit code and update files at
+session boundaries (currently all commits are manual).
+
+**What this is:** Structured continuity artifacts so a new session can resume in ~3
+minutes instead of ~15. The current architecture already has PROGRESS.md and DECISIONS.md
+as the static scaffolding — this section describes the automation layer to add on top.
+
+### Session protocol in AGENTS.md
+
+Add a Session Protocol section once the agent commits are enabled:
+
+```markdown
+## Session Protocol
+
+**At session start (clock-in):**
+1. Read PROGRESS.md — current state and next steps
+2. Read DECISIONS.md — settled architectural choices
+3. Run `make check` — confirm repo is in a consistent state
+4. Resume from "Next Steps" in PROGRESS.md
+
+**At session end (clock-out):**
+1. Update PROGRESS.md — current state, in-progress %, next steps
+2. Record any new architectural choices in DECISIONS.md
+3. Run `make check` — confirm consistent state before handing off
+4. Commit all completed work with a descriptive message
+```
+
+### Automated PROGRESS.md updates
+
+The agent should update PROGRESS.md at clock-out:
+- Move completed items from "In Progress" to "Completed"
+- Update "Current State" (branch, commit hash, test count, lint status)
+- Update "Next Steps" with the specific next action, not just the feature name
+
+### Automated git checkpoints
+
+After each atomic unit of work (one logical change, tests passing):
+```bash
+git add <specific files>
+git commit -m "feat: <what was done and why>"
+```
+One commit per logical unit, not one commit per session. This is the "craftsman's journal"
+entry for the day — specific enough that a new session reading `git log` knows exactly
+what state the work is in.
+
+### DECISIONS.md entries written by agent
+
+When the agent chooses between two approaches, it should write the decision before
+implementing:
+```markdown
+## [date]: [decision title]
+**Decision:** [what was chosen]
+**Reason:** [why]
+**Rejected:** [what was considered and dropped]
+**Constraint:** [ongoing rule this creates]
+```
+
+This prevents the next session from re-evaluating a decision that was already made,
+potentially choosing a different option and creating inconsistency.
+
+### Rebuild cost target
+
+A well-maintained session handoff should get a new session to an executable state
+(read context, understand current state, run first task step) in under 3 minutes.
+Measure: time from new session start to first `make check` completing.
+
+---
+
 ## RAG Retrieval Quality Improvements
 
 **When to revisit:** Run `python scripts/eval_rag.py` once you have 10+ real incidents indexed.
