@@ -14,6 +14,17 @@ of each working session.
 
 ---
 
+## Bootstrap Contract
+
+All four conditions must be true for a clean session handoff.
+
+- `make setup` completes without error
+- `make check` passes (lint + tests, 4 known failures expected)
+- "Current State" above is accurate (branch, commit, test count)
+- "Next Steps" below has a concrete first action
+
+---
+
 ## Completed
 
 ### Incident Pipeline

@@ -40,6 +40,7 @@ Key file: `app/services/incident_loop.py` — orchestrates every pipeline stage.
 ## Run / Verify
 
 ```bash
+make setup       # install all dependencies (pip + npm) — run first in a fresh environment
 npm run dev      # start FastAPI + Vite dev server
 make check       # lint then test (run before every PR)
 make test        # pytest tests/ --ignore=tests/test_websocket.py
