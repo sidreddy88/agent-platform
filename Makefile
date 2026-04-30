@@ -1,4 +1,4 @@
-.PHONY: setup test lint check
+.PHONY: setup test lint arch-check check
 
 setup:
 	pip install -r requirements.txt
@@ -12,4 +12,7 @@ test:
 lint:
 	ruff check app/ tests/
 
-check: lint test
+arch-check:
+	@echo "arch-check passed (add grep checks here as review feedback is promoted)"
+
+check: lint test arch-check
