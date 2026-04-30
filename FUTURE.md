@@ -58,6 +58,47 @@ the call chain context feature.
 
 ---
 
+## Periodic Cleanup Loop
+
+**When to implement:** When agent commits are enabled so cleanup can be committed atomically.
+
+**What this is:** A weekly maintenance session that scans for accumulated entropy:
+stale TODO markers, commented-out code, dead debug files, QUALITY.md grades that
+have drifted from actual module health. Not emergency repair — routine operations that
+prevent the entropy growth that Lehman's laws predict for continuously-changed systems.
+
+**Why deferred:** Without agent commits, cleanup changes can't be committed at session
+boundaries. Manual cleanup without commits leaves the repo in an ambiguous intermediate
+state.
+
+**Pre-condition:** Agent commits enabled. Recommended trigger: end of each sprint or
+week, whichever comes first.
+
+---
+
+## Harness Simplification Protocol
+
+**When to implement:** When `app/services/eval_runner.py` is wired to a benchmark task
+suite with measurable pass rates.
+
+**What this is:** A monthly review cycle to remove harness components that model
+capability improvements have made unnecessary. Process: pick one Work Rule or
+CONSTRAINTS.md entry, temporarily disable it, run benchmark tasks, remove permanently
+if results don't degrade — restore or replace with a lighter alternative if they do.
+
+**Why this matters:** Every harness constraint exists because the model can't reliably
+do something on its own. As models improve, these assumptions become outdated. A
+constraint essential today may be overhead in three months. Running the harness lighter
+reduces cost, latency, and complexity.
+
+**Why deferred:** Needs a benchmark suite to detect degradation. `eval_runner.py` is
+scaffolded but not yet wired to specific tasks with measurable outcomes.
+
+**Pre-condition:** `eval_runner.py` wired to benchmark tasks with quantifiable pass
+rates, so disabling a constraint produces a measurable signal.
+
+---
+
 ## Layer 3 End-to-End Verification
 
 **When to implement:** When a staging environment with real (or contract-tested)

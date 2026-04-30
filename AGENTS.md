@@ -75,6 +75,7 @@ make lint        # ruff check app/ tests/
 - Do not refactor, optimize, or clean up style until all applicable layers pass
 - PROGRESS.md is the single source of truth for task state — do not maintain a parallel list
 - When moving an item to Completed, record the PR number as evidence
+- Before ending a session, verify all five items in the Session Exit Checklist in PROGRESS.md
 
 ---
 
@@ -89,6 +90,7 @@ Read when the task involves the relevant area.
 | [app/services/ARCHITECTURE.md](app/services/ARCHITECTURE.md) | Touching services, singletons, or the incident pipeline |
 | [DECISIONS.md](DECISIONS.md) | Before making architectural choices |
 | [PROGRESS.md](PROGRESS.md) | Starting a new feature or need project context |
+| [QUALITY.md](QUALITY.md) | Prioritizing which module to fix next; assessing codebase health |
 
 ---
 
