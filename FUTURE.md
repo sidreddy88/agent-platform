@@ -5,6 +5,74 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## Layer 3 End-to-End Verification
+
+**When to implement:** When a staging environment with real (or contract-tested)
+external services is available.
+
+**Why Layers 1 and 2 are not enough:** The test suite is fully mocked — no live
+API calls. Unit tests cannot catch interface mismatches between components,
+state propagation errors across layers, or environment-specific failures (missing
+config, service unavailability). These only surface when the full system runs.
+
+### Automated End-to-End Tests
+
+**What this is:** A test suite that exercises the full incident pipeline from
+`POST /events` through triage → diagnosis → fix → approval, using real or
+contract-tested external services (Anthropic API, GitHub, AWS).
+
+**Pre-condition:** Staging environment with real services, or contract tests
+(e.g. Pact) that verify integration boundaries without live calls.
+
+### Independent Evaluator Agent
+
+**What this is:** A separate agent that reviews completed work from the perspective
+of a "picky" independent grader — distinct from the generating agent. The existing
+Haiku self-critique pass in `FixGenerationAgent` already implements this pattern
+for fix generation. A general-purpose evaluator would extend this to harness-level
+tasks: verifying that a claimed "done" task actually satisfies the acceptance criterion.
+
+**Why it's better than self-evaluation:** The same model generating and evaluating
+favors being generous to itself. An independent evaluator, specifically tuned to be
+critical, finds defects the generator rationalizes away.
+
+**Pre-condition:** Layer 3 e2e tests in place so the evaluator has real execution
+evidence to assess, not just code.
+
+---
+
+## Feature List Automation
+
+**When to implement:** When the agent is enabled to commit code and PROGRESS.md
+needs to be updated programmatically rather than manually.
+
+### Verifier
+
+A script that reads each Next Steps item's `Done when:` command, executes it, and
+updates the state tag automatically (`[not_started]` → `[passing]`). The agent
+submits a "verification request"; the verifier decides the state transition — the
+agent cannot change states directly.
+
+**Pre-condition:** Agent commits enabled.
+
+### Scheduler
+
+Reads PROGRESS.md, finds the next `[not_started]` item (respecting `[blocked]`
+items), and sets it to `[active]`. Enforces WIP=1 automatically — blocks activation
+if any item is already `[active]`.
+
+**Pre-condition:** Agent commits enabled + verifier in place.
+
+### Handoff Reporter
+
+Auto-generates session summary from PROGRESS.md state distribution: how many items
+are passing, active, blocked, not_started. Replaces the manual PROGRESS.md update
+step at session end.
+
+**Pre-condition:** Agent commits enabled + scheduler + verifier in place.
+
+---
+
 ## Task Boundary Automation
 
 **When to implement:** When agent commits are enabled and tasks are managed

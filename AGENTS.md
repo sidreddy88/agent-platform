@@ -59,6 +59,13 @@ make lint        # ruff check app/ tests/
 - Work on exactly one task at a time — finish it before starting the next
 - Do not expand scope mid-task ("also fix X while implementing Y")
 - A task is done when its acceptance criterion passes, not when the code is written
+- Verification layers must pass in order before declaring done:
+  1. `make lint` — syntax and static analysis
+  2. `make test` — unit tests
+  3. End-to-end flow confirmed (manual for now — see FUTURE.md)
+- Do not refactor, optimize, or clean up style until all applicable layers pass
+- PROGRESS.md is the single source of truth for task state — do not maintain a parallel list
+- When moving an item to Completed, record the PR number as evidence
 
 ---
 

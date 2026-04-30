@@ -88,14 +88,16 @@ Root cause: LLM mock responses don't trigger blast radius evaluation; orchestrat
 
 ## Next Steps
 
-1. Continue harness series
+_PROGRESS.md is the single source of truth for task state. Do not maintain a parallel list elsewhere._
+
+1. Continue harness series `[not_started]`
    _Done when:_ PR merged, `make check` passes, temp-notes.md updated with analysis
 
-2. Add mypy incrementally (deferred — see DECISIONS.md)
+2. Add mypy incrementally `[blocked]` — pre-condition: annotations in place (see DECISIONS.md)
    _Done when:_ `mypy app/` runs clean in `make check` with zero suppressed errors
 
-3. Fix the 4 pre-existing test failures (underlying service behavior, not assertions)
+3. Fix the 4 pre-existing test failures `[not_started]`
    _Done when:_ `make test` shows 589 passing, 0 failures
 
-4. See `FUTURE.md` for deferred features
+4. See `FUTURE.md` for deferred features `[blocked]` — pre-condition per FUTURE.md entry
    _Done when:_ the pre-condition listed in the relevant FUTURE.md entry is met
