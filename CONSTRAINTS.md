@@ -4,6 +4,28 @@ Rules that cause **silent failures or data corruption** if violated. Not style â
 
 ---
 
+## Review Feedback Promotion
+
+When a violation pattern is caught in code review, convert it into a permanent
+automated check so it never recurs undetected. The harness grows stronger with
+every session.
+
+**Process:**
+1. Identify the cleanest grep or lint check that catches the pattern without false positives
+2. Add it to `make arch-check` in the Makefile using this error message format:
+   ```
+   FAIL: <what was found and where>
+   WHY:  <why this is forbidden â€” reference this file's section>
+   FIX:  <exactly what to change and where>
+   ```
+3. Document the pattern in the relevant section of this file
+4. Every violation category captured in review becomes a permanent line of defense
+
+**Why this matters:** A constraint written in a document relies on the agent reading it.
+A constraint enforced by `make check` runs on every PR automatically.
+
+---
+
 ## Data Model
 
 **MUST NOT remove fields from `IncidentState`** (`app/models/events.py`)
