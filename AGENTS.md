@@ -58,11 +58,20 @@ make lint        # ruff check app/ tests/
 
 - Work on exactly one task at a time — finish it before starting the next
 - Do not expand scope mid-task ("also fix X while implementing Y")
+- Before starting any non-trivial task, write a sprint contract in PROGRESS.md:
+  - **Scope:** which files/areas to touch
+  - **Exclusions:** what not to touch
+  - **Pass criteria:** (the "Done when:" clause)
 - A task is done when its acceptance criterion passes, not when the code is written
 - Verification layers must pass in order before declaring done:
   1. `make lint` — syntax and static analysis
   2. `make test` — unit tests
   3. End-to-end flow confirmed (manual for now — see FUTURE.md)
+- When declaring done, verify each dimension explicitly:
+  - **Correctness:** `make test` passes; pre-existing failures unchanged
+  - **Compliance:** no CONSTRAINTS.md violations; `make arch-check` passes
+  - **Coverage:** new behavior has at least one test
+  - **Scope:** only files listed in the sprint contract scope were modified
 - Do not refactor, optimize, or clean up style until all applicable layers pass
 - PROGRESS.md is the single source of truth for task state — do not maintain a parallel list
 - When moving an item to Completed, record the PR number as evidence

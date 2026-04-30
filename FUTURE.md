@@ -5,6 +5,25 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## OpenTelemetry Standardization
+
+**When to implement:** When there is a concrete reason to move off Langfuse — e.g., existing
+OTel infrastructure, multi-service distributed traces, or toolchain integration with Jaeger/Zipkin.
+
+**What this is:** Standardize harness tracing on OpenTelemetry. Define a structured span
+hierarchy: session span → task span → verification step spans. Annotate spans with
+standard attributes (`harness.task`, `harness.sprint_contract.scope`, `harness.rubric.dimension`).
+Pipe to an OTel-compatible backend.
+
+**Why deferred:** Langfuse v4 already captures Agent → LLM → Tool span trees with metadata
+and error context. OTel adds infrastructure complexity (collector, backend) with no concrete
+benefit at current single-service scale.
+
+**Pre-condition:** Existing OTel infrastructure in the stack, or a multi-service architecture
+where distributed traces across services are needed.
+
+---
+
 ## Architectural Boundary Linting
 
 **When to implement:** When specific violation patterns are confirmed clean (no false
