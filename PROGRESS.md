@@ -69,6 +69,9 @@ _Nothing actively in progress._
 
 <!-- Template for active work:
 - [ ] Feature name (NN% — current blocker or next micro-step)
+  **Scope:** <files/areas to touch>
+  **Exclusions:** <what not to touch>
+  _Done when:_ <acceptance criterion>
 -->
 
 ---
