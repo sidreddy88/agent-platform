@@ -25,6 +25,18 @@ All four conditions must be true for a clean session handoff.
 
 ---
 
+## Session Exit Checklist
+
+All five must be true before a session is considered complete.
+
+- `make check` passes (lint + tests, 4 known failures expected — no new failures)
+- PROGRESS.md "Current State" updated (branch, commit hash, test count)
+- "Next Steps" has a concrete first action for the next session
+- No debug code, temporary print statements, or scratch files left in modified files
+- Active branch either has a PR open or its next step is recorded in In Progress
+
+---
+
 ## Completed
 
 ### Incident Pipeline
