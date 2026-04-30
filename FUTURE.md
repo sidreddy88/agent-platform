@@ -5,6 +5,40 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## Architectural Boundary Linting
+
+**When to implement:** When specific violation patterns are confirmed clean (no false
+positives) and warrant automation beyond the current `make arch-check` stub.
+
+### Import Direction Enforcement
+
+**What this is:** A custom ruff plugin or import-linter configuration enforcing a
+strict dependency direction across layers (e.g. agents may not import from api/routes,
+services may not import from agents). Every violation caught on commit, not in review.
+
+**Why deferred:** The current codebase has no explicitly declared layer graph. Adding
+enforcement before the boundaries are defined would produce false positives or require
+suppression comments throughout.
+
+**Pre-condition:** Layer boundaries explicitly defined in `app/services/ARCHITECTURE.md`
+or equivalent, with a dependency direction graph.
+
+### Precise Code Search Guard for `_resolve_target`
+
+**What this is:** An AST-level check verifying that `search_code` in
+`app/agents/fix_generation.py` is only invoked from caller-context fetching, never
+from the `_resolve_target` file-finding path. A simple grep would false-positive on
+the legitimate caller-context use.
+
+**Why deferred:** Requires Python AST parsing — grep alone cannot distinguish the
+call sites. Feasible with a short script using the `ast` module, but the pattern
+needs to stabilize before the check is written.
+
+**Pre-condition:** `_resolve_target` interface is stable; no active refactoring of
+the call chain context feature.
+
+---
+
 ## Layer 3 End-to-End Verification
 
 **When to implement:** When a staging environment with real (or contract-tested)
