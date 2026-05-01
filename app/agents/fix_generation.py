@@ -286,21 +286,48 @@ class FixGenerationAgent(BaseAgent):
         steps.append(f"✓ Self-critique: {critique[:120]}")
         logger.info("[FixGen] Self-critique: %s", critique[:200])
 
-        # ── 3d. Sandbox validation — run tests against the fix ─────────
-        new_content = content.replace(old_function, new_function, 1)
-        if new_content == content:
-            new_content = content.replace(old_function.strip(), new_function.strip(), 1)
-
+        # ── 3d. Sandbox validation with retry ─────────────────────────
         from app.services.sandbox import SandboxService
-        sandbox_result = await SandboxService().run({file_path: new_content}, incident.id)
-        if not sandbox_result.passed:
-            tail = sandbox_result.output[-600:] if sandbox_result.output else ""
+        _MAX_ATTEMPTS = 3
+        _sandbox = SandboxService()
+        _test_failures = ""
+        new_content = ""
+
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            new_content = content.replace(old_function, new_function, 1)
+            if new_content == content:
+                new_content = content.replace(old_function.strip(), new_function.strip(), 1)
+
+            sandbox_result = await _sandbox.run({file_path: new_content}, incident.id)
+            if sandbox_result.passed:
+                steps.append(f"✓ Sandbox tests passed (attempt {attempt}/{_MAX_ATTEMPTS})")
+                logger.info("[FixGen] Sandbox passed on attempt %d for %s", attempt, incident.id)
+                break
+
+            _test_failures = self._extract_test_failures(sandbox_result.output)
             reason = sandbox_result.error or "tests failed"
-            steps.append(f"✗ Sandbox tests failed ({reason})\n{tail}")
-            logger.warning("[FixGen] Sandbox failed for incident %s: %s", incident.id, reason)
-            return _fail(f"Sandbox tests failed: {reason}", branch=branch_name)
-        steps.append("✓ Sandbox tests passed")
-        logger.info("[FixGen] Sandbox passed for incident %s", incident.id)
+            steps.append(f"✗ Sandbox attempt {attempt}/{_MAX_ATTEMPTS} failed ({reason})\n{_test_failures}")
+            logger.warning("[FixGen] Sandbox attempt %d failed for %s", attempt, incident.id)
+
+            if attempt == _MAX_ATTEMPTS:
+                return _fail(
+                    f"Sandbox tests failed after {_MAX_ATTEMPTS} attempts: {reason}",
+                    branch=branch_name,
+                )
+
+            steps.append(f"↻ Regenerating fix with test failure context (attempt {attempt + 1}/{_MAX_ATTEMPTS})")
+            try:
+                old_function, new_function = await self._generate_fix(
+                    content, function_name, incident, file_path, call_chain,
+                    test_failures=_test_failures,
+                )
+            except Exception as exc:
+                steps.append(f"✗ LLM retry failed: {exc}")
+                return _fail(f"LLM retry error: {exc}", branch=branch_name)
+
+            if not old_function:
+                return _fail(f"{function_name} not found on retry attempt {attempt + 1}", branch=branch_name)
+            steps.append(f"✓ Generated retry fix (attempt {attempt + 1}/{_MAX_ATTEMPTS})")
 
         # ── 4. Create GitHub Issue ─────────────────────────────────────
         issue_url: str | None = None
@@ -742,7 +769,7 @@ class FixGenerationAgent(BaseAgent):
 
     async def _generate_fix(
         self, content: str, function_name: str, incident: IncidentState,
-        file_path: str = "", call_chain: str = ""
+        file_path: str = "", call_chain: str = "", test_failures: str = ""
     ) -> tuple[str, str]:
         """
         Ask the LLM to locate the function in the file and return (old_text, fixed_text).
@@ -756,6 +783,15 @@ class FixGenerationAgent(BaseAgent):
             human_notes_section = (
                 f"\nHUMAN FEEDBACK (from previous fix attempt — you MUST follow this):\n"
                 f"{incident.human_notes}\n"
+            )
+
+        test_failures_section = ""
+        if test_failures:
+            test_failures_section = (
+                f"\nTEST FAILURES FROM PREVIOUS FIX ATTEMPT — your new fix must not break these tests:\n"
+                f"{test_failures}\n"
+                f"Study the failures above. Understand which invariant your previous fix violated "
+                f"before writing the new version.\n"
             )
 
         rag_section = ""
@@ -782,6 +818,7 @@ class FixGenerationAgent(BaseAgent):
             f"ERROR TYPE: {incident.error_event.error_type or 'unknown'}\n"
             f"ERROR DETAIL: {incident.error_event.description or ''}\n"
             f"{human_notes_section}"
+            f"{test_failures_section}"
             f"{call_chain_section}"
             f"{rag_section}\n\n"
             f"FILE TO FIX ({file_path}):\n{content}\n\n"
@@ -835,6 +872,21 @@ class FixGenerationAgent(BaseAgent):
 
         logger.info("[FixGen] Generated fix (old=%d chars, new=%d chars)", len(old_function), len(new_function))
         return old_function, new_function.strip()
+
+    def _extract_test_failures(self, output: str) -> str:
+        """Extract the meaningful lines from jest test output for LLM context."""
+        lines = output.splitlines()
+        keep = []
+        for line in lines:
+            s = line.strip()
+            if any(s.startswith(k) for k in (
+                "FAIL ", "● ", "expect(", "Expected", "Received", "Error:", "TypeError",
+                "Test Suites:", "Tests:",
+            )):
+                keep.append(line)
+        # Fall back to tail if we extracted too little
+        result = keep if len(keep) >= 5 else lines[-60:]
+        return "\n".join(result[:80])
 
     async def _critique_fix(
         self, old_code: str, new_code: str, incident: IncidentState, file_path: str = ""
