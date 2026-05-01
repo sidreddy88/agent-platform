@@ -37,6 +37,7 @@ from app.services.dod_checker import dod_checker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 from app.services.schema_validator import HandoffValidationError, handoff_validator
+from app.services.session_logger import session_logger
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +264,9 @@ class IncidentLoop:
         )
         try:
             fix, steps = await cb.call(self._fix_agent.fix_with_steps(incident))
+            _sess = session_logger.get(incident.id)
+            if _sess:
+                _sess.log_steps(steps)
             if not fix.pr_url and not fix.blast_radius_violation:
                 logger.error(
                     "[IncidentLoop] FixGenerationAgent failed for %s — steps:\n%s",
@@ -410,6 +414,7 @@ class IncidentLoop:
 
         # ── Triage ────────────────────────────────────────────────────
         incident = incident_store.create(event)
+        sess = session_logger.start(incident.id, event.title, event.error_type)
         incident.status = IncidentStatus.TRIAGING
         incident_store.update(incident)
         logger.info("[IncidentLoop] Triaging %s — %s", incident.id, event.title)
@@ -419,6 +424,13 @@ class IncidentLoop:
         incident_id_ctx.set(incident.id)
 
         triage = await self._run_triage(event)
+        sess.log_triage(
+            decision=triage.decision,
+            severity=triage.severity if triage.decision == "real" else None,
+            confidence=1.0,
+            reasoning=triage.reasoning,
+            occurrences_24h=triage.occurrences_24h,
+        )
 
         incident.triage_decision = triage.decision
         incident.triage_reasoning = triage.reasoning
@@ -437,6 +449,7 @@ class IncidentLoop:
             except Exception:
                 pass
             await self._index_to_rag(incident)
+            session_logger.finish(incident.id, "duplicate")
             return
 
         if triage.decision == "noise":
@@ -449,6 +462,7 @@ class IncidentLoop:
             except Exception:
                 pass
             await self._index_to_rag(incident)
+            session_logger.finish(incident.id, "noise")
             return
 
         # Real incident — set severity and proceed
@@ -467,6 +481,12 @@ class IncidentLoop:
 
         # ── Diagnosis ─────────────────────────────────────────────────
         diagnosis = await self._run_diagnosis(incident, prior_context=prior_context)
+        sess.log_diagnosis(
+            root_cause=diagnosis.root_cause,
+            confidence=diagnosis.confidence,
+            fix_approach=getattr(diagnosis, "fix_approach", "") or "",
+            escalated=diagnosis.escalate,
+        )
 
         incident.diagnosis = diagnosis.root_cause
         incident.confidence = diagnosis.confidence
@@ -499,6 +519,7 @@ class IncidentLoop:
                 golden_dataset_builder.capture(incident)
             except Exception:
                 pass
+            session_logger.finish(incident.id, "escalated")
             return
 
         # High confidence → generate fix
@@ -512,6 +533,7 @@ class IncidentLoop:
         )
 
         # ── Fix Generation ────────────────────────────────────────────
+        sess.log_fix_start(target_file=None, target_function=None)
         # Skip for demo events — we want to show agent activity without
         # creating real GitHub branches and PRs every time.
         if incident.error_event.metadata.get("demo"):
@@ -519,11 +541,13 @@ class IncidentLoop:
             incident.fix_attempted = "[Demo mode — fix generation skipped]"
             incident_store.update(incident)
             logger.info("[IncidentLoop] %s — demo event, skipping fix + PR creation", incident.id)
+            session_logger.finish(incident.id, "demo_skipped")
             return
 
         fix = await self._run_fix(incident)
         if fix is None:
             logger.error("[IncidentLoop] %s — fix generation failed, leaving in FIXING", incident.id)
+            session_logger.finish(incident.id, "fix_failed")
             return
 
         # Blast radius gate — block the PR before any GitHub writes
@@ -536,6 +560,8 @@ class IncidentLoop:
                 "[IncidentLoop] %s — blast radius violation, escalating to human: %s",
                 incident.id, fix.fix_description,
             )
+            sess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=True, failure_reason=fix.fix_description[:200])
+            session_logger.finish(incident.id, "blast_radius_violation")
             return
 
         # Pending approval gate — diff generated, waiting for human to approve before commit
@@ -544,12 +570,15 @@ class IncidentLoop:
             incident.status = IncidentStatus.AWAITING_FIX_APPROVAL
             incident_store.update(incident)
             logger.info("[IncidentLoop] %s — diff ready, awaiting human approval", incident.id)
+            session_logger.finish(incident.id, "awaiting_fix_approval")
             return
 
         if not fix.pr_url and not fix.pr_number:
             incident.fix_attempted = fix.fix_description[:200]
             incident_store.update(incident)
             logger.error("[IncidentLoop] %s — fix generation failed: %s", incident.id, fix.fix_description)
+            sess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=False, failure_reason=fix.fix_description[:200])
+            session_logger.finish(incident.id, "fix_failed")
             return
 
         incident.pr_url = fix.pr_url
@@ -573,6 +602,7 @@ class IncidentLoop:
                 incident_store.set_pr_for_resource(incident.monitor_id, fix.pr_url)
 
         if not await _apply_dod_gate(incident):
+            session_logger.finish(incident.id, "dod_failed")
             return
 
         incident.status = IncidentStatus.REVIEWING
@@ -580,6 +610,8 @@ class IncidentLoop:
 
         logger.info("[IncidentLoop] %s — PR created: %s — running CodeReviewAgent", incident.id, fix.pr_url)
         await self._run_post_fix(incident, fix)
+        sess.log_fix_outcome(pr_url=fix.pr_url, pr_number=fix.pr_number, blast_radius_violation=False, failure_reason=None)
+        session_logger.finish(incident.id, "pr_created")
 
     async def _run_post_fix(self, incident: IncidentState, fix) -> None:
         """Run code review + approval gate after a fix PR has been created (shared by pipeline and approve-fix endpoint)."""
@@ -628,16 +660,22 @@ class IncidentLoop:
             "[IncidentLoop] %s — human approved diagnosis, resuming fix generation",
             incident_id,
         )
+        _rsess = session_logger.get(incident.id) or session_logger.start(
+            incident.id, incident.error_event.title, incident.error_event.error_type
+        )
+        _rsess.log_fix_start(target_file=None, target_function=None)
 
         if incident.error_event.metadata.get("demo"):
             incident.status = IncidentStatus.AWAITING_APPROVAL
             incident.fix_attempted = "[Demo mode — fix generation skipped]"
             incident_store.update(incident)
+            session_logger.finish(incident.id, "demo_skipped")
             return
 
         fix = await self._run_fix(incident)
         if fix is None:
             logger.error("[IncidentLoop] %s — fix generation failed after diagnosis approval", incident_id)
+            session_logger.finish(incident.id, "fix_failed")
             return
 
         if fix.blast_radius_violation:
@@ -649,6 +687,8 @@ class IncidentLoop:
                 "[IncidentLoop] %s — blast radius violation after resume: %s",
                 incident_id, fix.fix_description,
             )
+            _rsess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=True, failure_reason=fix.fix_description[:200])
+            session_logger.finish(incident.id, "blast_radius_violation")
             return
 
         if incident.pending_fix_old and not fix.pr_url:
@@ -656,12 +696,15 @@ class IncidentLoop:
             incident.status = IncidentStatus.AWAITING_FIX_APPROVAL
             incident_store.update(incident)
             logger.info("[IncidentLoop] %s — diff ready after resume, awaiting human approval", incident_id)
+            session_logger.finish(incident.id, "awaiting_fix_approval")
             return
 
         if not fix.pr_url and not fix.pr_number:
             incident.fix_attempted = fix.fix_description[:200]
             incident_store.update(incident)
             logger.error("[IncidentLoop] %s — fix generation produced no PR after resume: %s", incident_id, fix.fix_description)
+            _rsess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=False, failure_reason=fix.fix_description[:200])
+            session_logger.finish(incident.id, "fix_failed")
             return
 
         incident.pr_url = fix.pr_url
@@ -686,6 +729,7 @@ class IncidentLoop:
                 incident_store.set_pr_for_resource(incident.monitor_id, fix.pr_url)
 
         if not await _apply_dod_gate(incident):
+            session_logger.finish(incident.id, "dod_failed")
             return
 
         incident.status = IncidentStatus.REVIEWING
@@ -724,6 +768,8 @@ class IncidentLoop:
 
         await _notify_fix_ready(incident, fix, approval_req.id)
         logger.info("[IncidentLoop] %s — approval %s sent to Slack", incident_id, approval_req.id)
+        _rsess.log_fix_outcome(pr_url=fix.pr_url, pr_number=fix.pr_number, blast_radius_violation=False, failure_reason=None)
+        session_logger.finish(incident.id, "pr_created")
 
     async def run_forever(self) -> None:
         self._running = True
