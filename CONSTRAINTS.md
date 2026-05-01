@@ -72,10 +72,18 @@ and silently leaves the mock unapplied.
 loop._fix_agent.fix_with_steps = AsyncMock(return_value=(fix_result, []))
 ```
 
-**MUST NOT use code search as a file-finding strategy.**
-Only resolve files from stack traces. Code search by error type string produces false positives
-(the error string can appear in comments or logs in unrelated files). If no file can be
-resolved from the stack trace, skip the fix entirely — do not fall back to search.
+**MUST call `_commit_test` inside `fix_with_steps` after the fix commit and before PR creation.**
+The `fix_test_written` DoD check looks for a test file in `incident.pr_files_changed`.
+If `_commit_test` is not called (or called after `create_pull_request`), that check
+always fails with "No test file in PR diff" and every incident ends at `dod_failed`.
+The returned path from `_commit_test` must be appended to `files_changed` in `FixResult`.
+
+**MUST NOT use error-type strings as code search queries.**
+Code search by error type string (e.g. "S3_NO_SUCH_KEY", "ECS_ERROR") produces false
+positives — the string appears in logs, comments, and unrelated files. Function-name
+search (extracted from the error title or diagnosis) is acceptable as a fallback when
+no stack trace is available, because function names are specific enough to pinpoint the
+definition file.
 
 **MUST NOT generate symptom fixes.** Four patterns to reject:
 - Exception suppression (`try/except` at the crash site without fixing the cause)
