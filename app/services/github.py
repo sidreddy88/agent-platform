@@ -478,6 +478,15 @@ class GitHubService:
 
         return pr_number, pr_url
 
+    async def close_pull_request(self, owner: str, repo: str, pr_number: int) -> None:
+        """Close a pull request without merging."""
+        async with self._client() as client:
+            response = await client.patch(
+                f"/repos/{owner}/{repo}/pulls/{pr_number}",
+                json={"state": "closed"},
+            )
+            await self._raise_for_status(response)
+
     async def post_pr_review(
         self,
         owner: str,

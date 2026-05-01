@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.websocket_dashboard import broadcast
@@ -315,6 +315,44 @@ async def reject_fix(incident_id: str, body: RestartBody = RestartBody()) -> Dic
     incident.pending_fix_critique = None
     incident.human_notes = body.notes or incident.human_notes
     incident.status = IncidentStatus.FIXING
+    incident_store.update(incident)
+    return {"status": "rejected", "incident_id": incident_id}
+
+
+@router.post("/{incident_id}/refix")
+async def approve_refix(incident_id: str, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """
+    Approve re-running fix generation with the code review feedback as human_notes.
+    Only valid when the incident is in AWAITING_REFIX_APPROVAL status.
+    """
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if incident.status != IncidentStatus.AWAITING_REFIX_APPROVAL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Incident is not awaiting re-fix approval (status={incident.status})",
+        )
+    from app.services.incident_loop import incident_loop
+    background_tasks.add_task(incident_loop.refix_from_review, incident_id)
+    return {"status": "refix_queued", "incident_id": incident_id}
+
+
+@router.post("/{incident_id}/reject-refix")
+async def reject_refix(incident_id: str) -> Dict[str, Any]:
+    """
+    Reject re-running the fix — mark the incident as rejected.
+    Only valid when the incident is in AWAITING_REFIX_APPROVAL status.
+    """
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if incident.status != IncidentStatus.AWAITING_REFIX_APPROVAL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Incident is not awaiting re-fix approval (status={incident.status})",
+        )
+    incident.status = IncidentStatus.REJECTED
     incident_store.update(incident)
     return {"status": "rejected", "incident_id": incident_id}
 

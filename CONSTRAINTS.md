@@ -60,6 +60,17 @@ Required changes:
 - `incident_store.list_active()` — add to active set if it should appear in the active feed
 - `get_open_pr_for_error()` — add to the `closed` set if it is a terminal status
 
+**`AWAITING_REFIX_APPROVAL` — code review returned REQUEST_CHANGES, waiting for human go/no-go.**
+- Entered from `_run_post_fix()` when `_extract_review_recommendation(review_text) == "REQUEST_CHANGES"`.
+- `incident.human_notes` is set to the full review text at this point.
+- Exit via `POST /incidents/{id}/refix` (calls `refix_from_review`) or `POST /incidents/{id}/reject-refix`.
+- Not a terminal status — appears in the active feed.
+- The old PR is closed best-effort at the start of `refix_from_review` before creating a new one.
+
+**`_run_post_fix` MUST call `_extract_review_recommendation` before creating the merge approval.**
+If the review is REQUEST_CHANGES, the method sets status to `AWAITING_REFIX_APPROVAL` and returns early
+without creating an `approval_service` merge request.
+
 ---
 
 ## Fix Generation
