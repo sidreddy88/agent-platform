@@ -1,0 +1,12 @@
+FROM node:18
+WORKDIR /app
+
+# Install deps — postinstall downloads the mongodb-memory-server binary into the image layer
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+ENV NODE_ENV=test
+
+CMD ["npm", "test"]
