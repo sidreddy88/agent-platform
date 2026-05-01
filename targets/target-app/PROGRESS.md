@@ -57,13 +57,13 @@ Done when:  <acceptance criterion — specific and verifiable>
 
 ## Next Steps
 
-1. **Push Phase 1 test suite to TargetApp as a draft PR**
+1. **Push harness to TargetApp as a PR**
    - Apply patches: `config-index.patch.md` + `server-export.patch.md`
    - Add devDependencies + scripts from `package-overrides.json` to TargetApp package.json
-   - Commit test files + CI workflow + config.test.json via GitHub API
-   - Open draft PR to TargetApp `master`
-   - Wait for CI green, then convert to ready for review
-   - Done when: CI `test` workflow is green on the PR branch
+   - Commit all harness files (tests, docs, .eslintrc.json, scripts/) via GitHub API
+   - Run `npm test` locally — must be green before opening PR
+   - Open PR to TargetApp `master`
+   - Done when: `npm test` passes locally and PR is open
    - State: **not started**
 
 2. **Open PR to TargetApp for Phase 4 files**
