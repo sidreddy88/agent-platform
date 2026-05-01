@@ -478,6 +478,13 @@ class GitHubService:
 
         return pr_number, pr_url
 
+    async def is_pr_merged(self, owner: str, repo: str, pr_number: int) -> bool:
+        """Return True if the pull request has been merged."""
+        async with self._client() as client:
+            response = await client.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+            await self._raise_for_status(response)
+            return response.json().get("merged_at") is not None
+
     async def close_pull_request(self, owner: str, repo: str, pr_number: int) -> None:
         """Close a pull request without merging."""
         async with self._client() as client:
