@@ -50,6 +50,8 @@ class FixResult:
     commit_sha: str | None = None
     blast_radius_violation: bool = False
     blast_radius_violations: list[str] = field(default_factory=list)
+    target_file: str | None = None
+    target_function: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +421,8 @@ class FixGenerationAgent(BaseAgent):
             files_changed=[file_path] + ([_test_path] if _test_path else []),
             test_added=_test_path is not None,
             commit_sha=commit_sha,
+            target_file=file_path,
+            target_function=function_name,
         ), steps
 
     # ------------------------------------------------------------------

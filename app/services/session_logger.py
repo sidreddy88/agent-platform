@@ -129,6 +129,11 @@ class AgentSession:
             "failure_reason": None,
         }
 
+    def update_fix_target(self, target_file: str | None, target_function: str | None) -> None:
+        if self.fix is not None:
+            self.fix["target_file"] = target_file
+            self.fix["target_function"] = target_function
+
     def log_sandbox_attempt(self, attempt: int, passed: bool, output_tail: str) -> None:
         if self.fix is None:
             self.fix = {"sandbox_attempts": []}

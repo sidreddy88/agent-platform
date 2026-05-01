@@ -267,6 +267,8 @@ class IncidentLoop:
             _sess = session_logger.get(incident.id)
             if _sess:
                 _sess.log_steps(steps)
+                if fix.target_file:
+                    _sess.update_fix_target(fix.target_file, fix.target_function)
             if not fix.pr_url and not fix.blast_radius_violation:
                 logger.error(
                     "[IncidentLoop] FixGenerationAgent failed for %s — steps:\n%s",
