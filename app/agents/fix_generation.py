@@ -208,7 +208,6 @@ class FixGenerationAgent(BaseAgent):
             f"fix/{event.error_type or 'incident'}-{incident.id[:8]}".lower()
             .replace("_", "-")
         )
-        test_candidates, default_test_path = self._test_file_candidates(file_path)
 
         # ── 2. Fetch the file from PR_BASE (staging) ───────────────────
         try:
@@ -270,7 +269,7 @@ class FixGenerationAgent(BaseAgent):
         logger.info("[FixGen] Generated fix")
 
         # ── 3b. Blast radius check ────────────────────────────────────
-        files_to_touch = [file_path, default_test_path]
+        files_to_touch = [file_path]
         additions = len(new_function.splitlines())
         deletions = len(old_function.splitlines())
         br_result = BlastRadiusGuard().check(files_to_touch, additions=additions, deletions=deletions)
@@ -378,7 +377,6 @@ class FixGenerationAgent(BaseAgent):
         pr_number: int | None = None
         pr_url: str | None = None
         commit_sha: str | None = None
-        _test_path: str | None = None
 
         try:
             base_sha = await self._github.get_branch_sha(self._owner, self._repo, PR_BASE)
@@ -391,11 +389,6 @@ class FixGenerationAgent(BaseAgent):
                 branch_name, file_sha,
             )
             steps.append(f"✓ Committed fix (sha={commit_sha[:8]})")
-
-            # ── 5b. Commit test file to same branch ───────────────────────
-            _test_path = await self._commit_test(
-                branch_name, new_function, incident, test_candidates, default_test_path, steps
-            )
 
             pr_number, pr_url = await self._github.create_pull_request(
                 self._owner, self._repo,
@@ -418,8 +411,8 @@ class FixGenerationAgent(BaseAgent):
             pr_number=pr_number,
             branch=branch_name,
             fix_description=f"Fix applied to {function_name} in {file_path}",
-            files_changed=[file_path] + ([_test_path] if _test_path else []),
-            test_added=_test_path is not None,
+            files_changed=[file_path],
+            test_added=False,
             commit_sha=commit_sha,
             target_file=file_path,
             target_function=function_name,

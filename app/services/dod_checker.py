@@ -7,7 +7,6 @@ attached to the incident for debugging.
 
 Checks
 ------
-fix_test_written        A test file is present in the PR diff.
 pr_has_confidence_score PR carries a confidence score from DiagnosisAgent.
 pr_linked_to_issue      A GitHub issue URL was created and linked to the PR.
 monitor_pr_map_updated  monitor_pr_map has an entry for the incident's monitor_id.
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFINITION_OF_DONE: dict[str, str] = {
-    "fix_test_written":        "A test file is present in the PR diff",
     "pr_has_confidence_score": "PR description contains confidence score from DiagnosisAgent",
     "pr_linked_to_issue":      "PR body references the GitHub issue URL",
     "monitor_pr_map_updated":  "monitor_pr_map table has an entry for this incident's monitor_id",
@@ -46,18 +44,6 @@ class DefinitionOfDoneChecker:
       incident.issue_url         — GitHub issue URL (None if not created)
       incident.monitor_id        — resource_id of the triggering monitor (None = manual)
     """
-
-    async def check_fix_test_written(
-        self, incident: IncidentState
-    ) -> tuple[bool, str]:
-        files = incident.pr_files_changed
-        test_files = [
-            f for f in files
-            if "test" in f.lower() or "spec" in f.lower()
-        ]
-        if test_files:
-            return True, f"Test file found: {test_files[0]}"
-        return False, f"No test file in PR diff. Files changed: {files or '(empty)'}"
 
     async def check_pr_has_confidence_score(
         self, incident: IncidentState
@@ -132,13 +118,11 @@ class DefinitionOfDoneChecker:
         )
 
         (
-            fix_test,
             confidence,
             linked_issue,
             blast_radius,
             monitor_pr,
         ) = await asyncio.gather(
-            self.check_fix_test_written(incident),
             self.check_pr_has_confidence_score(incident),
             self.check_pr_linked_to_issue(incident),
             self.check_blast_radius_respected(incident),
@@ -146,7 +130,6 @@ class DefinitionOfDoneChecker:
         )
 
         return {
-            "fix_test_written":        fix_test,
             "pr_has_confidence_score": confidence,
             "pr_linked_to_issue":      linked_issue,
             "blast_radius_respected":  blast_radius,

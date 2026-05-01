@@ -383,14 +383,10 @@ class TestFixGenerationBlastRadius:
         # get_file_contents calls (in order):
         #   1. _resolve_target verification
         #   2. main file fetch
-        #   3-5. _commit_test candidate checks (all 404 → creates new test file)
         agent._github.get_file_contents = AsyncMock(
             side_effect=[
                 (old_fn, "sha123"),
                 (old_fn, "sha123"),
-                GitHubError(404, "not found"),
-                GitHubError(404, "not found"),
-                GitHubError(404, "not found"),
             ]
         )
         agent._github.create_issue = AsyncMock(return_value=(10, "https://github.com/org/repo/issues/10"))
@@ -400,11 +396,10 @@ class TestFixGenerationBlastRadius:
         agent._github.create_pull_request = AsyncMock(return_value=(11, "https://github.com/org/repo/pull/11"))
 
         agent._llm = MagicMock()
-        # LLM calls (in order): 1. _generate_fix  2. _critique_fix  3. _generate_test
+        # LLM calls (in order): 1. _generate_fix  2. _critique_fix
         agent._llm.complete = AsyncMock(side_effect=[
             f"<OLD>\n{old_fn}\n</OLD>\n<NEW>\n{new_fn}\n</NEW>",
             "LOOKS CORRECT",
-            "// jest test",
         ])
 
         with patch("app.agents.fix_generation.BlastRadiusGuard") as MockGuard, \
