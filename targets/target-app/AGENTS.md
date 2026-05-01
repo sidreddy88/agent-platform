@@ -1,0 +1,121 @@
+# TargetApp — Agent Guide
+
+## What This Platform Is
+
+Multi-brand magazine interview platform. Readers submit interview responses via a web form.
+Content is moderated (keyword filter + OpenAI), reviewed by an admin, then published to
+WordPress and S3. Multiple brands are served from a single codebase.
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js 18 + Express |
+| Database | MongoDB (Mongoose ODM) |
+| Config | nconf (`config/index.js`) |
+| Auth | JWT (`authenticateToken` middleware) |
+| AI | OpenAI (content moderation via `validationOpenAI`) |
+| Storage | AWS S3 (interview images) |
+| Publishing | WordPress REST API |
+| Frontend | React (`client/`) |
+
+## Key Architectural Pattern — MODEL_MAP
+
+Each brand has its own Mongoose model. The `MODEL_MAP` object routes operations to
+the correct model by brand key:
+
+```js
+const MODEL_MAP = {
+  inspiring: MasterInspiring,
+  brandA: MasterBrandA,
+  cr: MasterBrandC,
+  brandb: MasterBrandB,
+};
+```
+
+The same pattern appears in `REFERRAL_MODEL_MAP` and the `PublishingApps` array in
+`routes/services/interview-user-service.js`. Adding a brand requires updating all three.
+See `docs/MULTI_BRAND.md` for the full checklist.
+
+## Content Moderation Pipeline
+
+`hardBlock()` runs first (free, keyword-based). Only if it passes does `classifyFields()`
+call OpenAI (costs money). Never swap this order. See `docs/CONTENT_MODERATION.md`.
+
+## Running Locally
+
+```bash
+npm install
+npm run dev          # starts Express server
+
+cd client
+npm install
+npm start            # starts React dev server
+```
+
+## Running Tests (from this harness directory)
+
+```bash
+npm run check        # runs all tests
+npm test             # jest --forceExit
+```
+
+Tests live in `tests/` alongside this file. They are authored to run from the TargetApp
+repo root (relative imports like `../../constants/helperFunctions`).
+
+## Topic Docs
+
+| Topic | File |
+|---|---|
+| Production safety rules + architectural invariants | `CONSTRAINTS.md` |
+| Architectural decisions with rationale | `DECISIONS.md` |
+| Deferred features with pre-conditions | `FUTURE.md` |
+| End-to-end publish pipeline | `docs/PUBLISH_PIPELINE.md` |
+| How to add a new brand | `docs/MULTI_BRAND.md` |
+| Content moderation architecture | `docs/CONTENT_MODERATION.md` |
+| Session handoff + bootstrap contract | `PROGRESS.md` |
+| Module health grades | `QUALITY.md` |
+
+---
+
+## Work Rules
+
+1. **WIP=1.** Work on exactly one task at a time. Finish (tests passing, PR open) before
+   starting the next.
+
+2. **Sprint contract before non-trivial work.** Write this before touching any code:
+   ```
+   Scope:      <exactly what files/functions will change>
+   Exclusions: <what will NOT change>
+   Done when:  <acceptance criterion — specific and verifiable>
+   ```
+
+3. **Do not expand scope mid-task.** If you discover related work, record it in PROGRESS.md
+   under Next Steps and finish the current task first.
+
+4. **Verification order.** A task is done only when:
+   - `npm run lint` passes (Phase 4+)
+   - `npm test` passes — no new failures
+   - New behavior has at least one test
+   - No CONSTRAINTS.md violations
+   - Only files in the sprint contract scope were modified
+
+5. **PR discipline.**
+   - Run `npm test` locally before opening a PR. All tests must pass.
+   - Open PR only when tests are green.
+   - Never merge to master yourself — a human reviews and merges.
+
+6. **Commit discipline.**
+   - One commit per logical unit of work (not one commit per session).
+   - Format: `type: what was done and why` (feat/fix/test/docs).
+   - Never bundle unrelated changes in one commit.
+
+7. **PROGRESS.md is the single source of truth.** Update it at the start and end of every
+   session. Do not maintain a parallel list anywhere else.
+
+8. **Session exit checklist** (verify all five before ending a session):
+   - [ ] `npm test` passes — no new failures
+   - [ ] PROGRESS.md "Current State" is accurate
+   - [ ] "Next Steps" has a concrete first action
+   - [ ] No debug `console.log` or temp files in modified code
+   - [ ] Active branch has a PR open, or next step recorded in In Progress
