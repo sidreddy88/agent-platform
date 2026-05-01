@@ -159,7 +159,20 @@ class SandboxService:
         for fname in ("Dockerfile.test", "docker-compose.test.yml"):
             shutil.copy2(_TARGETS_DIR / fname, Path(workdir) / fname)
 
+    def _docker_available(self) -> bool:
+        try:
+            result = subprocess.run(
+                ["docker", "info"], capture_output=True, timeout=5
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
     def _run_docker(self, workdir: str) -> SandboxResult:
+        if not self._docker_available():
+            logger.warning("[Sandbox] Docker daemon not available — falling back to direct npm test")
+            return self._run_npm_direct(workdir)
+
         compose_cmd = ["docker", "compose", "-f", "docker-compose.test.yml"]
         try:
             result = subprocess.run(
@@ -172,10 +185,10 @@ class SandboxService:
             )
             output = result.stdout + result.stderr
             passed = result.returncode == 0
-            logger.info("[Sandbox] Tests %s (exit %d)", "PASSED" if passed else "FAILED", result.returncode)
+            logger.info("[Sandbox] Tests %s via Docker (exit %d)", "PASSED" if passed else "FAILED", result.returncode)
             return SandboxResult(passed=passed, output=output)
         except subprocess.TimeoutExpired:
-            logger.error("[Sandbox] Timed out after 5 minutes")
+            logger.error("[Sandbox] Docker timed out after 5 minutes")
             return SandboxResult(passed=False, output="", error="Sandbox timed out after 5 minutes")
         finally:
             subprocess.run(
@@ -183,3 +196,25 @@ class SandboxService:
                 capture_output=True, cwd=workdir,
             )
             logger.info("[Sandbox] Docker compose torn down")
+
+    def _run_npm_direct(self, workdir: str) -> SandboxResult:
+        """Run npm install + npm test directly without Docker."""
+        import os
+        env = {**os.environ, "NODE_ENV": "test"}
+
+        install = subprocess.run(
+            ["npm", "install"],
+            capture_output=True, text=True, cwd=workdir, timeout=180, env=env,
+        )
+        if install.returncode != 0:
+            logger.error("[Sandbox] npm install failed")
+            return SandboxResult(passed=False, output=install.stderr, error="npm install failed")
+
+        result = subprocess.run(
+            ["npm", "test"],
+            capture_output=True, text=True, cwd=workdir, timeout=180, env=env,
+        )
+        output = result.stdout + result.stderr
+        passed = result.returncode == 0
+        logger.info("[Sandbox] Tests %s via direct npm test (exit %d)", "PASSED" if passed else "FAILED", result.returncode)
+        return SandboxResult(passed=passed, output=output)
