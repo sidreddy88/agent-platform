@@ -55,6 +55,8 @@ export function useDashboardWS() {
         setPendingEvents((prev) => prev.filter((e) => e.id !== msg.id));
       } else if (msg.type === "pending_events_cleared") {
         setPendingEvents([]);
+      } else if (msg.type === "incidents_cleared") {
+        setIncidents(msg.incidents);
       }
     };
 
