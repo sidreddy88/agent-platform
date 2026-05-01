@@ -1,7 +1,19 @@
 services:
+  mongo:
+    image: mongo:6
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   app:
     build:
       context: .
       dockerfile: Dockerfile.test
     environment:
       - NODE_ENV=test
+      - MONGO_URI=mongodb://mongo:27017/target-app_test
+    depends_on:
+      mongo:
+        condition: service_healthy

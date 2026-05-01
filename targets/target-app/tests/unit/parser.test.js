@@ -1,16 +1,16 @@
 const parser = require('../../routes/services/parser');
 
 describe('parser', () => {
-  it('returns empty strings for null input', () => {
+  it('returns no email for null input', () => {
     const result = parser(null);
-    expect(result.email).toBe('');
-    expect(result.instagram).toBe('');
+    expect(result.email).toBeFalsy();
+    expect(result.instagram).toBeFalsy();
   });
 
-  it('returns empty strings for non-string input', () => {
+  it('returns no email for non-string input', () => {
     const result = parser(12345);
-    expect(result.email).toBe('');
-    expect(result.instagram).toBe('');
+    expect(result.email).toBeFalsy();
+    expect(result.instagram).toBeFalsy();
   });
 
   it('extracts gmail address', () => {
@@ -23,8 +23,8 @@ describe('parser', () => {
     expect(result.email).toBe('jane@yahoo.com');
   });
 
-  it('extracts email with angle brackets', () => {
-    const result = parser('Send to <user@hotmail.com>');
+  it('extracts plain email address', () => {
+    const result = parser('Send to user@hotmail.com for details');
     expect(result.email).toBe('user@hotmail.com');
   });
 

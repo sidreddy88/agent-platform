@@ -1,12 +1,17 @@
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
 
 let mongod;
 
 async function connect() {
-  mongod = await MongoMemoryServer.create();
-  const uri = mongod.getUri();
-  await mongoose.connect(uri);
+  if (process.env.MONGO_URI) {
+    // Docker environment: connect to real MongoDB container
+    await mongoose.connect(process.env.MONGO_URI);
+  } else {
+    // Local environment: spin up in-memory MongoDB
+    const { MongoMemoryServer } = require('mongodb-memory-server');
+    mongod = await MongoMemoryServer.create();
+    await mongoose.connect(mongod.getUri());
+  }
 }
 
 async function disconnect() {
