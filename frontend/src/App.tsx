@@ -14,12 +14,13 @@ import { IncidentsPage } from "./components/IncidentsPage";
 import { IncidentsTablePage } from "./components/IncidentsTablePage";
 import { EventApprovalPage } from "./components/EventApprovalPage";
 import { PRsPage } from "./components/PRsPage";
+import { StatsPage } from "./components/StatsPage";
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "logs";
+type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "stats" | "logs";
 
 interface CBInfo { name: string; state: string; failure_count: number; total_rejected: number }
 
@@ -69,6 +70,7 @@ export default function App() {
             <button style={tabBtn(tab === "incidents")} onClick={() => setTab("incidents")}>Incidents</button>
             <button style={tabBtn(tab === "table")}     onClick={() => setTab("table")}>Table</button>
             <button style={tabBtn(tab === "prs")}       onClick={() => setTab("prs")}>Agent PRs</button>
+            <button style={tabBtn(tab === "stats")}     onClick={() => setTab("stats")}>Stats</button>
             <button style={tabBtn(tab === "logs")}      onClick={() => setTab("logs")}>Logs</button>
           </div>
         </div>
@@ -129,6 +131,7 @@ export default function App() {
           <PRsPage />
         </main>
       )}
+      {tab === "stats" && <StatsPage />}
       {tab === "dashboard" && <main style={main}>
         {loading && !data && (
           <div style={centered}>
