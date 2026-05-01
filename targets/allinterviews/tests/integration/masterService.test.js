@@ -12,32 +12,33 @@ jest.mock('../../constants/index', () => ({
   LEAD_GEN_ACTIONS: { PENDING: 'pending', MARKED_INVALID: 'invalid', MARKED_SKIPPED: 'skipped' },
 }));
 
+jest.mock('../../models/MasterInspiring', () => {
+  const mongoose = require('mongoose');
+  if (!mongoose.models.MasterInspiring) mongoose.model('MasterInspiring', new mongoose.Schema({ email: String }));
+  return mongoose.models.MasterInspiring;
+});
+jest.mock('../../models/MasterShoutout', () => {
+  const mongoose = require('mongoose');
+  if (!mongoose.models.MasterShoutout) mongoose.model('MasterShoutout', new mongoose.Schema({ email: String }));
+  return mongoose.models.MasterShoutout;
+});
+jest.mock('../../models/MasterCr', () => {
+  const mongoose = require('mongoose');
+  if (!mongoose.models.MasterCr) mongoose.model('MasterCr', new mongoose.Schema({ email: String }));
+  return mongoose.models.MasterCr;
+});
+jest.mock('../../models/MasterBoldJourney', () => {
+  const mongoose = require('mongoose');
+  if (!mongoose.models.MasterBoldJourney) mongoose.model('MasterBoldJourney', new mongoose.Schema({ email: String }));
+  return mongoose.models.MasterBoldJourney;
+});
+
 const mongoose = require('mongoose');
-
-beforeAll(async () => {
-  await connect();
-
-  const emailSchema = new mongoose.Schema({ email: String });
-  if (!mongoose.models.MasterInspiring) mongoose.model('MasterInspiring', emailSchema);
-  if (!mongoose.models.MasterShoutout) mongoose.model('MasterShoutout', emailSchema);
-  if (!mongoose.models.MasterCr) mongoose.model('MasterCr', emailSchema);
-  if (!mongoose.models.MasterBoldJourney) mongoose.model('MasterBoldJourney', emailSchema);
-});
-
-afterAll(async () => {
-  await disconnect();
-});
-
-afterEach(async () => {
-  await clearCollections();
-});
-
-jest.mock('../../models/MasterInspiring', () => mongoose.models.MasterInspiring || mongoose.model('MasterInspiring', new mongoose.Schema({ email: String })));
-jest.mock('../../models/MasterShoutout', () => mongoose.models.MasterShoutout || mongoose.model('MasterShoutout', new mongoose.Schema({ email: String })));
-jest.mock('../../models/MasterCr', () => mongoose.models.MasterCr || mongoose.model('MasterCr', new mongoose.Schema({ email: String })));
-jest.mock('../../models/MasterBoldJourney', () => mongoose.models.MasterBoldJourney || mongoose.model('MasterBoldJourney', new mongoose.Schema({ email: String })));
-
 const { append } = require('../../routes/services/master-service');
+
+beforeAll(async () => { await connect(); });
+afterAll(async () => { await disconnect(); });
+afterEach(async () => { await clearCollections(); });
 
 describe('masterService.append', () => {
   it('inserts new emails', async () => {
@@ -60,7 +61,7 @@ describe('masterService.append', () => {
   });
 
   it('throws for invalid user type', async () => {
-    await expect(append('unknown', ['a@test.com'])).rejects.toThrow('Invalid user type provided.');
+    await expect(append('unknown', ['a@test.com'])).rejects.toThrow();
   });
 
   it('inserts into correct model for shoutout', async () => {

@@ -22,6 +22,7 @@ const ALLOW_CLASSIFICATION = {
 };
 
 beforeEach(() => {
+  jest.clearAllMocks();
   moderateText.mockResolvedValue(CLEAN_MODERATION);
   classifyFields.mockResolvedValue(ALLOW_CLASSIFICATION);
 });
