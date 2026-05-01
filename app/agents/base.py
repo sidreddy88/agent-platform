@@ -14,6 +14,7 @@ import re
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # Set this before awaiting any agent to link its runs to an incident in the tracker.
@@ -189,6 +190,36 @@ class BaseAgent:
         self._tools: dict[str, tuple[ToolFn, str]] = {}
         # set by @trace_agent at runtime — no-op sentinel until then
         self._tracing_ctx: TracingContext = TracingContext(trace=None, enabled=False)
+        # Harness docs (AGENTS.md + CONSTRAINTS.md) injected into every LLM call.
+        self._harness_docs: str = self._load_harness_docs()
+
+    @staticmethod
+    def _load_harness_docs() -> str:
+        """Load AGENTS.md and CONSTRAINTS.md from the configured harness path."""
+        try:
+            from app.core.config import settings
+            raw_path = settings.harness_docs_path
+            if not raw_path:
+                return ""
+            p = Path(raw_path)
+            if not p.is_absolute():
+                # Resolve relative to project root (this file is app/agents/base.py)
+                p = Path(__file__).parent.parent.parent / raw_path
+            docs: list[str] = []
+            for filename in ("AGENTS.md", "CONSTRAINTS.md"):
+                fp = p / filename
+                if fp.exists():
+                    docs.append(f"=== {filename} ===\n{fp.read_text()}")
+            return "\n\n".join(docs)
+        except Exception:
+            return ""
+
+    def _with_harness(self, system: str) -> str:
+        """Prepend harness docs to a system prompt so every LLM call sees them."""
+        docs = getattr(self, "_harness_docs", "")
+        if not docs:
+            return system
+        return f"{docs}\n\n---\n\n{system}"
 
     # ------------------------------------------------------------------
     # Tool registration
@@ -225,7 +256,7 @@ class BaseAgent:
         _failed = False
 
         try:
-            system = _build_system_prompt(self._tools)
+            system = self._with_harness(_build_system_prompt(self._tools))
             messages: list[dict] = [{"role": "user", "content": user_input}]
             steps: list[Step] = []
 
