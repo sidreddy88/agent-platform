@@ -1,0 +1,12 @@
+{
+  "_comment": "Additions to apply to AllInterviews package.json when pushing Phase 1 PR",
+  "scripts_to_add": {
+    "test": "NODE_ENV=test jest --forceExit",
+    "check": "npm test"
+  },
+  "devDependencies_to_add": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^9.4.1",
+    "supertest": "^6.3.4"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "port": 5001,
+  "database": {
+    "atlas": {
+      "uri": "mongodb://localhost",
+      "username": "testuser",
+      "password": "testpassword"
+    }
+  },
+  "aws": {
+    "accessKeyId": "TESTACCESSKEYID00000",
+    "secretAccessKey": "TESTsecretaccesskey0000000000000000000000",
+    "region": "us-east-1",
+    "bucket": "test-bucket"
+  }
+}
