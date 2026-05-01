@@ -359,6 +359,20 @@ async def reject_refix(incident_id: str) -> Dict[str, Any]:
     return {"status": "rejected", "incident_id": incident_id}
 
 
+@router.post("/{incident_id}/resolve")
+async def resolve_incident(incident_id: str) -> Dict[str, Any]:
+    """Manually mark an incident as resolved."""
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    incident.status = IncidentStatus.RESOLVED
+    incident.human_decision = "approved"
+    incident.outcome = "manually_resolved"
+    incident.resolved_at = datetime.now(timezone.utc)
+    incident_store.update(incident)
+    return {"status": "resolved", "incident_id": incident_id}
+
+
 @router.post("/{incident_id}/archive")
 async def archive_incident(incident_id: str) -> Dict[str, Any]:
     incident = incident_store.get(incident_id)
