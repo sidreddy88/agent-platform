@@ -494,6 +494,29 @@ class GitHubService:
             )
             await self._raise_for_status(response)
 
+    async def get_commit_checks(self, owner: str, repo: str, ref: str) -> list[dict]:
+        """Return CI check runs for a commit SHA or ref."""
+        try:
+            async with self._client() as client:
+                response = await client.get(
+                    f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
+                    params={"per_page": 100},
+                    headers={"Accept": "application/vnd.github+json"},
+                )
+                await self._raise_for_status(response)
+                data = response.json()
+        except Exception:
+            return []
+        return [
+            {
+                "name": r["name"],
+                "status": r["status"],
+                "conclusion": r.get("conclusion"),
+                "url": r.get("html_url"),
+            }
+            for r in data.get("check_runs", [])
+        ]
+
     async def post_pr_review(
         self,
         owner: str,
