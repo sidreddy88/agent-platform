@@ -376,6 +376,7 @@ class FixGenerationAgent(BaseAgent):
         pr_number: int | None = None
         pr_url: str | None = None
         commit_sha: str | None = None
+        _test_path: str | None = None
 
         try:
             base_sha = await self._github.get_branch_sha(self._owner, self._repo, PR_BASE)
@@ -388,6 +389,11 @@ class FixGenerationAgent(BaseAgent):
                 branch_name, file_sha,
             )
             steps.append(f"✓ Committed fix (sha={commit_sha[:8]})")
+
+            # ── 5b. Commit test file to same branch ───────────────────────
+            _test_path = await self._commit_test(
+                branch_name, new_function, incident, test_candidates, default_test_path, steps
+            )
 
             pr_number, pr_url = await self._github.create_pull_request(
                 self._owner, self._repo,
@@ -410,8 +416,8 @@ class FixGenerationAgent(BaseAgent):
             pr_number=pr_number,
             branch=branch_name,
             fix_description=f"Fix applied to {function_name} in {file_path}",
-            files_changed=[file_path],
-            test_added=False,
+            files_changed=[file_path] + ([_test_path] if _test_path else []),
+            test_added=_test_path is not None,
             commit_sha=commit_sha,
         ), steps
 
@@ -606,14 +612,15 @@ class FixGenerationAgent(BaseAgent):
         test_candidates: list[str],
         default_test_path: str,
         steps: list[str],
-    ) -> bool:
-        """Generate a test for the fixed function and commit it to branch_name."""
+    ) -> str | None:
+        """Generate a test for the fixed function and commit it to branch_name.
+        Returns the committed test file path, or None on failure."""
         try:
             test_code = await self._generate_test(new_function, incident)
         except Exception as exc:
             steps.append(f"⚠ Test generation (LLM) failed: {exc}")
             logger.warning("[FixGen] Test LLM error: %s", exc)
-            return False
+            return None
 
         test_path: str | None = None
         test_sha: str | None = None
@@ -641,11 +648,11 @@ class FixGenerationAgent(BaseAgent):
             )
             steps.append(f"✓ Committed test file (sha={test_commit_sha[:8]})")
             logger.info("[FixGen] Committed test at %s", test_path)
-            return True
+            return test_path
         except GitHubError as exc:
             steps.append(f"⚠ Test commit failed (continuing): {exc}")
             logger.warning("[FixGen] Test commit error: %s", exc)
-            return False
+            return None
 
     async def _generate_test(self, new_function: str, incident: IncidentState) -> str:
         """Use a single LLM call to generate a test for the fixed function."""
