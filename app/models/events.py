@@ -49,6 +49,7 @@ class IncidentStatus(str, Enum):
     NOISE = "noise"         # Triage determined it's not real
     DUPLICATE = "duplicate"  # Existing PR already covers this
     VERIFICATION_FAILED = "verification_failed"  # DoD gate blocked REVIEWING transition
+    AWAITING_REFIX_APPROVAL = "awaiting_refix_approval"  # Code review requested changes — awaiting human go/no-go
 
 
 class IncidentState(BaseModel):
