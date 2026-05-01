@@ -298,4 +298,5 @@ export type WSMessage =
   | { type: "pending_event_added"; event: PendingEvent }
   | { type: "pending_event_removed"; id: string }
   | { type: "pending_events_cleared" }
+  | { type: "incidents_cleared"; incidents: Incident[]; deleted: number }
   | { type: "pong" };

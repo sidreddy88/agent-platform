@@ -182,8 +182,10 @@ async def get_metrics() -> Dict[str, Any]:
 
 @router.delete("")
 async def clear_incidents() -> Dict[str, Any]:
-    """Delete all incidents from the store (memory + disk)."""
+    """Delete all non-resolved incidents from the store (memory + disk). Resolved incidents are preserved."""
     count = incident_store.clear()
+    remaining = [_serialize(i) for i in incident_store.list_all()]
+    await broadcast({"type": "incidents_cleared", "incidents": remaining, "deleted": count})
     return {"deleted": count}
 
 
@@ -355,6 +357,20 @@ async def reject_refix(incident_id: str) -> Dict[str, Any]:
     incident.status = IncidentStatus.REJECTED
     incident_store.update(incident)
     return {"status": "rejected", "incident_id": incident_id}
+
+
+@router.post("/{incident_id}/resolve")
+async def resolve_incident(incident_id: str) -> Dict[str, Any]:
+    """Manually mark an incident as resolved."""
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    incident.status = IncidentStatus.RESOLVED
+    incident.human_decision = "approved"
+    incident.outcome = "manually_resolved"
+    incident.resolved_at = datetime.now(timezone.utc)
+    incident_store.update(incident)
+    return {"status": "resolved", "incident_id": incident_id}
 
 
 @router.post("/{incident_id}/archive")

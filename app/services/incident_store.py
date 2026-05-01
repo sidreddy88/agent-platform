@@ -110,20 +110,28 @@ class IncidentStore:
         return max(candidates, key=lambda i: i.resolved_at or i.detected_at)
 
     def clear(self) -> int:
-        """Delete all incidents. Returns count deleted."""
-        count = len(self._incidents)
-        self._incidents.clear()
-        self._monitor_pr_map.clear()
+        """Delete all non-resolved incidents. Resolved incidents are preserved. Returns count deleted."""
+        to_delete = [
+            i for i in self._incidents.values()
+            if i.status != IncidentStatus.RESOLVED
+        ]
+        if not to_delete:
+            return 0
+        for incident in to_delete:
+            del self._incidents[incident.id]
         conn = get_db()
         try:
-            conn.execute("DELETE FROM incidents")
-            conn.execute("DELETE FROM monitor_pr_map")
+            placeholders = ",".join("?" * len(to_delete))
+            conn.execute(
+                f"DELETE FROM incidents WHERE id IN ({placeholders})",
+                [i.id for i in to_delete],
+            )
             conn.commit()
         except Exception as exc:
             logger.warning("[IncidentStore] DB clear failed: %s", exc)
         finally:
             conn.close()
-        return count
+        return len(to_delete)
 
     # ------------------------------------------------------------------
     # PR idempotency
