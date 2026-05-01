@@ -415,6 +415,11 @@ class IncidentLoop:
         # ── Triage ────────────────────────────────────────────────────
         incident = incident_store.create(event)
         sess = session_logger.start(incident.id, event.title, event.error_type)
+        # Mark harness compliance immediately — docs are loaded once at agent init
+        # and injected into every LLM call for this incident.
+        if self._triage._harness_docs:
+            sess.mark_harness_file_read("AGENTS.md")
+            sess.mark_harness_file_read("CONSTRAINTS.md")
         incident.status = IncidentStatus.TRIAGING
         incident_store.update(incident)
         logger.info("[IncidentLoop] Triaging %s — %s", incident.id, event.title)
@@ -663,6 +668,9 @@ class IncidentLoop:
         _rsess = session_logger.get(incident.id) or session_logger.start(
             incident.id, incident.error_event.title, incident.error_event.error_type
         )
+        if self._fix_agent._harness_docs:
+            _rsess.mark_harness_file_read("AGENTS.md")
+            _rsess.mark_harness_file_read("CONSTRAINTS.md")
         _rsess.log_fix_start(target_file=None, target_function=None)
 
         if incident.error_event.metadata.get("demo"):

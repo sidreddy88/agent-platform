@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     # Target repo for AI-generated fix PRs (owner/repo)
     fix_target_repo: str = "VoyageGroupMag/AllInterviews"
 
+    # Directory containing AGENTS.md + CONSTRAINTS.md to inject into every agent call.
+    # Relative to the project root, or absolute. Set to "" to disable injection.
+    harness_docs_path: str = "targets/allinterviews"
+
     # Monitor generation — set to true to actually provision CloudWatch alarms on PR merge
     create_monitors: bool = False
 

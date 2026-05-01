@@ -480,7 +480,7 @@ class FixGenerationAgent(BaseAgent):
         try:
             fn = await self._llm.complete(
                 messages=[{"role": "user", "content": prompt}],
-                system="Return only the function name as a single word. No explanation.",
+                system=self._with_harness("Return only the function name as a single word. No explanation."),
             )
             return fn.strip().split()[0]
         except Exception:
@@ -613,7 +613,7 @@ class FixGenerationAgent(BaseAgent):
 
         test_code = await self._llm.complete(
             messages=[{"role": "user", "content": prompt}],
-            system=(
+            system=self._with_harness(
                 "You are an engineer writing unit tests. "
                 "Return ONLY the complete test file code, nothing else. "
                 "No markdown, no backticks, no explanation."
@@ -852,7 +852,7 @@ class FixGenerationAgent(BaseAgent):
         try:
             response = await self._llm.complete(
                 messages=[{"role": "user", "content": prompt}],
-                system="You are a senior software engineer who always fixes root causes, never symptoms. Use only <OLD> and <NEW> delimiters as instructed.",
+                system=self._with_harness("You are a senior software engineer who always fixes root causes, never symptoms. Use only <OLD> and <NEW> delimiters as instructed."),
             )
             old_match = re.search(r"<OLD>\s*(.*?)\s*</OLD>", response, re.DOTALL)
             new_match = re.search(r"<NEW>\s*(.*?)\s*</NEW>", response, re.DOTALL)
@@ -933,7 +933,7 @@ class FixGenerationAgent(BaseAgent):
         try:
             return await self._llm.complete(
                 messages=[{"role": "user", "content": prompt}],
-                system="You are a skeptical senior engineer reviewing an AI-generated fix. Be concise and critical.",
+                system=self._with_harness("You are a skeptical senior engineer reviewing an AI-generated fix. Be concise and critical."),
                 model="claude-haiku-4-5-20251001",
             )
         except Exception as exc:
