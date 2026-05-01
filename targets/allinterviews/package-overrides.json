@@ -1,0 +1,15 @@
+{
+  "_comment": "Additions to apply to AllInterviews package.json when pushing harness PRs",
+  "scripts_to_add": {
+    "test": "NODE_ENV=test jest --forceExit",
+    "lint": "eslint routes/ constants/ config/",
+    "arch-check": "node scripts/arch-check.js",
+    "check": "npm run lint && npm test && npm run arch-check"
+  },
+  "devDependencies_to_add": {
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^9.4.1",
+    "supertest": "^6.3.4",
+    "eslint": "^8.57.0"
+  }
+}
