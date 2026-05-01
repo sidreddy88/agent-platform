@@ -20,11 +20,9 @@ If any item fails, fix it before starting new feature work.
 
 ## Current State
 
-Phase 1 test infrastructure authored in `agent-platform/targets/allinterviews/`. Not yet
-pushed to AllInterviews. Phase 2 harness docs also complete in agent-platform.
-
-Tests have not been run against the live AllInterviews codebase yet — they are authored
-to work once pushed to the AllInterviews repo root (relative imports assumed from there).
+All four phases authored in `agent-platform/targets/allinterviews/`. Not yet pushed to
+AllInterviews. Tests are authored to work once pushed to the AllInterviews repo root
+(relative imports assumed from there).
 
 Two source patches documented but not yet applied to AllInterviews:
 - `patches/config-index.patch.md` — add "test" to valid NODE_ENV values
@@ -68,9 +66,9 @@ Done when:  <acceptance criterion — specific and verifiable>
    - Done when: CI `test` workflow is green on the PR branch
    - State: **not started**
 
-2. **Phase 4 — ESLint + arch-check**
-   - Write `.eslintrc.json` and `scripts/arch-check.js` in `targets/allinterviews/`
-   - State: **not started** — pre-condition: Phase 1 PR green
+2. **Open PR to AllInterviews for Phase 4 files**
+   - `.eslintrc.json`, `scripts/arch-check.js` — go in the same PR as Phase 1 or a follow-up
+   - State: **not started**
 
 ---
 
@@ -86,3 +84,5 @@ Done when:  <acceptance criterion — specific and verifiable>
 |---|---|---|
 | Phase 1: 3-layer test suite authored in agent-platform | (not yet pushed) | 14 files, ~700 lines |
 | Phase 2: AGENTS.md, CONSTRAINTS.md, DECISIONS.md, docs/, FUTURE.md | (not yet pushed) | All in agent-platform |
+| Phase 3: PROGRESS.md, QUALITY.md | (not yet pushed) | All in agent-platform |
+| Phase 4: .eslintrc.json, scripts/arch-check.js, package-overrides.json | (not yet pushed) | All in agent-platform |
