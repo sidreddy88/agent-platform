@@ -182,8 +182,10 @@ async def get_metrics() -> Dict[str, Any]:
 
 @router.delete("")
 async def clear_incidents() -> Dict[str, Any]:
-    """Delete all incidents from the store (memory + disk)."""
+    """Delete all non-resolved incidents from the store (memory + disk). Resolved incidents are preserved."""
     count = incident_store.clear()
+    remaining = [_serialize(i) for i in incident_store.list_all()]
+    await broadcast({"type": "incidents_cleared", "incidents": remaining, "deleted": count})
     return {"deleted": count}
 
 
