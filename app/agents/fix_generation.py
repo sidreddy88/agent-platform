@@ -510,25 +510,75 @@ class FixGenerationAgent(BaseAgent):
 
         Strategy (in order):
           1. Stack trace parsing — exact path from log, no LLM needed
-          2. GitHub Code Search — search file contents for the error type string
-          3. Keyword search + full server file list → LLM picks from real candidates
+          2. Function name from error context + GitHub code search for the definition
         """
         # ── 1. Stack trace (fastest, most accurate) ────────────────────
         st_path, st_fn = self._parse_stack_trace(incident)
         if st_path:
-            # Validate the path actually exists in the repo (check against PR_BASE)
             try:
                 await self._github.get_file_contents(self._owner, self._repo, st_path, ref=PR_BASE)
                 logger.info("[FixGen] Stack trace resolved: %s → %s", st_path, st_fn)
-                # If no function name from stack trace, still pass it to let LLM figure out fn
                 return st_path, st_fn or "the function handling this error"
             except Exception:
-                logger.info("[FixGen] Stack trace path '%s' not found in repo — falling back to search", st_path)
+                logger.info("[FixGen] Stack trace path '%s' not found in repo — falling back", st_path)
 
-        # No stack trace → skip fix generation entirely.
-        # Fallback file search produces too many false matches (wrong file, wrong fix).
-        logger.info("[FixGen] No stack trace file found — skipping fix generation")
+        # ── 2. Function name from error context + code search ──────────
+        # AWS SDK and similar library errors throw from inside the library, so the
+        # application function name never appears in the stack trace. It does appear
+        # in the error message ("NoSuchKey in moveAndRemoveFileFromS3") and in the
+        # diagnosis. Extract it and search GitHub for the file that defines it.
+        fn_name = self._extract_function_name_from_error(incident)
+        if fn_name:
+            logger.info("[FixGen] No stack trace — trying code search for function '%s'", fn_name)
+            try:
+                matches = await self._github.search_code(self._owner, self._repo, fn_name)
+                _SKIP = ("node_modules", ".test.", ".spec.", "dist/", "build/", "vendor/", "min.js")
+                candidates = [r["path"] for r in matches if not any(s in r["path"] for s in _SKIP)]
+                for path in candidates[:5]:
+                    try:
+                        content, _ = await self._github.get_file_contents(
+                            self._owner, self._repo, path, ref=PR_BASE
+                        )
+                        # Verify this file actually defines the function (not just calls it)
+                        if self._extract_js_function(content, fn_name):
+                            logger.info("[FixGen] Code search resolved: %s → %s", fn_name, path)
+                            return path, fn_name
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.debug("[FixGen] Code search for '%s' failed: %s", fn_name, exc)
+
+        logger.info("[FixGen] Could not resolve target file/function for incident %s", incident.id)
         return None, None
+
+    def _extract_function_name_from_error(self, incident: IncidentState) -> str | None:
+        """
+        Extract an application function name from the error title, description, or diagnosis.
+
+        Handles patterns like:
+          "NoSuchKey in moveAndRemoveFileFromS3"       → moveAndRemoveFileFromS3
+          "moveAndRemoveFileFromS3 error NoSuchKey"    → moveAndRemoveFileFromS3
+          diagnosis: "moveAndRemoveFileFromS3 function is attempting to..."
+        """
+        text = " ".join(filter(None, [
+            incident.error_event.title or "",
+            incident.error_event.description or "",
+            incident.diagnosis or "",
+        ]))
+        patterns = [
+            r'\bin\s+([a-z][a-zA-Z0-9]{4,})',           # "error in functionName"
+            r'([a-z][a-zA-Z0-9]{4,})\s+(?:error|failed|threw|function\b)',  # "functionName error"
+            r'\bat\s+([a-z][a-zA-Z0-9]{4,})\s*\(',      # "at functionName("
+        ]
+        seen: set[str] = set()
+        _COMMON = {"error", "function", "failed", "undefined", "cannot", "object", "request"}
+        for pattern in patterns:
+            for m in re.finditer(pattern, text, re.IGNORECASE):
+                name = m.group(1)
+                if name.lower() not in _COMMON and name not in seen and len(name) > 4:
+                    seen.add(name)
+                    return name
+        return None
 
     def _test_file_candidates(self, file_path: str) -> tuple[list[str], str]:
         """Derive test file path candidates from the source file path."""
