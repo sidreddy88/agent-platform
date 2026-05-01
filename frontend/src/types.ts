@@ -183,7 +183,9 @@ export type IncidentStatus =
   | "resolved"
   | "rejected"
   | "noise"
-  | "duplicate";
+  | "duplicate"
+  | "verification_failed"
+  | "awaiting_refix_approval";
 
 export interface ErrorEvent {
   id: string;
