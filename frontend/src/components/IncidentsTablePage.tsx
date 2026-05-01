@@ -111,10 +111,12 @@ export function IncidentsTablePage({ incidents }: Props) {
   const [filter, setFilter] = useState<"all" | "active" | "resolved">("all");
   const [agentRunMap, setAgentRunMap] = useState<Record<string, AgentRun[]>>({});
   const [archiving, setArchiving] = useState<string | null>(null);
+  const [resolving, setResolving] = useState<string | null>(null);
   const [wrongFixTarget, setWrongFixTarget] = useState<Incident | null>(null);
   // Local overlay state for archived/wrong_fix (optimistic, until WS update arrives)
   const [localArchived, setLocalArchived] = useState<Set<string>>(new Set());
   const [localWrongFix, setLocalWrongFix] = useState<Set<string>>(new Set());
+  const [localResolved, setLocalResolved] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetch("/api/agents/prs")
@@ -139,15 +141,28 @@ export function IncidentsTablePage({ incidents }: Props) {
     }
   }
 
+  async function handleResolve(id: string) {
+    setResolving(id);
+    try {
+      await fetch(`/incidents/${id}/resolve`, { method: "POST" });
+      setLocalResolved((prev) => new Set(prev).add(id));
+    } finally {
+      setResolving(null);
+    }
+  }
+
   const isArchived = (inc: Incident) => inc.archived || localArchived.has(inc.id);
   const isWrongFix = (inc: Incident) => inc.wrong_fix || localWrongFix.has(inc.id);
+  const isResolved = (inc: Incident) => inc.status === "resolved" || localResolved.has(inc.id);
+
+  const TERMINAL = new Set(["resolved", "noise", "duplicate", "rejected"]);
 
   const visibleIncidents = incidents.filter((i) => !isArchived(i) && !isWrongFix(i));
   const wrongFixIncidents = incidents.filter((i) => isWrongFix(i));
 
   const filtered = visibleIncidents.filter((i) => {
-    if (filter === "active") return !["resolved", "noise", "duplicate", "rejected"].includes(i.status);
-    if (filter === "resolved") return i.status === "resolved";
+    if (filter === "active") return !TERMINAL.has(i.status) && !localResolved.has(i.id);
+    if (filter === "resolved") return isResolved(i);
     return true;
   });
 
@@ -196,7 +211,6 @@ export function IncidentsTablePage({ incidents }: Props) {
             </thead>
             <tbody>
               {filtered.map((inc, i) => {
-                const resolved = inc.status === "resolved";
                 const hasPR = !!inc.pr_url;
                 return (
                   <tr key={inc.id} style={tRow(i % 2 === 0)}>
@@ -239,7 +253,17 @@ export function IncidentsTablePage({ incidents }: Props) {
                     </td>
                     <td style={{ ...td, whiteSpace: "nowrap" as const }}>
                       <div style={{ display: "flex", gap: 4 }}>
-                        {resolved && (
+                        {!TERMINAL.has(inc.status) && !localResolved.has(inc.id) && (
+                          <button
+                            style={actionBtn("#1e3a2a", "#22c55e", resolving === inc.id)}
+                            onClick={() => handleResolve(inc.id)}
+                            disabled={resolving === inc.id}
+                            title="Mark as resolved"
+                          >
+                            {resolving === inc.id ? "…" : "Resolve"}
+                          </button>
+                        )}
+                        {isResolved(inc) && (
                           <button
                             style={actionBtn("#1e3a4a", "#60a5fa", archiving === inc.id)}
                             onClick={() => handleArchive(inc.id)}
