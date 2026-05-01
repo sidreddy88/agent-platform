@@ -2,9 +2,10 @@
 GET  /agents/status  — current agent health snapshot.
 POST /agents/demo    — inject the most recent ECS/CloudWatch error into the pipeline.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.models.events import ErrorEvent, EventSource, IncidentStatus
 from app.services.agent_tracker import agent_tracker
@@ -20,6 +21,11 @@ async def get_agent_status():
     return agent_tracker.snapshot()
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Attach UTC to naive datetimes so arithmetic across tz-aware/naive pairs works."""
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def _utc_iso(dt) -> str | None:
     """Serialize a naive UTC datetime to ISO 8601 with Z suffix."""
     if dt is None:
@@ -31,8 +37,7 @@ def _utc_iso(dt) -> str | None:
 @router.get("/prs")
 async def get_agent_prs():
     """Return one entry per unique PR number, newest first."""
-    skip = {IncidentStatus.DUPLICATE, IncidentStatus.NOISE,
-            IncidentStatus.RESOLVED, IncidentStatus.REJECTED}
+    skip = {IncidentStatus.DUPLICATE, IncidentStatus.NOISE}
 
     # Collect all qualifying incidents, then deduplicate by pr_number
     # keeping only the most recent incident per PR.
@@ -88,7 +93,7 @@ async def get_pr_stats():
 
     resolved = [
         i for i in incident_store.list_all()
-        if i.status == IncidentStatus.RESOLVED and i.pr_number
+        if i.status == IncidentStatus.RESOLVED and (i.pr_number or i.pr_url)
     ]
 
     results = []
@@ -98,7 +103,7 @@ async def get_pr_stats():
         mttd_seconds = None
         if incident.pr_created_at and incident.detected_at:
             mttd_seconds = round(
-                (incident.pr_created_at - incident.detected_at).total_seconds(), 1
+                (_as_utc(incident.pr_created_at) - _as_utc(incident.detected_at)).total_seconds(), 1
             )
 
         pr_description = None
@@ -165,6 +170,44 @@ async def get_pr_stats():
     }
 
     return {"prs": results, "summary": summary}
+
+
+class RunNoteBody(BaseModel):
+    note: str
+    mark_failed: bool = False
+
+
+@router.post("/runs/{run_id}/note")
+async def annotate_run(run_id: str, body: RunNoteBody):
+    """
+    Attach a human-written note to an agent run and optionally mark it as failed.
+    Works on any run — completed or already failed.
+    Persists to the agent_runs table so it survives restarts.
+    """
+    from app.services.database import get_db
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Run not found")
+        new_status = "failed" if body.mark_failed else row["status"]
+        conn.execute(
+            "UPDATE agent_runs SET error_message = ?, status = ? WHERE run_id = ?",
+            (body.note.strip(), new_status, run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Keep in-memory history in sync
+    for run in agent_tracker._history:
+        if run.run_id == run_id:
+            run.error_message = body.note.strip()
+            if body.mark_failed:
+                run.status = "failed"
+            break
+
+    return {"status": "updated", "run_id": run_id}
 
 
 @router.post("/demo")
