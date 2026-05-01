@@ -83,12 +83,6 @@ and silently leaves the mock unapplied.
 loop._fix_agent.fix_with_steps = AsyncMock(return_value=(fix_result, []))
 ```
 
-**MUST call `_commit_test` inside `fix_with_steps` after the fix commit and before PR creation.**
-The `fix_test_written` DoD check looks for a test file in `incident.pr_files_changed`.
-If `_commit_test` is not called (or called after `create_pull_request`), that check
-always fails with "No test file in PR diff" and every incident ends at `dod_failed`.
-The returned path from `_commit_test` must be appended to `files_changed` in `FixResult`.
-
 **MUST NOT use error-type strings as code search queries.**
 Code search by error type string (e.g. "S3_NO_SUCH_KEY", "ECS_ERROR") produces false
 positives — the string appears in logs, comments, and unrelated files. Function-name
