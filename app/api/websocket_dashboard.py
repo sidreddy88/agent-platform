@@ -51,7 +51,7 @@ async def dashboard_ws(websocket: WebSocket) -> None:
             "type": "init",
             "incidents": [
                 {**i.model_dump(mode="json"), "mttr_seconds": i.mttr_seconds, "age_seconds": i.age_seconds}
-                for i in incident_store.list_active()
+                for i in incident_store.list_all()
             ],
             "metrics": incident_store.metrics(),
             "queue": event_queue.stats,
