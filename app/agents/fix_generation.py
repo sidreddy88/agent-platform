@@ -286,6 +286,22 @@ class FixGenerationAgent(BaseAgent):
         steps.append(f"✓ Self-critique: {critique[:120]}")
         logger.info("[FixGen] Self-critique: %s", critique[:200])
 
+        # ── 3d. Sandbox validation — run tests against the fix ─────────
+        new_content = content.replace(old_function, new_function, 1)
+        if new_content == content:
+            new_content = content.replace(old_function.strip(), new_function.strip(), 1)
+
+        from app.services.sandbox import SandboxService
+        sandbox_result = await SandboxService().run({file_path: new_content}, incident.id)
+        if not sandbox_result.passed:
+            tail = sandbox_result.output[-600:] if sandbox_result.output else ""
+            reason = sandbox_result.error or "tests failed"
+            steps.append(f"✗ Sandbox tests failed ({reason})\n{tail}")
+            logger.warning("[FixGen] Sandbox failed for incident %s: %s", incident.id, reason)
+            return _fail(f"Sandbox tests failed: {reason}", branch=branch_name)
+        steps.append("✓ Sandbox tests passed")
+        logger.info("[FixGen] Sandbox passed for incident %s", incident.id)
+
         # ── 4. Create GitHub Issue ─────────────────────────────────────
         issue_url: str | None = None
         issue_number: int | None = None
@@ -314,9 +330,7 @@ class FixGenerationAgent(BaseAgent):
             logger.warning("[FixGen] Issue creation failed: %s", exc)
 
         # ── 5. Commit fix and open PR ──────────────────────────────────
-        new_content = content.replace(old_function, new_function, 1)
-        if new_content == content:
-            new_content = content.replace(old_function.strip(), new_function.strip(), 1)
+        # new_content already computed in step 3d
 
         pr_body = (
             f"## Summary\n"
