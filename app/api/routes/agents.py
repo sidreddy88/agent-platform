@@ -71,6 +71,102 @@ async def get_agent_prs():
     return {"prs": prs, "total": len(prs)}
 
 
+@router.get("/pr-stats")
+async def get_pr_stats():
+    """
+    Return enriched stats for all resolved agent PRs.
+
+    Fetches PR description and CI check results from GitHub for each PR.
+    GitHub calls are best-effort — fields are null if the API is unreachable.
+    """
+    from app.core.config import settings
+    from app.services.github import GitHubService
+
+    fix_repo = getattr(settings, "fix_target_repo", "")
+    owner, repo = fix_repo.split("/", 1) if "/" in fix_repo else ("", "")
+    gh = GitHubService()
+
+    resolved = [
+        i for i in incident_store.list_all()
+        if i.status == IncidentStatus.RESOLVED and i.pr_number
+    ]
+
+    results = []
+    for incident in resolved:
+        event = incident.error_event
+
+        mttd_seconds = None
+        if incident.pr_created_at and incident.detected_at:
+            mttd_seconds = round(
+                (incident.pr_created_at - incident.detected_at).total_seconds(), 1
+            )
+
+        pr_description = None
+        ci_conclusion = None
+        ci_checks: list[dict] = []
+
+        if owner and incident.pr_number:
+            try:
+                pr_details = await gh.get_pr(owner, repo, incident.pr_number)
+                pr_description = pr_details.description
+
+                ci_checks = await gh.get_commit_checks(owner, repo, pr_details.head_sha)
+                if ci_checks:
+                    conclusions = {c["conclusion"] for c in ci_checks if c["conclusion"]}
+                    if "failure" in conclusions or "timed_out" in conclusions:
+                        ci_conclusion = "failure"
+                    elif conclusions and conclusions <= {"success", "skipped", "neutral"}:
+                        ci_conclusion = "success"
+                    else:
+                        ci_conclusion = "pending"
+            except Exception:
+                pass
+
+        log_source = (
+            event.metadata.get("log_group")
+            or event.resource_id
+            or None
+        )
+
+        results.append({
+            "incident_id": incident.id,
+            "pr_url": incident.pr_url,
+            "pr_number": incident.pr_number,
+            "service": event.service,
+            "severity": str(event.severity).split(".")[-1] if event.severity else None,
+            "error_title": event.title,
+            "error_description": event.description,
+            "log_source": log_source,
+            "files_changed": incident.pr_files_changed,
+            "pr_description": pr_description,
+            "diagnosis": incident.diagnosis,
+            "confidence": incident.confidence,
+            "detected_at": _utc_iso(incident.detected_at),
+            "pr_created_at": _utc_iso(incident.pr_created_at),
+            "resolved_at": _utc_iso(incident.resolved_at),
+            "mttd_seconds": mttd_seconds,
+            "mttr_seconds": incident.mttr_seconds,
+            "ci_conclusion": ci_conclusion,
+            "ci_checks": ci_checks,
+        })
+
+    mttrs = [r["mttr_seconds"] for r in results if r["mttr_seconds"] is not None]
+    confs = [r["confidence"] for r in results if r["confidence"] is not None]
+    ci_done = [r for r in results if r["ci_conclusion"] in ("success", "failure")]
+
+    summary = {
+        "total": len(results),
+        "avg_mttr_seconds": round(sum(mttrs) / len(mttrs), 1) if mttrs else None,
+        "avg_confidence": round(sum(confs) / len(confs), 3) if confs else None,
+        "ci_pass_rate": (
+            round(sum(1 for r in ci_done if r["ci_conclusion"] == "success") / len(ci_done), 3)
+            if ci_done else None
+        ),
+    }
+
+    return {"prs": results, "summary": summary}
+
+
 @router.post("/demo")
 async def run_demo():
     """
