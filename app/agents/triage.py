@@ -58,7 +58,7 @@ def _parse_triage_result(answer: str) -> TriageResult:
                 decision=data.get("decision", "real"),
                 severity=data.get("severity", "P2"),
                 blast_radius=data.get("blast_radius", "unknown"),
-                occurrences_24h=int(data.get("occurrences_24h", 0)),
+                occurrences_24h=int(data.get("occurrences_24h") or 0),
                 duplicate_pr=data.get("duplicate_pr"),
                 reasoning=data.get("reasoning", ""),
             )
