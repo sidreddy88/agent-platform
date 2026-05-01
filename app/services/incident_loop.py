@@ -923,8 +923,64 @@ class IncidentLoop:
         _rsess.log_fix_outcome(pr_url=fix.pr_url, pr_number=fix.pr_number, blast_radius_violation=False, failure_reason=None)
         session_logger.finish(incident.id, "pr_created")
 
+    async def _check_merged_prs(self) -> None:
+        """
+        Poll GitHub for AWAITING_APPROVAL incidents whose PR has since been merged.
+        Auto-resolves them so the status clears without requiring the Slack approve link.
+        Runs every ~60 s from run_forever.
+        """
+        waiting = [
+            i for i in incident_store.list_all()
+            if i.status == IncidentStatus.AWAITING_APPROVAL and i.pr_number is not None
+        ]
+        if not waiting:
+            return
+        try:
+            from app.services.github import GitHubService
+            owner, repo = settings.fix_target_repo.split("/", 1)
+            gh = GitHubService()
+        except Exception as exc:
+            logger.debug("[IncidentLoop] _check_merged_prs: GitHub init failed: %s", exc)
+            return
+        for incident in waiting:
+            try:
+                merged = await gh.is_pr_merged(owner, repo, incident.pr_number)
+            except Exception as exc:
+                logger.debug(
+                    "[IncidentLoop] _check_merged_prs: could not check PR #%s: %s",
+                    incident.pr_number, exc,
+                )
+                continue
+            if not merged:
+                continue
+            incident.human_decision = "approved"
+            incident.outcome = "fix_merged"
+            incident.status = IncidentStatus.RESOLVED
+            incident.resolved_at = datetime.now(timezone.utc)
+            incident_store.update(incident)
+            logger.info(
+                "[IncidentLoop] PR #%s merged on GitHub — auto-resolved %s",
+                incident.pr_number, incident.id,
+            )
+            if incident.approval_id:
+                try:
+                    approval_service.approve(incident.approval_id, "github_merged")
+                except Exception:
+                    pass
+            try:
+                from app.services.golden_dataset_builder import golden_dataset_builder
+                golden_dataset_builder.capture(incident)
+            except Exception:
+                pass
+            try:
+                from app.services.rag import RAGService
+                asyncio.ensure_future(RAGService().index_incident(incident))
+            except Exception:
+                pass
+
     async def run_forever(self) -> None:
         self._running = True
+        _poll_tick = 0
         logger.info("[IncidentLoop] Started — waiting for events")
         while self._running:
             try:
@@ -932,6 +988,10 @@ class IncidentLoop:
                 asyncio.create_task(self._process(event))
                 event_queue.task_done()
             except asyncio.TimeoutError:
+                _poll_tick += 1
+                if _poll_tick >= 12:   # every ~60s (12 × 5s timeouts)
+                    _poll_tick = 0
+                    asyncio.create_task(self._check_merged_prs())
                 continue
             except Exception as exc:
                 logger.error("[IncidentLoop] Queue consumer error: %s", exc)
