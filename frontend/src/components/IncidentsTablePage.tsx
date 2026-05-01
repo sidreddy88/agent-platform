@@ -33,15 +33,16 @@ function shortName(name: string) {
 
 // ── Agent run pills ──────────────────────────────────────────────────────────
 
-function AgentRunPills({ runs }: { runs: AgentRun[] }) {
+function AgentRunPills({ runs, onNote }: { runs: AgentRun[]; onNote: (r: AgentRun) => void }) {
   if (runs.length === 0) return <span style={noData}>—</span>;
   return (
     <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 4 }}>
       {runs.map((r) => (
         <span
           key={r.run_id}
-          title={`${r.agent_name} · ${r.status}${r.duration_ms ? ` · ${dur(r.duration_ms)}` : ""}${r.error_message ? `\n${r.error_message}` : ""}`}
-          style={runPill(r.status)}
+          title={`${r.agent_name} · ${r.status}${r.duration_ms ? ` · ${dur(r.duration_ms)}` : ""}${r.error_message ? `\n${r.error_message}` : ""}\nClick to annotate`}
+          style={{ ...runPill(r.status), cursor: "pointer" }}
+          onClick={() => onNote(r)}
         >
           <span style={runIcon(r.status)}>
             {r.status === "completed" ? "✓" : r.status === "failed" ? "✗" : "•"}
@@ -50,8 +51,72 @@ function AgentRunPills({ runs }: { runs: AgentRun[] }) {
           {r.duration_ms !== null && (
             <span style={runDur}>{dur(r.duration_ms)}</span>
           )}
+          {r.error_message && <span style={runNoteIndicator} title={r.error_message}>✎</span>}
         </span>
       ))}
+    </div>
+  );
+}
+
+// ── Run annotation modal ──────────────────────────────────────────────────────
+
+function RunNoteModal({ run, onClose }: { run: AgentRun; onClose: () => void }) {
+  const [note, setNote] = useState(run.error_message ?? "");
+  const [markFailed, setMarkFailed] = useState(run.status === "failed");
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit() {
+    if (!note.trim()) return;
+    setSaving(true);
+    try {
+      await fetch(`/api/agents/runs/${run.run_id}/note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: note.trim(), mark_failed: markFailed }),
+      });
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={modalOverlay} onClick={onClose}>
+      <div style={modalBox} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ ...modalTitle, color: "#f59e0b" }}>Annotate Agent Run</h3>
+        <p style={modalSub}>
+          <span style={{ color: "#e2e8f0" }}>{run.agent_name}</span>
+          {" · "}{run.run_id}
+          {run.duration_ms !== null && ` · ${(run.duration_ms / 1000).toFixed(1)}s`}
+        </p>
+        <textarea
+          style={notesInput}
+          placeholder="What went wrong? e.g. PR created with no code added"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          rows={4}
+          autoFocus
+        />
+        <label style={checkLabel}>
+          <input
+            type="checkbox"
+            checked={markFailed}
+            onChange={(e) => setMarkFailed(e.target.checked)}
+            style={{ marginRight: 6 }}
+          />
+          Mark run as failed
+        </label>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+          <button style={cancelBtn} onClick={onClose}>Cancel</button>
+          <button
+            style={submitBtn(saving || !note.trim())}
+            onClick={handleSubmit}
+            disabled={saving || !note.trim()}
+          >
+            {saving ? "Saving..." : "Save Note"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -113,6 +178,7 @@ export function IncidentsTablePage({ incidents }: Props) {
   const [archiving, setArchiving] = useState<string | null>(null);
   const [resolving, setResolving] = useState<string | null>(null);
   const [wrongFixTarget, setWrongFixTarget] = useState<Incident | null>(null);
+  const [noteTarget, setNoteTarget] = useState<AgentRun | null>(null);
   // Local overlay state for archived/wrong_fix (optimistic, until WS update arrives)
   const [localArchived, setLocalArchived] = useState<Set<string>>(new Set());
   const [localWrongFix, setLocalWrongFix] = useState<Set<string>>(new Set());
@@ -168,6 +234,9 @@ export function IncidentsTablePage({ incidents }: Props) {
 
   return (
     <div style={container}>
+      {noteTarget && (
+        <RunNoteModal run={noteTarget} onClose={() => setNoteTarget(null)} />
+      )}
       {wrongFixTarget && (
         <WrongFixModal
           incident={wrongFixTarget}
@@ -234,7 +303,7 @@ export function IncidentsTablePage({ incidents }: Props) {
                       )}
                     </td>
                     <td style={{ ...td, minWidth: 160 }}>
-                      <AgentRunPills runs={agentRunMap[inc.id] ?? []} />
+                      <AgentRunPills runs={agentRunMap[inc.id] ?? []} onNote={setNoteTarget} />
                     </td>
                     <td style={td}>
                       {inc.pr_url ? (
@@ -460,6 +529,10 @@ const runDur: React.CSSProperties = {
   fontSize: 9, color: "#475569", marginLeft: 2,
 };
 
+const runNoteIndicator: React.CSSProperties = {
+  fontSize: 9, marginLeft: 3, opacity: 0.7,
+};
+
 const statusPill = (status: string): React.CSSProperties => {
   const colors: Record<string, [string, string]> = {
     resolved:          ["#22c55e", "rgba(34,197,94,0.1)"],
@@ -532,6 +605,11 @@ const notesInput: React.CSSProperties = {
   borderRadius: 6, padding: "10px 12px", color: "#e2e8f0",
   fontSize: 13, resize: "vertical" as const, boxSizing: "border-box" as const,
   fontFamily: "inherit",
+};
+
+const checkLabel: React.CSSProperties = {
+  display: "flex", alignItems: "center", fontSize: 12, color: "#94a3b8",
+  cursor: "pointer", marginTop: 10,
 };
 
 const cancelBtn: React.CSSProperties = {

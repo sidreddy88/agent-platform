@@ -132,7 +132,7 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
             {scanning ? "Scanning..." : "Scan Last 24h"}
           </button>
           <button style={clearBtn(clearing)} onClick={handleClear} disabled={clearing}>
-            {clearing ? "Clearing..." : "Clear All"}
+            {clearing ? "Clearing..." : "Clear Non-Resolved"}
           </button>
         </div>
       </div>
