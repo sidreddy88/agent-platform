@@ -296,20 +296,28 @@ class TestFixGenerationBlastRadius:
         from app.agents.fix_generation import FixGenerationAgent
         from app.models.events import ErrorEvent, EventSource, IncidentState
 
+        # Stack trace in description so Strategy 1 (_parse_stack_trace) resolves the target
+        # without needing an LLM call or GitHub code search.
         event = ErrorEvent(
             source=EventSource.CLOUDWATCH,
             error_type="S3_NO_SUCH_KEY",
             title="test",
-            description="test",
+            description=(
+                "NoSuchKey: The specified key does not exist.\n"
+                "    at moveAndRemoveFileFromS3 (/app/routes/services/image.js:42:5)"
+            ),
             service="image-service",
         )
         incident = IncidentState(error_event=event)
         incident.diagnosis = "NoSuchKey in S3"
         incident.confidence = 0.85
 
+        _file_content = "function moveAndRemoveFileFromS3() {}"
+
         agent = FixGenerationAgent.__new__(FixGenerationAgent)
         agent._github = MagicMock()
         agent._llm = MagicMock()
+        agent._rag = None
         agent._owner = "org"
         agent._repo = "repo"
 
@@ -323,13 +331,12 @@ class TestFixGenerationBlastRadius:
             )
             MockGuard.return_value = mock_instance
 
-            # Also mock the LLM and GitHub calls that happen before the blast radius check
             agent._github.get_default_branch = AsyncMock(return_value="main")
-            agent._github.get_file_contents = AsyncMock(
-                return_value=("function moveAndRemoveFileFromS3() {}", "abc123")
-            )
-            agent._llm = MagicMock()
-            agent._llm.complete = AsyncMock(return_value="async function moveAndRemoveFileFromS3() { try {} catch(e) {} }")
+            agent._github.get_file_contents = AsyncMock(return_value=(_file_content, "abc123"))
+            agent._llm.complete = AsyncMock(return_value=(
+                f"<OLD>\n{_file_content}\n</OLD>\n"
+                "<NEW>\nasync function moveAndRemoveFileFromS3() { try {} catch(e) {} }\n</NEW>"
+            ))
 
             result, steps = await agent.fix_with_steps(incident)
 
@@ -347,12 +354,19 @@ class TestFixGenerationBlastRadius:
         """A fix within limits proceeds to PR creation normally."""
         from app.agents.fix_generation import FixGenerationAgent
         from app.models.events import ErrorEvent, EventSource, IncidentState
+        from app.services.github import GitHubError
+
+        old_fn = "async function moveAndRemoveFileFromS3(key) {\n  await s3.copy(key);\n}"
+        new_fn = "async function moveAndRemoveFileFromS3(key) {\n  try {\n    await s3.copy(key);\n  } catch(e) {\n    if (e.code === 'NoSuchKey') return;\n    throw e;\n  }\n}"
 
         event = ErrorEvent(
             source=EventSource.CLOUDWATCH,
             error_type="S3_NO_SUCH_KEY",
             title="test",
-            description="test",
+            description=(
+                "NoSuchKey: The specified key does not exist.\n"
+                "    at moveAndRemoveFileFromS3 (/app/routes/services/image.js:42:5)"
+            ),
             service="image-service",
         )
         incident = IncidentState(error_event=event)
@@ -362,13 +376,23 @@ class TestFixGenerationBlastRadius:
         agent = FixGenerationAgent.__new__(FixGenerationAgent)
         agent._owner = "org"
         agent._repo = "repo"
-
-        old_fn = "async function moveAndRemoveFileFromS3(key) {\n  await s3.copy(key);\n}"
-        new_fn = "async function moveAndRemoveFileFromS3(key) {\n  try {\n    await s3.copy(key);\n  } catch(e) {\n    if (e.code === 'NoSuchKey') return;\n    throw e;\n  }\n}"
+        agent._rag = None
 
         agent._github = MagicMock()
         agent._github.get_default_branch = AsyncMock(return_value="main")
-        agent._github.get_file_contents = AsyncMock(return_value=(old_fn, "sha123"))
+        # get_file_contents calls (in order):
+        #   1. _resolve_target verification
+        #   2. main file fetch
+        #   3-5. _commit_test candidate checks (all 404 → creates new test file)
+        agent._github.get_file_contents = AsyncMock(
+            side_effect=[
+                (old_fn, "sha123"),
+                (old_fn, "sha123"),
+                GitHubError(404, "not found"),
+                GitHubError(404, "not found"),
+                GitHubError(404, "not found"),
+            ]
+        )
         agent._github.create_issue = AsyncMock(return_value=(10, "https://github.com/org/repo/issues/10"))
         agent._github.get_branch_sha = AsyncMock(return_value="deadbeef")
         agent._github.create_branch = AsyncMock()
@@ -376,26 +400,22 @@ class TestFixGenerationBlastRadius:
         agent._github.create_pull_request = AsyncMock(return_value=(11, "https://github.com/org/repo/pull/11"))
 
         agent._llm = MagicMock()
-        # First call: fix generation; second call: test generation
-        agent._llm.complete = AsyncMock(side_effect=[new_fn, "// jest test"])
+        # LLM calls (in order): 1. _generate_fix  2. _critique_fix  3. _generate_test
+        agent._llm.complete = AsyncMock(side_effect=[
+            f"<OLD>\n{old_fn}\n</OLD>\n<NEW>\n{new_fn}\n</NEW>",
+            "LOOKS CORRECT",
+            "// jest test",
+        ])
 
-        # Also need to handle the test commit path
-        from app.services.github import GitHubError
-        agent._github.get_file_contents = AsyncMock(
-            side_effect=[
-                (old_fn, "sha123"),              # main file fetch
-                GitHubError(404, "not found"),   # candidate 1 doesn't exist
-                GitHubError(404, "not found"),   # candidate 2 doesn't exist
-                GitHubError(404, "not found"),   # candidate 3 doesn't exist
-            ]
-        )
+        with patch("app.agents.fix_generation.BlastRadiusGuard") as MockGuard, \
+             patch("app.services.sandbox.SandboxService") as MockSandbox:
+            mock_br = MagicMock()
+            mock_br.check.return_value = MagicMock(allowed=True, violations=[], reason="OK")
+            MockGuard.return_value = mock_br
 
-        with patch("app.agents.fix_generation.BlastRadiusGuard") as MockGuard:
-            mock_instance = MagicMock()
-            mock_instance.check.return_value = MagicMock(
-                allowed=True, violations=[], reason="OK"
-            )
-            MockGuard.return_value = mock_instance
+            mock_sb = MagicMock()
+            mock_sb.run = AsyncMock(return_value=MagicMock(passed=True, output="Tests passed", error=None))
+            MockSandbox.return_value = mock_sb
 
             result, steps = await agent.fix_with_steps(incident)
 
