@@ -101,9 +101,8 @@ repo root (relative imports like `../../constants/helperFunctions`).
    - Only files in the sprint contract scope were modified
 
 5. **PR discipline.**
-   - Open as **draft** PR immediately after first commit.
-   - Wait for CI (`test` workflow) to go green.
-   - Convert draft → ready for review only when CI is green.
+   - Run `npm test` locally before opening a PR. All tests must pass.
+   - Open PR only when tests are green.
    - Never merge to master yourself — a human reviews and merges.
 
 6. **Commit discipline.**

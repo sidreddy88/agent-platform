@@ -62,7 +62,20 @@ test JSON parsing, null handling, and the safe fallback (block) path.
 
 ---
 
-## F5 — Harness Simplification Protocol
+## F5 — GitHub Actions CI on AllInterviews PRs
+
+**What:** Enable the `.github/workflows/test.yml` workflow so tests run automatically
+on every PR to `master`. The workflow file is already authored in
+`agent-platform/targets/allinterviews/.github/workflows/test.yml`.
+
+**Why deferred:** Currently agents run `npm test` locally before opening a PR. CI
+adds a second gate but is not required while the test suite is being proven out.
+
+**Pre-condition:** Tests passing locally across 5+ agent PRs (F1 complete).
+
+---
+
+## F6 — Harness Simplification Protocol
 
 **What:** Monthly review pass to remove constraints and arch-check rules that model
 capability improvements have made unnecessary. Constraints that guard against model
