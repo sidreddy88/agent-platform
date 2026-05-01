@@ -89,7 +89,7 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
   }, [scanLog]);
 
   async function handleClear() {
-    if (!window.confirm("Delete all incidents? This cannot be undone.")) return;
+    if (!window.confirm("Clear all active incidents? Resolved incidents will be preserved.")) return;
     setClearing(true);
     try {
       await fetch("/incidents", { method: "DELETE" });
