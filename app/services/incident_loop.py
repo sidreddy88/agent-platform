@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from app.agents.code_review import CodeReviewAgent
@@ -124,6 +125,35 @@ async def _notify_blast_radius_violation(incident: IncidentState, fix: FixResult
         message=message,
         source="BlastRadiusGuard",
         metadata={"incident_id": incident.id, "violations": fix.blast_radius_violations},
+    ))
+
+
+def _extract_review_recommendation(review_text: str) -> str:
+    """Return 'REQUEST_CHANGES', 'APPROVE', or 'NEEDS_DISCUSSION' from a code review body."""
+    m = re.search(r"\b(REQUEST_CHANGES|APPROVE|NEEDS_DISCUSSION)\b", review_text)
+    return m.group(1) if m else "APPROVE"
+
+
+async def _notify_refix_approval_needed(incident: IncidentState, review_text: str) -> None:
+    event = incident.error_event
+    sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
+    base_url = settings.approval_base_url
+    approve_url = f"{base_url}/incidents/{incident.id}/refix"
+    reject_url = f"{base_url}/incidents/{incident.id}/reject-refix"
+    review_snippet = review_text[:400].strip()
+    message = (
+        f"*Service:* {event.service}  |  *Severity:* {sev_str}\n"
+        f"*PR:* {incident.pr_url or '(unknown)'}\n\n"
+        f"*Code review requested changes:*\n```\n{review_snippet}\n```\n\n"
+        f"<{approve_url}|🔄 Re-run fix with this feedback>  |  <{reject_url}|❌ Reject>\n"
+        f"_Incident:_ {incident.id}"
+    )
+    await alerting_service.send_alert(Alert(
+        severity=AlertSeverity.WARNING,
+        title=f"[{sev_str}] Code review REQUEST_CHANGES — re-run fix? | {event.title}",
+        message=message,
+        source="CodeReviewAgent",
+        metadata={"incident_id": incident.id, "pr_url": incident.pr_url},
     ))
 
 
@@ -630,6 +660,17 @@ class IncidentLoop:
             incident.review_posted = True
             incident_store.update(incident)
 
+        if _extract_review_recommendation(review_text or "") == "REQUEST_CHANGES":
+            incident.human_notes = review_text
+            incident.status = IncidentStatus.AWAITING_REFIX_APPROVAL
+            incident_store.update(incident)
+            await _notify_refix_approval_needed(incident, review_text)
+            logger.info(
+                "[IncidentLoop] %s — REQUEST_CHANGES from code review, awaiting refix approval",
+                incident.id,
+            )
+            return
+
         event = incident.error_event
         sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
         approval_req = await approval_service.request_approval(
@@ -778,6 +819,107 @@ class IncidentLoop:
 
         await _notify_fix_ready(incident, fix, approval_req.id)
         logger.info("[IncidentLoop] %s — approval %s sent to Slack", incident_id, approval_req.id)
+        _rsess.log_fix_outcome(pr_url=fix.pr_url, pr_number=fix.pr_number, blast_radius_violation=False, failure_reason=None)
+        session_logger.finish(incident.id, "pr_created")
+
+    async def refix_from_review(self, incident_id: str) -> None:
+        """Re-run fix generation after a human approves acting on code review REQUEST_CHANGES feedback."""
+        incident = incident_store.get(incident_id)
+        if incident is None:
+            logger.error("[IncidentLoop] refix_from_review: incident %s not found", incident_id)
+            return
+        if incident.status != IncidentStatus.AWAITING_REFIX_APPROVAL:
+            logger.warning(
+                "[IncidentLoop] refix_from_review: %s is not in AWAITING_REFIX_APPROVAL (status=%s)",
+                incident_id, incident.status,
+            )
+            return
+
+        # Close the old PR best-effort so the branch can be reused
+        if incident.pr_number:
+            try:
+                from app.services.github import GitHubService
+                owner, repo = settings.fix_target_repo.split("/", 1)
+                gh = GitHubService()
+                await gh.close_pull_request(owner, repo, incident.pr_number)
+                logger.info("[IncidentLoop] %s — closed old PR #%s", incident_id, incident.pr_number)
+            except Exception as exc:
+                logger.warning("[IncidentLoop] %s — could not close old PR: %s", incident_id, exc)
+
+        # Reset fix fields; keep human_notes (the code review feedback)
+        incident.status = IncidentStatus.FIXING
+        incident.pr_url = None
+        incident.pr_number = None
+        incident.pr_branch = None
+        incident.pr_files_changed = []
+        incident.pr_test_added = False
+        incident.review_posted = False
+        incident_store.update(incident)
+        logger.info("[IncidentLoop] %s — re-running fix with code review feedback", incident_id)
+
+        _rsess = session_logger.get(incident.id) or session_logger.start(
+            incident.id, incident.error_event.title, incident.error_event.error_type
+        )
+        _rsess.log_fix_start(target_file=None, target_function=None)
+
+        fix = await self._run_fix(incident)
+        if fix is None:
+            logger.error("[IncidentLoop] %s — refix failed (fix_agent returned None)", incident_id)
+            session_logger.finish(incident.id, "fix_failed")
+            return
+
+        if fix.blast_radius_violation:
+            incident.fix_attempted = fix.fix_description[:200]
+            incident.status = IncidentStatus.AWAITING_APPROVAL
+            incident_store.update(incident)
+            await _notify_blast_radius_violation(incident, fix)
+            _rsess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=True, failure_reason=fix.fix_description[:200])
+            session_logger.finish(incident.id, "blast_radius_violation")
+            return
+
+        if incident.pending_fix_old and not fix.pr_url:
+            incident.fix_attempted = fix.fix_description[:200]
+            incident.status = IncidentStatus.AWAITING_FIX_APPROVAL
+            incident_store.update(incident)
+            session_logger.finish(incident.id, "awaiting_fix_approval")
+            return
+
+        if not fix.pr_url and not fix.pr_number:
+            incident.fix_attempted = fix.fix_description[:200]
+            incident_store.update(incident)
+            logger.error("[IncidentLoop] %s — refix produced no PR: %s", incident_id, fix.fix_description)
+            _rsess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=False, failure_reason=fix.fix_description[:200])
+            session_logger.finish(incident.id, "fix_failed")
+            return
+
+        incident.pr_url = fix.pr_url
+        incident.pr_number = fix.pr_number
+        incident.pr_branch = fix.branch
+        incident.pr_files_changed = fix.files_changed
+        incident.pr_test_added = fix.test_added
+        incident.fix_attempted = fix.fix_description[:200]
+        incident.fix_description = fix.fix_description
+        incident.issue_url = fix.issue_url
+
+        if fix.pr_url and incident.error_event.error_type:
+            key = (
+                f"{incident.error_event.error_type}"
+                f":{incident.error_event.service}"
+                f":{incident.error_event.description[:100]}"
+            )
+            incident_store.set_pr_for_resource(key, fix.pr_url)
+            if incident.monitor_id:
+                incident_store.set_pr_for_resource(incident.monitor_id, fix.pr_url)
+
+        if not await _apply_dod_gate(incident):
+            session_logger.finish(incident.id, "dod_failed")
+            return
+
+        incident.status = IncidentStatus.REVIEWING
+        incident_store.update(incident)
+
+        logger.info("[IncidentLoop] %s — refix PR created: %s — running CodeReviewAgent", incident_id, fix.pr_url)
+        await self._run_post_fix(incident, fix)
         _rsess.log_fix_outcome(pr_url=fix.pr_url, pr_number=fix.pr_number, blast_radius_violation=False, failure_reason=None)
         session_logger.finish(incident.id, "pr_created")
 
