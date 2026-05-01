@@ -1,5 +1,4 @@
 const { connect, disconnect, clearCollections } = require('../helpers/db');
-const mongoose = require('mongoose');
 
 jest.mock('../../constants/index', () => ({
   INSPIRING_APP: 'inspiring',
@@ -13,72 +12,73 @@ jest.mock('../../constants/index', () => ({
   LEAD_GEN_ACTIONS: { PENDING: 'pending', MARKED_INVALID: 'invalid', MARKED_SKIPPED: 'skipped' },
 }));
 
-const trashSchema = new mongoose.Schema({ nameOrEmail: String, type: String });
-const doNotContactSchema = new mongoose.Schema({ email: String });
-const masterSchema = new mongoose.Schema({ email: String });
-
 jest.mock('../../models/TrashReferral', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.TrashReferral) mongoose.model('TrashReferral', new mongoose.Schema({ nameOrEmail: String, type: String }));
   return mongoose.models.TrashReferral;
 });
 jest.mock('../../models/DoNotContactReferral', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.DoNotContactReferral) mongoose.model('DoNotContactReferral', new mongoose.Schema({ email: String }));
   return mongoose.models.DoNotContactReferral;
 });
 jest.mock('../../models/MasterInspiring', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.MasterInspiring) mongoose.model('MasterInspiring', new mongoose.Schema({ email: String }));
   return mongoose.models.MasterInspiring;
 });
 jest.mock('../../models/MasterBrandA', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.MasterBrandA) mongoose.model('MasterBrandA', new mongoose.Schema({ email: String }));
   return mongoose.models.MasterBrandA;
 });
 jest.mock('../../models/MasterBrandC', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.MasterBrandC) mongoose.model('MasterBrandC', new mongoose.Schema({ email: String }));
   return mongoose.models.MasterBrandC;
 });
 jest.mock('../../models/MasterBrandB', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.MasterBrandB) mongoose.model('MasterBrandB', new mongoose.Schema({ email: String }));
   return mongoose.models.MasterBrandB;
 });
 jest.mock('../../models/MasterCityNationalTwo', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.MasterCityNationalTwo) mongoose.model('MasterCityNationalTwo', new mongoose.Schema({ email: String }));
   return mongoose.models.MasterCityNationalTwo;
 });
 jest.mock('../../models/InspiringReferralUser', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.InspiringReferralUser) mongoose.model('InspiringReferralUser', new mongoose.Schema({ email: String, isLeadGen: Boolean, assignedToLeadGen: String, actionTaken: String, createdAt: Date }));
   return mongoose.models.InspiringReferralUser;
 });
 jest.mock('../../models/BrandAReferralUser', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.BrandAReferralUser) mongoose.model('BrandAReferralUser', new mongoose.Schema({ email: String }));
   return mongoose.models.BrandAReferralUser;
 });
 jest.mock('../../models/CRReferralUser', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.CRReferralUser) mongoose.model('CRReferralUser', new mongoose.Schema({ email: String }));
   return mongoose.models.CRReferralUser;
 });
 jest.mock('../../models/BrandBReferralUser', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.BrandBReferralUser) mongoose.model('BrandBReferralUser', new mongoose.Schema({ email: String }));
   return mongoose.models.BrandBReferralUser;
 });
 jest.mock('../../models/CityNationalTwoReferralUser', () => {
+  const mongoose = require('mongoose');
   if (!mongoose.models.CityNationalTwoReferralUser) mongoose.model('CityNationalTwoReferralUser', new mongoose.Schema({ email: String }));
   return mongoose.models.CityNationalTwoReferralUser;
 });
 
-beforeAll(async () => {
-  await connect();
-});
-
-afterAll(async () => {
-  await disconnect();
-});
-
-afterEach(async () => {
-  await clearCollections();
-});
-
+const mongoose = require('mongoose');
 const { isTrashReferral, isDoNotContactReferral, isDuplicateReferral } = require('../../routes/services/referral-service');
+
+beforeAll(async () => { await connect(); });
+afterAll(async () => { await disconnect(); });
+afterEach(async () => { await clearCollections(); });
 
 describe('isTrashReferral', () => {
   it('returns false when email and name are not in trash list', async () => {

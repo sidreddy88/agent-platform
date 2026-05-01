@@ -173,7 +173,10 @@ class SandboxService:
             logger.warning("[Sandbox] Docker daemon not available — falling back to direct npm test")
             return self._run_npm_direct(workdir)
 
-        compose_cmd = ["docker", "compose", "-f", "docker-compose.test.yml"]
+        # Derive a Docker-safe project name (only lowercase alphanumeric + hyphens)
+        import re as _re
+        project_name = _re.sub(r"[^a-z0-9-]", "", Path(workdir).name.lower())[:40] or "target-app"
+        compose_cmd = ["docker", "compose", "-f", "docker-compose.test.yml", "-p", project_name]
         try:
             result = subprocess.run(
                 compose_cmd + [
