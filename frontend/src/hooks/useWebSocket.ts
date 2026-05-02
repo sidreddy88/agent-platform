@@ -14,6 +14,17 @@ export function useDashboardWS() {
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Load initial state via HTTP so the page isn't blank while WS connects
+  useEffect(() => {
+    Promise.all([
+      fetch("/incidents").then(r => r.json()),
+      fetch("/incidents/metrics").then(r => r.json()),
+    ]).then(([incs, mets]) => {
+      setIncidents(incs);
+      setMetrics(mets);
+    }).catch(() => {});
+  }, []);
+
   const connect = useCallback(() => {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${window.location.host}/ws/dashboard`);
