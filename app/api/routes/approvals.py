@@ -79,23 +79,10 @@ async def approve(request_id: str, body: ApproveBody):
                 from app.services.incident_loop import incident_loop
                 asyncio.create_task(incident_loop.resume_fix(incident_id))
             else:
+                # Record human approval but don't resolve — _check_merged_prs
+                # will resolve the incident once GitHub confirms the PR is merged.
                 incident.human_decision = "approved"
-                incident.outcome = "fix_merged"
-                incident.status = IncidentStatus.RESOLVED
-                incident.resolved_at = datetime.utcnow()
                 incident_store.update(incident)
-                try:
-                    from app.services.golden_dataset_builder import golden_dataset_builder
-                    golden_dataset_builder.capture(incident)
-                except Exception:
-                    pass
-                try:
-                    import asyncio
-
-                    from app.services.rag import RAGService
-                    asyncio.ensure_future(RAGService().index_incident(incident))
-                except Exception:
-                    pass
 
     return req
 
