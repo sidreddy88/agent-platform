@@ -140,7 +140,7 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
             </span>
           )}
           <button style={scanBtn(scanning)} onClick={handleScan} disabled={scanning}>
-            {scanning ? "Scanning..." : "Scan Last 24h"}
+            {scanning ? "Scanning..." : "Scan Last 7 Days"}
           </button>
           <button style={clearBtn(clearing)} onClick={handleClear} disabled={clearing}>
             {clearing ? "Clearing..." : "Clear Non-Resolved"}
