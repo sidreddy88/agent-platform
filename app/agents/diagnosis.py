@@ -8,9 +8,11 @@ Flow:
   1. get_error_samples      → recent error occurrences with full messages
   2. check_still_occurring  → is the error happening right now (reproduction check)
   3. get_occurrence_timeline → per-hour breakdown (is it getting worse?)
-  4. search_codebase        → RAG search for the affected function/file
-  5. search_similar_incidents → past incidents with matching symptoms
-  6. Answer: structured JSON diagnosis
+  4. search_similar_incidents → past incidents with matching symptoms
+  5. search_codebase        → RAG search to find candidate file paths
+  6. get_file_contents      → fetch the FULL source of the candidate file(s)
+                              (RAG returns fragments; full file needed to audit all return paths)
+  7. Answer: structured JSON diagnosis
 
 Confidence gate (CONFIDENCE_THRESHOLD = 0.70):
   ≥ 0.70 → status = FIXING (proceed to Fix Generation Agent — Week 3)
@@ -25,8 +27,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from app.agents.base import BaseAgent
+from app.core.config import settings
 from app.models.events import IncidentState
 from app.services.aws import AWSError, AWSService
+from app.services.github import GitHubService
 from app.services.llm import LLMService
 from app.services.rag import RAGService
 
@@ -171,15 +175,23 @@ class DiagnosisAgent(BaseAgent):
         self,
         aws: AWSService | None = None,
         rag: RAGService | None = None,
+        github: GitHubService | None = None,
     ) -> None:
         super().__init__(llm=LLMService())   # Sonnet — default model
         self._aws = aws or AWSService()
         self._rag = rag
+        self._github = github or GitHubService()
+        _owner, _repo = settings.fix_target_repo.split("/", 1)
+        self._owner = _owner
+        self._repo = _repo
         self._register_tools()
 
     def _register_tools(self) -> None:
         aws = self._aws
         rag = self._rag
+        github = self._github
+        owner = self._owner
+        repo = self._repo
 
         async def _get_error_samples(
             log_group: str,
@@ -263,6 +275,17 @@ class DiagnosisAgent(BaseAgent):
                 )
             return "\n\n".join(parts)
 
+        async def _get_file_contents(file_path: str) -> str:
+            """Fetch the full source of a file from the target repo. Use this to read ALL return paths of a function — RAG only returns fragments."""
+            try:
+                content, _ = await github.get_file_contents(owner, repo, file_path.lstrip("/"))
+                # Cap at 8 000 chars to stay within context — enough for any single file
+                if len(content) > 8000:
+                    return content[:8000] + f"\n\n[truncated — {len(content)} chars total]"
+                return content
+            except Exception as exc:
+                return f"Could not fetch {file_path}: {exc}"
+
         async def _search_similar_incidents(symptoms: str) -> str:
             """Find past incidents with similar symptoms from the knowledge base."""
             matches = _find_similar_incidents(symptoms)
@@ -313,6 +336,18 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
         self.register_tool(
+            "get_file_contents",
+            _get_file_contents,
+            (
+                "Fetch the complete source of a file from the target repository. "
+                "Use this after search_codebase identifies a candidate file — read the FULL file "
+                "to see every return statement and code path, not just RAG fragments. "
+                "Critical for null/undefined errors: you must read all return paths of the "
+                "producer function to find which one omits the expected field. "
+                "Input: {file_path: string (e.g. 'constants/validationMain.js')}"
+            ),
+        )
+        self.register_tool(
             "search_similar_incidents",
             _search_similar_incidents,
             (
@@ -352,8 +387,12 @@ STEPS — call tools in this order:
 2. check_still_occurring — confirm if error is ongoing (log_group="{log_group}", pattern="{pattern}")
 3. get_occurrence_timeline — understand the trend (log_group="{log_group}", pattern="{pattern}", hours=24)
 4. search_similar_incidents — check knowledge base (symptoms="{event.error_type or ''} {event.description[:50]}")
-5. search_codebase — find the function in code (query="{event.error_type or event.title}")
-6. Answer with a JSON diagnosis
+5. search_codebase — find candidate file paths (query="{event.error_type or event.title}")
+6. get_file_contents — fetch the FULL source of the file(s) identified in step 5.
+   RAG returns 400-char fragments — you MUST read the full file to see every return statement.
+   For null/undefined errors: find the function that returns the crashing object and read
+   ALL its return paths to find which one omits the expected field.
+7. Answer with a JSON diagnosis
 
 CRITICAL — NULL / UNDEFINED ERRORS:
 If the error is a TypeError (cannot read property, undefined, null) or NullPointerException:
