@@ -179,6 +179,7 @@ async def get_pr_stats():
     merged = [r for r in results if r["outcome"] == "fix_merged"]
     mttrs = [r["mttr_seconds"] for r in merged if r["mttr_seconds"] is not None]
     mttds = [r["mttd_seconds"] for r in results if r["mttd_seconds"] is not None]
+    agent_times = [r["agent_time_seconds"] for r in results if r["agent_time_seconds"] is not None]
     confs = [r["confidence"] for r in results if r["confidence"] is not None]
     ci_done = [r for r in results if r["ci_conclusion"] in ("success", "failure")]
 
@@ -186,6 +187,7 @@ async def get_pr_stats():
         "total": len(results),
         "merged": len(merged),
         "avg_mttd_seconds": round(sum(mttds) / len(mttds), 1) if mttds else None,
+        "avg_agent_time_seconds": round(sum(agent_times) / len(agent_times), 1) if agent_times else None,
         "avg_mttr_seconds": round(sum(mttrs) / len(mttrs), 1) if mttrs else None,
         "avg_confidence": round(sum(confs) / len(confs), 3) if confs else None,
         "ci_pass_rate": (
