@@ -259,6 +259,8 @@ class BaseAgent:
             system = self._with_harness(_build_system_prompt(self._tools))
             messages: list[dict] = [{"role": "user", "content": user_input}]
             steps: list[Step] = []
+            _total_input_tokens = 0
+            _total_output_tokens = 0
 
             for i in range(1, MAX_ITERATIONS + 1):
                 # Compress conversation history if the previous call's token count
@@ -274,6 +276,8 @@ class BaseAgent:
 
                 step = Step(iteration=i)
                 raw = await self._llm.complete(messages=messages, system=system, tracing_ctx=self._tracing_ctx)
+                _total_input_tokens += self._llm.last_input_tokens
+                _total_output_tokens += self._llm.last_output_tokens
 
                 # Append assistant turn so Claude sees its own prior reasoning
                 messages.append({"role": "assistant", "content": raw})
@@ -316,7 +320,7 @@ class BaseAgent:
 
         finally:
             if not _failed:
-                agent_tracker.complete(_run_id)
+                agent_tracker.complete(_run_id, _total_input_tokens, _total_output_tokens, self._llm._model)
 
     # ------------------------------------------------------------------
     # Tool execution

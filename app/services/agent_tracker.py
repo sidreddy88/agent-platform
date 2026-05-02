@@ -17,6 +17,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    # (input $/MTok, output $/MTok)
+    "claude-sonnet-4-20250514":  (3.0, 15.0),
+    "claude-haiku-4-5-20251001": (0.80, 4.0),
+}
+
 
 @dataclass
 class AgentRun:
@@ -29,6 +35,9 @@ class AgentRun:
     duration_ms: float | None = None
     error_message: str | None = None
     tool_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +50,9 @@ class AgentRun:
             "duration_ms": self.duration_ms,
             "error_message": self.error_message,
             "tool_calls": self.tool_calls,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cost_usd": self.cost_usd,
         }
 
 
@@ -74,12 +86,16 @@ class AgentStatusTracker:
         if run_id in self._active:
             self._active[run_id].tool_calls += 1
 
-    def complete(self, run_id: str) -> AgentRun | None:
+    def complete(self, run_id: str, input_tokens: int = 0, output_tokens: int = 0, model: str = "") -> AgentRun | None:
         run = self._active.pop(run_id, None)
         if run:
             run.status = "completed"
             run.completed_at = datetime.utcnow()
             run.duration_ms = (run.completed_at - run.started_at).total_seconds() * 1000
+            run.input_tokens = input_tokens
+            run.output_tokens = output_tokens
+            prices = _MODEL_PRICING.get(model, (3.0, 15.0))
+            run.cost_usd = round((input_tokens * prices[0] + output_tokens * prices[1]) / 1_000_000, 6)
             self._history.append(run)
             self._persist_run(run)
         return run
@@ -167,6 +183,9 @@ class AgentStatusTracker:
                     "duration_ms": row["duration_ms"],
                     "error_message": row["error_message"],
                     "tool_calls": row["tool_calls"] or 0,
+                    "input_tokens": row["input_tokens"] or 0,
+                    "output_tokens": row["output_tokens"] or 0,
+                    "cost_usd": row["cost_usd"] or 0.0,
                 }
                 for row in rows
             ]
@@ -196,8 +215,9 @@ class AgentStatusTracker:
                     """
                     INSERT OR REPLACE INTO agent_runs
                         (run_id, agent_name, incident_id, status, started_at,
-                         completed_at, duration_ms, error_message, tool_calls)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         completed_at, duration_ms, error_message, tool_calls,
+                         input_tokens, output_tokens, cost_usd)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.run_id,
@@ -209,6 +229,9 @@ class AgentStatusTracker:
                         run.duration_ms,
                         run.error_message,
                         run.tool_calls,
+                        run.input_tokens,
+                        run.output_tokens,
+                        run.cost_usd,
                     ),
                 )
                 conn.commit()
@@ -240,6 +263,9 @@ class AgentStatusTracker:
                     duration_ms=row["duration_ms"],
                     error_message=row["error_message"],
                     tool_calls=row["tool_calls"] or 0,
+                    input_tokens=row["input_tokens"] or 0,
+                    output_tokens=row["output_tokens"] or 0,
+                    cost_usd=row["cost_usd"] or 0.0,
                 )
                 self._history.append(run)
                 if run.status == "failed":

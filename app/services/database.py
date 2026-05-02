@@ -70,7 +70,10 @@ def init_db() -> None:
                 completed_at  TEXT,
                 duration_ms   REAL,
                 error_message TEXT,
-                tool_calls    INTEGER DEFAULT 0
+                tool_calls    INTEGER DEFAULT 0,
+                input_tokens  INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cost_usd      REAL DEFAULT 0.0
             );
 
             CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at
@@ -87,6 +90,18 @@ def init_db() -> None:
             );
         """)
         logger.debug("[DB] Tables initialised at %s", DB_PATH)
+
+        # Migrate: add token/cost columns if they don't exist yet
+        for col, definition in [
+            ("input_tokens", "INTEGER DEFAULT 0"),
+            ("output_tokens", "INTEGER DEFAULT 0"),
+            ("cost_usd", "REAL DEFAULT 0.0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE agent_runs ADD COLUMN {col} {definition}")
+                conn.commit()
+            except Exception:
+                pass  # column already exists
     finally:
         conn.close()
 
