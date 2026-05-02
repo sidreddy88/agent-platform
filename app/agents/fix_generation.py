@@ -288,6 +288,49 @@ class FixGenerationAgent(BaseAgent):
         steps.append(f"✓ Self-critique: {critique[:120]}")
         logger.info("[FixGen] Self-critique: %s", critique[:200])
 
+        # ── 3c-retry. If critique says LIKELY WRONG, switch to alternate frame ──
+        if "LIKELY WRONG" in critique.upper():
+            frames = self._parse_stack_frames(incident)
+            # Find a frame in a different file — the crash frame we may have skipped
+            # or a deeper caller frame we haven't tried
+            alt_frame = next(
+                ((p, fn) for p, fn in frames if p != file_path), None
+            )
+            if alt_frame:
+                alt_path, alt_fn = alt_frame
+                steps.append(f"↻ Critique LIKELY WRONG — retrying with alternate frame: {alt_path}")
+                logger.info("[FixGen] Critique rejected — switching to %s → %s", alt_path, alt_fn)
+                try:
+                    alt_content, _ = await self._github.get_file_contents(
+                        self._owner, self._repo, alt_path, ref=PR_BASE
+                    )
+                    alt_call_chain = await self._fetch_call_chain(
+                        alt_path, alt_fn or function_name, alt_content
+                    )
+                    alt_old, alt_new = await self._generate_fix(
+                        alt_content, alt_fn or function_name, incident, alt_path, alt_call_chain,
+                        test_failures=(
+                            f"PREVIOUS FIX WAS REJECTED — critique said:\n{critique}\n\n"
+                            f"Do NOT add null guards at the crash site. Fix the function that "
+                            f"produces the undefined value."
+                        ),
+                    )
+                    if alt_old:
+                        file_path = alt_path
+                        function_name = alt_fn or function_name
+                        content = alt_content
+                        call_chain = alt_call_chain
+                        old_function = alt_old
+                        new_function = alt_new
+                        critique = await self._critique_fix(old_function, new_function, incident, file_path)
+                        steps.append(f"✓ Alt-frame critique: {critique[:120]}")
+                    else:
+                        steps.append(f"⚠ Alt-frame fix generation failed — proceeding with original")
+                except Exception as exc:
+                    steps.append(f"⚠ Alt-frame retry failed: {exc} — proceeding with original")
+            else:
+                steps.append(f"⚠ Critique LIKELY WRONG but no alternate frame available — proceeding")
+
         # ── 3d. Sandbox validation with retry ─────────────────────────
         from app.services.sandbox import SandboxService
         _MAX_ATTEMPTS = 3
@@ -422,31 +465,28 @@ class FixGenerationAgent(BaseAgent):
     # Target resolution
     # ------------------------------------------------------------------
 
-    def _parse_stack_trace(self, incident: IncidentState) -> tuple[str | None, str | None]:
+    def _parse_stack_frames(self, incident: IncidentState) -> list[tuple[str, str | None]]:
         """
-        Extract the first relevant file path and function name from a stack trace
-        in the error description or diagnosis.
-
-        Handles Node.js format:
-          at functionName (/app/routes/helper/file.js:42:5)
-          at /app/routes/helper/file.js:42:5
-
-        Returns (repo_relative_path, function_name_or_None).
+        Extract ALL relevant stack frames from the error description/diagnosis.
+        Returns list of (repo_relative_path, function_name) in stack order (crash site first).
+        Skips internal Node frames and node_modules.
         """
         text = f"{incident.error_event.description or ''}\n{incident.diagnosis or ''}"
 
-        # Match Node.js stack frames
         frame_re = re.compile(
             r"at\s+"
-            r"(?:([\w.<>$]+(?:\.[\w.<>$]+)*)\s+\()?"   # optional: functionName (
-            r"([^\s()]+\.(?:js|ts|jsx|tsx|py|rb|go))"   # file path with extension
-            r":\d+(?::\d+)?\)?",                         # :line or :line:col
+            r"(?:([\w.<>$]+(?:\.[\w.<>$]+)*)\s+\()?"
+            r"([^\s()]+\.(?:js|ts|jsx|tsx|py|rb|go))"
+            r":\d+(?::\d+)?\)?",
             re.MULTILINE,
         )
 
         _SKIP = ("node:internal", "node_modules", "internal/process", "<anonymous>",
                  "node:events", "node:stream", "timers")
         _CONTAINER_PREFIXES = ("/app/", "/usr/src/app/", "/home/app/", "/srv/app/")
+
+        frames: list[tuple[str, str | None]] = []
+        seen: set[str] = set()
 
         for m in frame_re.finditer(text):
             fn_name = m.group(1)
@@ -455,20 +495,40 @@ class FixGenerationAgent(BaseAgent):
             if any(s in raw_path for s in _SKIP):
                 continue
 
-            # Strip Docker/container absolute prefix to get repo-relative path
             for prefix in _CONTAINER_PREFIXES:
                 if raw_path.startswith(prefix):
                     raw_path = raw_path[len(prefix):]
                     break
 
-            # Reject remaining absolute paths — they can't be in the repo
             if raw_path.startswith("/"):
                 continue
 
-            logger.info("[FixGen] Stack trace → file=%s  fn=%s", raw_path, fn_name)
-            return raw_path, fn_name
+            # Deduplicate by path so we don't return the same file twice
+            if raw_path not in seen:
+                seen.add(raw_path)
+                frames.append((raw_path, fn_name))
 
-        return None, None
+        return frames
+
+    @staticmethod
+    def _is_null_access_error(incident: IncidentState) -> bool:
+        """Return True if the error is a null/undefined property access."""
+        text = (
+            f"{incident.error_event.error_type or ''} "
+            f"{incident.error_event.description or ''}"
+        ).lower()
+        return any(p in text for p in [
+            "cannot read properties of undefined",
+            "cannot read properties of null",
+            "cannot read property",
+            "typeerror: undefined",
+            "typeerror: null",
+            "is not defined",
+            " is undefined",
+            " is null",
+            "nullpointerexception",
+            "attributeerror: 'nonetype'",
+        ])
 
     async def _resolve_function_name(self, file_path: str, snippet: str, incident: IncidentState) -> str:
         """Given a confirmed file path and a matched code snippet, ask the LLM which function to fix."""
@@ -516,14 +576,24 @@ class FixGenerationAgent(BaseAgent):
           2. Function name from error context + GitHub code search for the definition
         """
         # ── 1. Stack trace (fastest, most accurate) ────────────────────
-        st_path, st_fn = self._parse_stack_trace(incident)
-        if st_path:
-            try:
-                await self._github.get_file_contents(self._owner, self._repo, st_path, ref=PR_BASE)
-                logger.info("[FixGen] Stack trace resolved: %s → %s", st_path, st_fn)
-                return st_path, st_fn or "the function handling this error"
-            except Exception:
-                logger.info("[FixGen] Stack trace path '%s' not found in repo — falling back", st_path)
+        frames = self._parse_stack_frames(incident)
+        if frames:
+            is_null = self._is_null_access_error(incident)
+            # For null/undefined errors the crash frame is the symptom site.
+            # Try caller frames first — that's where the null originates.
+            # Fall back to the crash frame only if no caller frame exists in the repo.
+            ordered = frames[1:] + frames[:1] if is_null and len(frames) > 1 else frames
+            for raw_path, fn_name in ordered:
+                try:
+                    await self._github.get_file_contents(self._owner, self._repo, raw_path, ref=PR_BASE)
+                    if is_null and raw_path == frames[0][0]:
+                        logger.info("[FixGen] Null error — only crash frame found in repo: %s", raw_path)
+                    else:
+                        logger.info("[FixGen] Stack trace resolved: %s → %s", raw_path, fn_name)
+                    return raw_path, fn_name or "the function handling this error"
+                except Exception:
+                    continue
+            logger.info("[FixGen] No stack frame path found in repo — falling back")
 
         # ── 2. Function name from error context + code search ──────────
         # AWS SDK and similar library errors throw from inside the library, so the
