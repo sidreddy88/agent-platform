@@ -189,6 +189,14 @@ async def clear_incidents() -> Dict[str, Any]:
     return {"deleted": count}
 
 
+@router.delete("/events")
+async def clear_events() -> Dict[str, Any]:
+    """Clear all pending events from the event queue."""
+    removed = pending_event_store.clear()
+    await broadcast({"type": "pending_events_cleared"})
+    return {"deleted": len(removed)}
+
+
 class RestartBody(BaseModel):
     notes: Optional[str] = None
 

@@ -82,6 +82,7 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ events_found: number } | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [clearingEvents, setClearingEvents] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -95,6 +96,16 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
       await fetch("/incidents", { method: "DELETE" });
     } finally {
       setClearing(false);
+    }
+  }
+
+  async function handleClearEvents() {
+    if (!window.confirm("Clear all pending events?")) return;
+    setClearingEvents(true);
+    try {
+      await fetch("/incidents/events", { method: "DELETE" });
+    } finally {
+      setClearingEvents(false);
     }
   }
 
@@ -133,6 +144,9 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
           </button>
           <button style={clearBtn(clearing)} onClick={handleClear} disabled={clearing}>
             {clearing ? "Clearing..." : "Clear Non-Resolved"}
+          </button>
+          <button style={clearBtn(clearingEvents)} onClick={handleClearEvents} disabled={clearingEvents}>
+            {clearingEvents ? "Clearing..." : "Clear Events"}
           </button>
         </div>
       </div>
