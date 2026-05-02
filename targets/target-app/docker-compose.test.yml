@@ -11,6 +11,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.test
+    volumes:
+      - .:/app
+      - /app/node_modules
     environment:
       - NODE_ENV=test
       - MONGO_URI=mongodb://mongo:27017/target-app_test
