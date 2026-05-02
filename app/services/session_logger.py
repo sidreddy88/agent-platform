@@ -134,14 +134,23 @@ class AgentSession:
             self.fix["target_file"] = target_file
             self.fix["target_function"] = target_function
 
-    def log_sandbox_attempt(self, attempt: int, passed: bool, output_tail: str) -> None:
+    def log_sandbox_attempt(
+        self,
+        attempt: int,
+        passed: bool,
+        output_tail: str,
+        fix_content: str | None = None,
+    ) -> None:
         if self.fix is None:
             self.fix = {"sandbox_attempts": []}
-        self.fix["sandbox_attempts"].append({
+        entry: dict = {
             "attempt": attempt,
             "passed": passed,
             "output_tail": output_tail[-400:] if output_tail else "",
-        })
+        }
+        if fix_content:
+            entry["fix_content"] = fix_content[:4000]
+        self.fix["sandbox_attempts"].append(entry)
 
     def log_fix_outcome(
         self,
