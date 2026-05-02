@@ -674,6 +674,10 @@ class IncidentLoop:
         incident.pr_created_at = datetime.now(timezone.utc)
         incident_store.update(incident)
 
+        # Index as soon as the PR exists so the RAG hard-block can deduplicate
+        # any re-occurrence of the same error while the PR is still open.
+        await self._index_to_rag(incident)
+
         review_text = await self._run_review(incident, fix)
         if review_text:
             incident.review_posted = True
