@@ -81,6 +81,12 @@ _KNOWN_INCIDENTS: list[dict] = [
         "root_cause": "LLM wrapper function does not handle API failure — returns without the expected .classification field when OpenAI call throws, so callers receive an incomplete object",
         "resolution": "Fixed the LLM wrapper to catch errors and return a safe default object with all required fields, so callers always receive a well-formed response",
     },
+    {
+        "id": "INC-008",
+        "symptoms": ["TypeError", "undefined", "cannot read property", "publish_decision", "classification", "wrapper", "intermediate"],
+        "root_cause": "Intermediate wrapper function (e.g. runValidationCheck) already guards the underlying API failure but its error/early-exit return paths omit the `classification` field that callers always access — the direct producer of the crashing object is the wrapper, not the deep API call",
+        "resolution": "Added `classification: { publish_decision: 'block', ... }` to every return path in the wrapper that previously omitted it, so all callers always receive a complete object regardless of which code path executed",
+    },
 ]
 
 
@@ -351,18 +357,36 @@ STEPS — call tools in this order:
 
 CRITICAL — NULL / UNDEFINED ERRORS:
 If the error is a TypeError (cannot read property, undefined, null) or NullPointerException:
-- root_cause MUST identify the function that PRODUCES the undefined value and WHY it returns
-  undefined/null in this situation. Do NOT describe the crash line itself as the root cause.
+
+STEP 1 — identify the DIRECT producer of the crashing object:
+  The crash is `obj.field` or `obj.field.subfield`. Find the function whose RETURN VALUE
+  is assigned to `obj` at the crash site. That is the direct producer.
+  - It may be a wrapper/intermediate function (e.g. runValidationCheck), NOT the deep API call.
+  - The direct producer may already handle errors internally — but its error return paths
+    may omit the field callers expect. That IS the root cause.
+
+STEP 2 — check ALL return paths of that producer:
+  Read every `return` statement. Does every path include the field the caller accesses?
+  BAD pattern: happy path returns {{ ok: true, classification: {{...}} }}
+               error path returns {{ ok: false, error: "..." }}   ← missing `classification`
+  The missing field on the error path is the root cause, not the bottom-level API failure.
+
+STEP 3 — write root_cause and fix_approach:
+  root_cause MUST name the DIRECT PRODUCER function and which return path omits the field.
   BAD:  "classifyResult.classification is undefined when accessed at line 296"
-  GOOD: "classifyFields() returns an incomplete response object when the OpenAI API call fails —
-         the function does not handle API errors and returns without a .classification field"
-- fix_approach MUST describe what the PRODUCER function should do differently.
-  Do NOT suggest adding null checks, optional chaining (?.), nullish coalescing (??),
-  or try/catch at the property access site — those are symptom fixes that hide the problem.
+  BAD:  "classifyFields() returns null when OpenAI fails"   ← wrong level if wrapper already handles it
+  GOOD: "runValidationCheck() returns {{ ok: false, error: '...' }} on classification failure but omits
+         the `classification` field — callers always access .classification so all error return paths
+         must include it"
+
+  fix_approach MUST add the missing field to the error return path(s) of the direct producer.
+  Do NOT suggest null checks, optional chaining (?.), nullish coalescing (??), or try/catch
+  at the property access site — those are symptom fixes that hide the problem.
   BAD:  "Add defensive validation: check if classifyResult?.classification exists before accessing"
-  GOOD: "In classifyFields(), catch OpenAI API failures and return a safe default object
-         {{ classification: {{ publish_decision: 'block', ... }} }} instead of undefined"
-- affected_function should be the PRODUCER function (e.g. classifyFields), not the crash function.
+  GOOD: "In runValidationCheck(), add `classification: {{ publish_decision: 'block', ... }}` to every
+         return path that currently omits it (error returns, early exits, catch blocks)"
+
+- affected_function should be the DIRECT PRODUCER function, not the crash function or the deep API.
 
 Answer with ONLY a valid JSON object:
 {{

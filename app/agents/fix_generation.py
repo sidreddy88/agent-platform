@@ -581,6 +581,8 @@ class FixGenerationAgent(BaseAgent):
         # ── 0. Diagnosis-identified producer (null/undefined errors) ───
         # The diagnosis agent already traced the undefined value back to its producer.
         # Use that result directly instead of going to the crash frame from the stack trace.
+        # Verify the function is actually DEFINED in the diagnosis file (not just called there) —
+        # the diagnosis sometimes names the caller file instead of the definer.
         if (
             self._is_null_access_error(incident)
             and incident.diagnosis_affected_file
@@ -589,9 +591,14 @@ class FixGenerationAgent(BaseAgent):
             diag_file = incident.diagnosis_affected_file.lstrip("/")
             diag_fn = incident.diagnosis_affected_function
             try:
-                await self._github.get_file_contents(self._owner, self._repo, diag_file, ref=PR_BASE)
-                logger.info("[FixGen] Using diagnosis target: %s → %s", diag_file, diag_fn)
-                return diag_file, diag_fn
+                content, _ = await self._github.get_file_contents(self._owner, self._repo, diag_file, ref=PR_BASE)
+                if self._extract_js_function(content, diag_fn):
+                    logger.info("[FixGen] Using diagnosis target: %s → %s", diag_file, diag_fn)
+                    return diag_file, diag_fn
+                logger.info(
+                    "[FixGen] Diagnosis target %s does not define %s (only calls it) — falling back to code search",
+                    diag_file, diag_fn,
+                )
             except Exception:
                 logger.info("[FixGen] Diagnosis target %s not fetchable — falling back to stack trace", diag_file)
 
@@ -616,11 +623,14 @@ class FixGenerationAgent(BaseAgent):
             logger.info("[FixGen] No stack frame path found in repo — falling back")
 
         # ── 2. Function name from error context + code search ──────────
-        # AWS SDK and similar library errors throw from inside the library, so the
-        # application function name never appears in the stack trace. It does appear
-        # in the error message ("NoSuchKey in moveAndRemoveFileFromS3") and in the
-        # diagnosis. Extract it and search GitHub for the file that defines it.
-        fn_name = self._extract_function_name_from_error(incident)
+        # For null errors: if diagnosis named the function but it wasn't in the diagnosis file,
+        # use the diagnosis function name directly for code search (more reliable than regex).
+        # For other errors: extract from error text / diagnosis prose.
+        fn_name = (
+            incident.diagnosis_affected_function
+            if self._is_null_access_error(incident) and incident.diagnosis_affected_function
+            else self._extract_function_name_from_error(incident)
+        )
         if fn_name:
             logger.info("[FixGen] No stack trace — trying code search for function '%s'", fn_name)
             try:
@@ -981,9 +991,17 @@ class FixGenerationAgent(BaseAgent):
             f"   If the error is 'Cannot read properties of undefined/null' or a NullPointerException\n"
             f"   at line N, DO NOT add a null check, optional chaining (?.), nullish coalescing (??),\n"
             f"   or try/catch at line N. That only hides the problem.\n"
-            f"   Instead: find the function that PRODUCES the undefined/null value and fix it to\n"
-            f"   always return the expected structure. If it is an external API/LLM call, add\n"
-            f"   response validation or a safe default in the function that makes the call.\n"
+            f"   Instead: identify the DIRECT PRODUCER — the function whose return value is assigned\n"
+            f"   to the variable being accessed at the crash site. Fix THAT function.\n"
+            f"   WRAPPER / INTERMEDIATE FUNCTION PATTERN (very common):\n"
+            f"     A wrapper function may already guard against the underlying API failure:\n"
+            f"       if (!classification) return {{ ok: false, error: '...' }};\n"
+            f"     But if that error return OMITS the field the caller expects (.classification),\n"
+            f"     THAT is the root cause — not the underlying API. The fix is to add the missing\n"
+            f"     field to every return path that currently omits it:\n"
+            f"       return {{ ok: false, error: '...', classification: {{ publish_decision: 'block', ... }} }};\n"
+            f"     Check ALL return statements and early exits — every path must return the\n"
+            f"     complete structure callers depend on.\n"
             f"3. If the related context above shows the real fix belongs in a different layer\n"
             f"   (e.g. the API call should use structured output, or validation belongs at ingestion),\n"
             f"   fix it at that layer within the target function — do not patch the crash site.\n"
@@ -1079,7 +1097,9 @@ class FixGenerationAgent(BaseAgent):
             f"  at or near the crash line without fixing the function that produces the null value\n"
             f"- Adds `if (x && x.y)` or `x?.y ?? default` where `x` comes from an external call\n"
             f"  (LLM, API, DB) — the fix belongs in the function that makes that call\n"
-            f"- Converts an invalid value instead of preventing it from being invalid in the first place\n\n"
+            f"- Converts an invalid value instead of preventing it from being invalid in the first place\n"
+            f"- Fixes only the happy-path return of a producer function but leaves error/early-exit\n"
+            f"  return paths still missing the expected field — all return paths must be complete\n\n"
             f"Answer in 2-3 sentences:\n"
             f"1. Does the fix address the root cause, or does it just suppress/convert the error?\n"
             f"   If related context above shows the real fix should be upstream (e.g. API call config,\n"
