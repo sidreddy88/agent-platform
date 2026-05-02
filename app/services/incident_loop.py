@@ -427,11 +427,14 @@ class IncidentLoop:
             try:
                 query = f"{event.title} {event.description[:200]}"
                 _rag_similar = await self._rag.search_incidents(query, min_score=0.90)
-                _open_statuses = {IncidentStatus.RESOLVED, IncidentStatus.REJECTED,
-                                  IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
+                _skip = {IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
                 for s in _rag_similar:
                     live = incident_store.get(s["incident_id"])
-                    if live and live.status not in _open_statuses and live.pr_url:
+                    if not live or live.status in _skip:
+                        continue
+                    if live.status == IncidentStatus.RESOLVED and live.outcome != "fix_merged":
+                        continue
+                    if live.pr_url or live.status != IncidentStatus.RESOLVED:
                         logger.info(
                             "[IncidentLoop] RAG hard-block: %s matches open incident %s (score=%.2f, pr=%s)",
                             event.id, live.id, s["score"], live.pr_url,
