@@ -35,6 +35,7 @@ interface Summary {
   total: number;
   merged: number;
   avg_mttd_seconds: number | null;
+  avg_agent_time_seconds: number | null;
   avg_mttr_seconds: number | null;
   avg_confidence: number | null;
   ci_pass_rate: number | null;
@@ -84,10 +85,16 @@ export function StatsPage() {
               title="Mean Time to Detect — error occurred in production → system detected it"
             />
             <SummaryChip
+              label="Agent Pipeline"
+              value={dur(summary.avg_agent_time_seconds)}
+              color="#60a5fa"
+              title="Agent pipeline time — detection → PR opened. Does not include human review or merge."
+            />
+            <SummaryChip
               label="Avg MTTR"
               value={summary.avg_mttr_seconds !== null ? dur(summary.avg_mttr_seconds) : "pending"}
               color="#22c55e"
-              title="Mean Time to Resolve — detection → fix merged. Only counted for merged PRs."
+              title="Total MTTR — detection → fix merged (includes human review + merge). Only counted for merged PRs."
             />
             <SummaryChip
               label="CI Pass Rate"

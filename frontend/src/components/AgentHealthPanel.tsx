@@ -27,12 +27,18 @@ function tsAgo(iso: string | null): string {
   return `${Math.floor(s / 3600)}h ago`;
 }
 
+const STUCK_THRESHOLD_S = 600; // 10 minutes
+
 function ActiveRunPill({ run }: { run: AgentRun }) {
   const isRunning = run.status === "running";
   const isFailed = run.status === "failed";
+  const elapsedS = isRunning
+    ? Math.floor((Date.now() - new Date(run.started_at).getTime()) / 1000)
+    : 0;
+  const isStuck = isRunning && elapsedS >= STUCK_THRESHOLD_S;
 
   const dotStyle: React.CSSProperties = isRunning
-    ? pulseDot
+    ? isStuck ? stuckDot : pulseDot
     : {
         width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
         background: isFailed ? "#ef4444" : "#1e4d2b",
@@ -40,13 +46,15 @@ function ActiveRunPill({ run }: { run: AgentRun }) {
       };
 
   return (
-    <div style={{ ...pill, opacity: isRunning ? 1 : 0.65 }}>
+    <div style={{ ...pill, opacity: isRunning ? 1 : 0.65, borderColor: isStuck ? "rgba(251,191,36,0.4)" : "#2d3149" }}>
       <span style={dotStyle} />
       <div>
         <div style={pillName}>{run.agent_name}</div>
-        <div style={pillMeta}>
+        <div style={{ ...pillMeta, color: isStuck ? "#fbbf24" : "#64748b" }}>
           {isRunning
-            ? `${elapsed(run.started_at)} · ${run.tool_calls} tool calls`
+            ? isStuck
+              ? `still running · ${elapsed(run.started_at)} · ${run.tool_calls} tool calls`
+              : `${elapsed(run.started_at)} · ${run.tool_calls} tool calls`
             : isFailed
             ? `failed · ${run.error_message?.slice(0, 40) ?? "error"}`
             : `${duration(run.duration_ms)} · ${run.tool_calls} tool calls`}
@@ -344,6 +352,16 @@ const pulseDot: React.CSSProperties = {
   background: "#22c55e",
   flexShrink: 0,
   boxShadow: "0 0 0 2px rgba(34,197,94,0.3)",
+  animation: "pulse 2s infinite",
+};
+
+const stuckDot: React.CSSProperties = {
+  width: 8,
+  height: 8,
+  borderRadius: "50%",
+  background: "#fbbf24",
+  flexShrink: 0,
+  boxShadow: "0 0 0 2px rgba(251,191,36,0.3)",
   animation: "pulse 2s infinite",
 };
 
