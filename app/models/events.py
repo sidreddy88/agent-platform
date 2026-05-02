@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _as_naive(dt: datetime) -> datetime:
@@ -93,6 +93,13 @@ class IncidentState(BaseModel):
     pr_test_added: bool = False
     review_posted: bool = False
     approval_id: Optional[str] = None
+
+    @field_validator("approval_id", mode="before")
+    @classmethod
+    def _coerce_approval_id(cls, v: Any) -> Optional[str]:
+        if isinstance(v, (list, dict)):
+            return None
+        return v
 
     # Human decision
     human_decision: Optional[str] = None  # "approved" | "rejected"
