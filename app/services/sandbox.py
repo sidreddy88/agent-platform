@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -47,15 +48,13 @@ class SandboxService:
     """
     Validates a fix by running the AllInterviews test suite in an isolated Docker container.
 
-    Lifecycle per run:
-      1. Clone AllInterviews to a temp dir
-      2. Apply fix files
-      3. Apply harness patches (config/index.js, server.js, package.json)
-      4. Copy test infrastructure from targets/allinterviews/
-      5. docker compose up --build  (runs npm test inside the container)
-      6. Capture pass/fail + output
-      7. docker compose down -v  (destroy everything)
-      8. Delete temp dir
+    Two-phase lifecycle:
+      1. Clone AllInterviews + apply harness patches
+      2. Baseline run  — build Docker image, run tests on unmodified source
+      3. Apply fix files to workdir (volume-mounted into container)
+      4. Fix run       — reuse image (no rebuild), run tests with fix applied
+      5. Compare: only fail if the fix introduces NEW failures beyond the baseline
+      6. Tear down containers + delete temp dir
     """
 
     async def run(self, fix_files: dict[str, str], incident_id: str) -> SandboxResult:
@@ -88,25 +87,44 @@ class SandboxService:
             return SandboxResult(passed=False, output="", error=f"Clone failed: {clone.stderr.strip()}")
         logger.info("[Sandbox] Cloned AllInterviews")
 
-        # 2. Apply fix files
+        # 2. Apply harness patches (no fix yet — baseline must see clean source)
+        error = self._apply_patches(workdir)
+        if error:
+            return SandboxResult(passed=False, output="", error=error)
+        logger.info("[Sandbox] Patches applied")
+
+        # 3. Copy test infrastructure
+        self._copy_test_infra(workdir)
+        logger.info("[Sandbox] Test infrastructure copied")
+
+        # 4. Baseline run — build image once, test unmodified source
+        baseline_result = self._run_docker(workdir, build=True)
+        baseline_failures = self._parse_failing_tests(baseline_result.output)
+        if baseline_failures:
+            logger.info("[Sandbox] Pre-existing failures: %s", baseline_failures)
+
+        # 5. Apply fix files
         for rel_path, content in fix_files.items():
             dest = Path(workdir) / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content)
         logger.info("[Sandbox] Applied %d fix file(s)", len(fix_files))
 
-        # 3. Apply harness patches
-        error = self._apply_patches(workdir)
-        if error:
-            return SandboxResult(passed=False, output="", error=error)
-        logger.info("[Sandbox] Patches applied")
+        # 6. Fix run — reuse image (volume mount picks up changed files, no rebuild)
+        fix_result = self._run_docker(workdir, build=False)
 
-        # 4. Copy test infrastructure
-        self._copy_test_infra(workdir)
-        logger.info("[Sandbox] Test infrastructure copied")
+        # 7. Filter pre-existing failures — only block on regressions
+        if not fix_result.passed and baseline_failures:
+            new_failures = self._parse_failing_tests(fix_result.output) - baseline_failures
+            if not new_failures:
+                logger.info("[Sandbox] All failure(s) are pre-existing — marking PASSED")
+                note = (
+                    f"\n\n[Sandbox] {len(baseline_failures)} pre-existing failure(s) ignored:\n"
+                    + "\n".join(f"  - {f}" for f in sorted(baseline_failures))
+                )
+                return SandboxResult(passed=True, output=fix_result.output + note)
 
-        # 5–7. Docker run + cleanup
-        return self._run_docker(workdir)
+        return fix_result
 
     def _apply_patches(self, workdir: str) -> str | None:
         # config/index.js — add "test" to valid NODE_ENV values
@@ -168,27 +186,36 @@ class SandboxService:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
-    def _run_docker(self, workdir: str) -> SandboxResult:
+    def _parse_failing_tests(self, output: str) -> set[str]:
+        """Extract failing test names from Jest output (lines beginning with ●)."""
+        failures = set()
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("●"):
+                name = stripped.lstrip("●").strip()
+                if name:
+                    failures.add(name)
+        return failures
+
+    def _run_docker(self, workdir: str, build: bool = True) -> SandboxResult:
         if not self._docker_available():
             logger.warning("[Sandbox] Docker daemon not available — falling back to direct npm test")
             return self._run_npm_direct(workdir)
 
-        # Derive a Docker-safe project name (only lowercase alphanumeric + hyphens)
-        import re as _re
-        project_name = _re.sub(r"[^a-z0-9-]", "", Path(workdir).name.lower())[:40] or "allinterviews"
+        project_name = re.sub(r"[^a-z0-9-]", "", Path(workdir).name.lower())[:40] or "allinterviews"
         compose_cmd = ["docker", "compose", "-f", "docker-compose.test.yml", "-p", project_name]
+        up_cmd = ["up", "--abort-on-container-exit", "--exit-code-from", "app"]
+        if build:
+            up_cmd.insert(1, "--build")
         try:
             result = subprocess.run(
-                compose_cmd + [
-                    "up", "--build",
-                    "--abort-on-container-exit",
-                    "--exit-code-from", "app",
-                ],
+                compose_cmd + up_cmd,
                 capture_output=True, text=True, cwd=workdir, timeout=300,
             )
             output = result.stdout + result.stderr
             passed = result.returncode == 0
-            logger.info("[Sandbox] Tests %s via Docker (exit %d)", "PASSED" if passed else "FAILED", result.returncode)
+            label = "baseline" if build else "fix"
+            logger.info("[Sandbox] %s tests %s via Docker (exit %d)", label, "PASSED" if passed else "FAILED", result.returncode)
             return SandboxResult(passed=passed, output=output)
         except subprocess.TimeoutExpired:
             logger.error("[Sandbox] Docker timed out after 5 minutes")
@@ -201,7 +228,7 @@ class SandboxService:
             logger.info("[Sandbox] Docker compose torn down")
 
     def _run_npm_direct(self, workdir: str) -> SandboxResult:
-        """Run npm install + npm test directly without Docker."""
+        """Run npm install + npm test directly without Docker (baseline + fix phases)."""
         import os
         env = {**os.environ, "NODE_ENV": "test"}
 
@@ -221,3 +248,4 @@ class SandboxService:
         passed = result.returncode == 0
         logger.info("[Sandbox] Tests %s via direct npm test (exit %d)", "PASSED" if passed else "FAILED", result.returncode)
         return SandboxResult(passed=passed, output=output)
+
