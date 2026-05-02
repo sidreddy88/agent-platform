@@ -9,6 +9,7 @@ interface CICheck {
 
 interface PRStat {
   incident_id: string;
+  outcome: string | null;
   pr_url: string | null;
   pr_number: number | null;
   service: string;
@@ -24,6 +25,7 @@ interface PRStat {
   pr_created_at: string | null;
   resolved_at: string | null;
   mttd_seconds: number | null;
+  agent_time_seconds: number | null;
   mttr_seconds: number | null;
   ci_conclusion: "success" | "failure" | "pending" | null;
   ci_checks: CICheck[];
@@ -31,6 +33,8 @@ interface PRStat {
 
 interface Summary {
   total: number;
+  merged: number;
+  avg_mttd_seconds: number | null;
   avg_mttr_seconds: number | null;
   avg_confidence: number | null;
   ci_pass_rate: number | null;
@@ -72,12 +76,24 @@ export function StatsPage() {
         </div>
         {summary && (
           <div style={summaryRow}>
-            <SummaryChip label="PRs Analyzed" value={String(summary.total)} />
-            <SummaryChip label="Avg MTTR" value={dur(summary.avg_mttr_seconds)} color="#22c55e" />
+            <SummaryChip label="PRs" value={`${summary.merged} merged / ${summary.total} total`} />
+            <SummaryChip
+              label="Avg MTTD"
+              value={dur(summary.avg_mttd_seconds)}
+              color="#f59e0b"
+              title="Mean Time to Detect — error occurred in production → system detected it"
+            />
+            <SummaryChip
+              label="Avg MTTR"
+              value={summary.avg_mttr_seconds !== null ? dur(summary.avg_mttr_seconds) : "pending"}
+              color="#22c55e"
+              title="Mean Time to Resolve — detection → fix merged. Only counted for merged PRs."
+            />
             <SummaryChip
               label="CI Pass Rate"
               value={summary.ci_pass_rate !== null ? `${Math.round(summary.ci_pass_rate * 100)}%` : "—"}
               color={summary.ci_pass_rate !== null && summary.ci_pass_rate >= 0.9 ? "#22c55e" : "#f97316"}
+              title="% of agent PRs where CI went green on first run"
             />
             <SummaryChip
               label="Avg Confidence"
@@ -108,6 +124,7 @@ export function StatsPage() {
 function PRCard({ pr, onUnresolve }: { pr: PRStat; onUnresolve: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [unresolving, setUnresolving] = useState(false);
+  const [marking, setMarking] = useState(false);
 
   async function handleUnresolve() {
     setUnresolving(true);
@@ -116,6 +133,16 @@ function PRCard({ pr, onUnresolve }: { pr: PRStat; onUnresolve: (id: string) => 
       onUnresolve(pr.incident_id);
     } finally {
       setUnresolving(false);
+    }
+  }
+
+  async function handleMarkMerged() {
+    setMarking(true);
+    try {
+      await fetch(`/incidents/${pr.incident_id}/mark-merged`, { method: "POST" });
+      onUnresolve(pr.incident_id); // refresh list
+    } finally {
+      setMarking(false);
     }
   }
 
@@ -139,9 +166,16 @@ function PRCard({ pr, onUnresolve }: { pr: PRStat; onUnresolve: (id: string) => 
             </a>
           )}
           <CIBadge conclusion={pr.ci_conclusion} />
-          <button style={actionBtn("#1c2a3a", "#60a5fa", unresolving)} onClick={handleUnresolve} disabled={unresolving}>
-            {unresolving ? "…" : "Unresolve"}
-          </button>
+          {pr.outcome !== "fix_merged" && (
+            <button style={actionBtn("#1a2e1a", "#22c55e", marking)} onClick={handleMarkMerged} disabled={marking}>
+              {marking ? "…" : "Mark Merged"}
+            </button>
+          )}
+          {pr.outcome === "fix_merged" && (
+            <button style={actionBtn("#1c2a3a", "#60a5fa", unresolving)} onClick={handleUnresolve} disabled={unresolving}>
+              {unresolving ? "…" : "Unresolve"}
+            </button>
+          )}
           <DeleteButton incidentId={pr.incident_id} onDelete={onUnresolve} />
         </div>
       </div>
@@ -168,12 +202,20 @@ function PRCard({ pr, onUnresolve }: { pr: PRStat; onUnresolve: (id: string) => 
 
       {/* Timeline */}
       <div style={timeline}>
+        {pr.mttd_seconds !== null && (
+          <>
+            <TimelineStep label="Error Occurred" sub="in production" />
+            <TimelineArrow label={dur(pr.mttd_seconds)} sublabel="MTTD" />
+          </>
+        )}
         <TimelineStep label="Detected" sub={pr.detected_at ? shortTs(pr.detected_at) : "—"} />
-        <TimelineArrow label={dur(pr.mttd_seconds)} sublabel="MTTD" />
+        <TimelineArrow label={dur(pr.agent_time_seconds)} sublabel="agent time" />
         <TimelineStep label="PR Opened" sub={pr.pr_created_at ? shortTs(pr.pr_created_at) : "—"} />
-        <TimelineArrow label={pr.mttr_seconds !== null && pr.mttd_seconds !== null ? dur(pr.mttr_seconds - pr.mttd_seconds) : "—"} sublabel="review→merge" />
-        <TimelineStep label="Resolved" sub={pr.resolved_at ? shortTs(pr.resolved_at) : "—"} highlight />
-        <div style={mttrTotal}>Total MTTR: {dur(pr.mttr_seconds)}</div>
+        <TimelineArrow label={pr.mttr_seconds !== null && pr.agent_time_seconds !== null ? dur(pr.mttr_seconds - pr.agent_time_seconds) : "—"} sublabel="→ merged" />
+        <TimelineStep label="Merged" sub={pr.resolved_at ? shortTs(pr.resolved_at) : "pending"} highlight={pr.outcome === "fix_merged"} />
+        {pr.mttr_seconds !== null && (
+          <div style={mttrTotal}>MTTR: {dur(pr.mttr_seconds)}</div>
+        )}
       </div>
 
       {/* Diagnosis + PR description (expandable) */}
@@ -253,9 +295,9 @@ function CIBadge({ conclusion }: { conclusion: "success" | "failure" | "pending"
   return <span style={ciBadge("rgba(245,158,11,0.12)", "#f59e0b")}>CI Pending</span>;
 }
 
-function SummaryChip({ label, value, color = "#94a3b8" }: { label: string; value: string; color?: string }) {
+function SummaryChip({ label, value, color = "#94a3b8", title }: { label: string; value: string; color?: string; title?: string }) {
   return (
-    <div style={chip}>
+    <div style={chip} title={title}>
       <div style={chipLabel}>{label}</div>
       <div style={{ ...chipValue, color }}>{value}</div>
     </div>
