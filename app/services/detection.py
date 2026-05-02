@@ -334,6 +334,14 @@ class DetectionService:
                 seen: set[str] = set()
                 for log in matches:
                     msg = log["message"]
+                    # Skip structured application output — content moderation results,
+                    # LLM classification responses, and similar non-error payloads that
+                    # contain the word "error" only inside review text or JSON values.
+                    if any(marker in msg for marker in (
+                        "publish_decision", "human_reviewer_note", "LLM check completed",
+                        "risk_score", "suspicious_signals",
+                    )):
+                        continue
                     normalized = re.sub(r'\b\d+\b', 'N', msg[:120]).strip()
                     sig = normalized[:80]
                     if sig in seen:
