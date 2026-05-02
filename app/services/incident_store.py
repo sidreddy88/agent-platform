@@ -84,12 +84,18 @@ class IncidentStore:
     def get_open_pr_for_error(self, error_type: str, service: str, description: str = "") -> Optional[str]:
         """Return a handle (PR URL or incident ID) if an active incident matches
         error_type + service + normalized description. Blocks duplicates even before
-        a PR exists (e.g. while the incident is still in TRIAGING or FIXING)."""
-        closed = {IncidentStatus.RESOLVED, IncidentStatus.REJECTED,
-                  IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
+        a PR exists (e.g. while the incident is still in TRIAGING or FIXING).
+        Also blocks if a prior incident for the same error was resolved via a merged PR
+        (outcome == 'fix_merged') — prevents the same fixed error from re-entering
+        the pipeline without explicit human intervention."""
+        skip = {IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
         desc_key = self._normalize_desc(description)
         for incident in self._incidents.values():
-            if incident.status in closed:
+            if incident.status in skip:
+                continue
+            # Skip RESOLVED unless the PR was actually merged — only a confirmed
+            # merged fix should suppress re-occurrences of the same error.
+            if incident.status == IncidentStatus.RESOLVED and incident.outcome != "fix_merged":
                 continue
             if (
                 incident.error_event.error_type == error_type
