@@ -93,7 +93,7 @@ async def get_pr_stats():
 
     resolved = [
         i for i in incident_store.list_all()
-        if i.status == IncidentStatus.RESOLVED and (i.pr_number or i.pr_url)
+        if i.outcome == "fix_merged" and (i.pr_number or i.pr_url)
     ]
 
     results = []
