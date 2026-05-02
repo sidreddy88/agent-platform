@@ -62,7 +62,7 @@ export function IncidentFeed({ incidents, metrics, connected }: Props) {
             </span>
           )}
           <button style={scanBtn(scanning)} onClick={handleScan} disabled={scanning}>
-            {scanning ? "Scanning..." : "Scan Last 24h"}
+            {scanning ? "Scanning..." : "Scan Last 7 Days"}
           </button>
           {metrics && (
             <div style={metricRow}>
