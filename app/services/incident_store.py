@@ -109,6 +109,17 @@ class IncidentStore:
             return None
         return max(candidates, key=lambda i: i.resolved_at or i.detected_at)
 
+    def delete(self, incident_id: str) -> None:
+        self._incidents.pop(incident_id, None)
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
+            conn.commit()
+        except Exception as exc:
+            logger.warning("[IncidentStore] DB delete failed: %s", exc)
+        finally:
+            conn.close()
+
     def clear(self) -> int:
         """Delete all non-resolved incidents. Resolved incidents are preserved. Returns count deleted."""
         to_delete = [
