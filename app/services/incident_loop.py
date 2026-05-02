@@ -982,7 +982,6 @@ class IncidentLoop:
 
     async def run_forever(self) -> None:
         self._running = True
-        _poll_tick = 0
         logger.info("[IncidentLoop] Started — waiting for events")
         while self._running:
             try:
@@ -990,10 +989,6 @@ class IncidentLoop:
                 asyncio.create_task(self._process(event))
                 event_queue.task_done()
             except asyncio.TimeoutError:
-                _poll_tick += 1
-                if _poll_tick >= 12:   # every ~60s (12 × 5s timeouts)
-                    _poll_tick = 0
-                    asyncio.create_task(self._check_merged_prs())
                 continue
             except Exception as exc:
                 logger.error("[IncidentLoop] Queue consumer error: %s", exc)
