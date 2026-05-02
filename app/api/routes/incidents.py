@@ -381,6 +381,20 @@ async def resolve_incident(incident_id: str) -> Dict[str, Any]:
     return {"status": "resolved", "incident_id": incident_id}
 
 
+@router.post("/{incident_id}/mark-merged")
+async def mark_merged(incident_id: str) -> Dict[str, Any]:
+    """Mark a PR as merged — records resolved_at now and sets outcome=fix_merged for MTTR."""
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    incident.status = IncidentStatus.RESOLVED
+    incident.outcome = "fix_merged"
+    incident.human_decision = "approved"
+    incident.resolved_at = datetime.now(timezone.utc)
+    incident_store.update(incident)
+    return {"status": "merged", "incident_id": incident_id}
+
+
 @router.post("/{incident_id}/unresolve")
 async def unresolve_incident(incident_id: str) -> Dict[str, Any]:
     """Move a resolved incident back to awaiting_approval (PR still exists)."""
