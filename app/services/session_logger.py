@@ -110,12 +110,14 @@ class AgentSession:
         confidence: float,
         fix_approach: str,
         escalated: bool,
+        raw_llm: str = "",
     ) -> None:
         self.diagnosis = {
             "root_cause": root_cause[:500],
             "confidence": round(confidence, 3),
             "fix_approach": fix_approach[:300],
             "escalated": escalated,
+            "raw_llm": raw_llm[:2000] if raw_llm else None,
         }
 
     def log_fix_start(self, target_file: str | None, target_function: str | None) -> None:

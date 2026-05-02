@@ -543,6 +543,7 @@ class IncidentLoop:
             confidence=diagnosis.confidence,
             fix_approach=getattr(diagnosis, "fix_approach", "") or "",
             escalated=diagnosis.escalate,
+            raw_llm=getattr(diagnosis, "raw_llm", "") or "",
         )
 
         incident.diagnosis = diagnosis.root_cause
