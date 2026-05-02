@@ -20,6 +20,7 @@ class LLMService:
         self._model = model or MODEL
         # Updated after every complete() call — read by BaseAgent for checkpointing.
         self.last_input_tokens: int = 0
+        self.last_output_tokens: int = 0
 
     async def complete(
         self,
@@ -40,6 +41,9 @@ class LLMService:
             response = await self._client.messages.create(**kwargs)
             self.last_input_tokens = (
                 response.usage.input_tokens if response.usage else 0
+            )
+            self.last_output_tokens = (
+                response.usage.output_tokens if response.usage else 0
             )
             return response.content[0].text
 

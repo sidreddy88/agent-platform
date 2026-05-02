@@ -233,6 +233,9 @@ export interface AgentRun {
   duration_ms: number | null;
   error_message: string | null;
   tool_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
 }
 
 export interface AgentStats {

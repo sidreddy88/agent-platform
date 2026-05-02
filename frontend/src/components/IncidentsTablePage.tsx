@@ -40,7 +40,7 @@ function AgentRunPills({ runs, onNote }: { runs: AgentRun[]; onNote: (r: AgentRu
       {runs.map((r) => (
         <span
           key={r.run_id}
-          title={`${r.agent_name} · ${r.status}${r.duration_ms ? ` · ${dur(r.duration_ms)}` : ""}${r.error_message ? `\n${r.error_message}` : ""}\nClick to annotate`}
+          title={`${r.agent_name} · ${r.status}${r.duration_ms ? ` · ${dur(r.duration_ms)}` : ""}${r.input_tokens ? ` · ${(r.input_tokens/1000).toFixed(1)}k in / ${(r.output_tokens/1000).toFixed(1)}k out · $${r.cost_usd.toFixed(4)}` : ""}${r.error_message ? `\n${r.error_message}` : ""}\nClick to annotate`}
           style={{ ...runPill(r.status), cursor: "pointer" }}
           onClick={() => onNote(r)}
         >
@@ -272,6 +272,7 @@ export function IncidentsTablePage({ incidents }: Props) {
                 <th style={th}>Service</th>
                 <th style={th}>Root Cause</th>
                 <th style={th}>Agent Runs</th>
+                <th style={th}>Cost</th>
                 <th style={th}>PR</th>
                 <th style={th}>Status</th>
                 <th style={th}>Age</th>
@@ -304,6 +305,13 @@ export function IncidentsTablePage({ incidents }: Props) {
                     </td>
                     <td style={{ ...td, minWidth: 160 }}>
                       <AgentRunPills runs={agentRunMap[inc.id] ?? []} onNote={setNoteTarget} />
+                    </td>
+                    <td style={td}>
+                      {(() => {
+                        const runs = agentRunMap[inc.id] ?? [];
+                        const total = runs.reduce((s, r) => s + (r.cost_usd ?? 0), 0);
+                        return total > 0 ? <span style={costText}>${total.toFixed(4)}</span> : <span style={noData}>—</span>;
+                      })()}
                     </td>
                     <td style={td}>
                       {inc.pr_url ? (
@@ -500,6 +508,8 @@ const diagText: React.CSSProperties = {
 };
 
 const noData: React.CSSProperties = { color: "#2d3149", fontSize: 12 };
+
+const costText: React.CSSProperties = { fontSize: 11, color: "#a855f7", fontWeight: 600 };
 
 const prLink: React.CSSProperties = {
   color: "#60a5fa", textDecoration: "none", fontWeight: 600,
