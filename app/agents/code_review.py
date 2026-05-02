@@ -136,6 +136,14 @@ Key questions to answer:
 Check for:
 1. CORRECTNESS — does the fix address the actual root cause, or does it just suppress the symptom?
                  (e.g. converting invalid input instead of rejecting it is a symptom fix)
+                 SYMPTOM-FIX RED FLAGS — treat any of these as CRITICAL unless there is a strong reason:
+                 a) A null/undefined guard (if (x && x.y), x?.y, x ?? default, try/catch) is added
+                    at or near the crash line without also fixing the function that produces x.
+                    The correct fix is in the producer, not the consumer.
+                 b) An LLM/API/DB response is guarded with optional chaining at the access site
+                    instead of validating/normalising it in the function that makes the call.
+                 c) The same crash site was patched in a previous PR (regression) — if the error
+                    recurs at the same line, the upstream source was never fixed.
 2. BUGS       — logic errors, off-by-one, null/undefined dereferences, wrong conditions,
                 unhandled exceptions, incorrect error propagation
 3. SECURITY   — SQL injection, XSS, command injection, hardcoded secrets or tokens,
