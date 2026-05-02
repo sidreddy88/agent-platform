@@ -82,19 +82,21 @@ class IncidentStore:
         return re.sub(r'\b[a-f0-9]{8,}\b|\b\d+[a-zA-Z]*\b', 'X', collapsed[:100])
 
     def get_open_pr_for_error(self, error_type: str, service: str, description: str = "") -> Optional[str]:
-        """Return PR URL if an open incident matches error_type + service + normalized description."""
+        """Return a handle (PR URL or incident ID) if an active incident matches
+        error_type + service + normalized description. Blocks duplicates even before
+        a PR exists (e.g. while the incident is still in TRIAGING or FIXING)."""
         closed = {IncidentStatus.RESOLVED, IncidentStatus.REJECTED,
                   IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
         desc_key = self._normalize_desc(description)
         for incident in self._incidents.values():
-            if incident.status in closed or not incident.pr_url:
+            if incident.status in closed:
                 continue
             if (
                 incident.error_event.error_type == error_type
                 and incident.error_event.service == service
                 and self._normalize_desc(incident.error_event.description or "") == desc_key
             ):
-                return incident.pr_url
+                return incident.pr_url or incident.id
         return None
 
     def get_resolved_for_error(self, error_type: str, service: str) -> Optional["IncidentState"]:
