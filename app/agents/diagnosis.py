@@ -124,10 +124,25 @@ class DiagnosisResult:
 
 
 def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
-    match = re.search(r"\{.*\}", answer, re.DOTALL)
-    if match:
+    # Extraction strategies in priority order:
+    # 1. JSON fenced code block  (```json ... ```)
+    # 2. Last {...} block        (LLMs sometimes emit a preamble with stray braces)
+    # 3. First {...} block       (original behaviour)
+    candidates: list[str] = []
+    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", answer, re.DOTALL)
+    if code_block:
+        candidates.append(code_block.group(1))
+    all_blocks = re.findall(r"\{.*?\}", answer, re.DOTALL)
+    if all_blocks:
+        candidates.append(all_blocks[-1])   # last block
+        if len(all_blocks) > 1:
+            candidates.append(all_blocks[0])  # first block as last resort
+
+    for candidate in candidates:
         try:
-            data = json.loads(match.group())
+            data = json.loads(candidate)
+            if not isinstance(data, dict):
+                continue
             confidence = float(data.get("confidence", 0.5))
             return DiagnosisResult(
                 root_cause=data.get("root_cause", "Unknown"),
@@ -141,9 +156,9 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
                 raw_llm=answer,
             )
         except (json.JSONDecodeError, ValueError, TypeError):
-            pass
+            continue
 
-    logger.warning("DiagnosisAgent returned non-JSON answer — using low-confidence fallback")
+    logger.warning("DiagnosisAgent returned non-JSON answer — using low-confidence fallback. Raw: %.200s", answer)
     return DiagnosisResult(
         root_cause="Could not parse diagnosis — manual review required",
         confidence=0.0,

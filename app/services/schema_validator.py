@@ -112,10 +112,11 @@ class HandoffValidator:
         if blast_radius != raw_br:
             coercions.append(f"blast_radius {raw_br!r} → {blast_radius!r}")
         if blast_radius not in self._BLAST_RADII:
-            violations.append(SchemaViolation(
-                "blast_radius", result.blast_radius,
-                f"must be one of {sorted(self._BLAST_RADII)}, got {result.blast_radius!r}",
-            ))
+            # Coerce unexpected values to 'unknown' rather than failing the whole
+            # triage result — blast_radius is informational and not worth discarding
+            # a valid decision/severity/reasoning over.
+            coercions.append(f"blast_radius {blast_radius!r} → 'unknown' (unrecognised value)")
+            blast_radius = "unknown"
 
         # --- occurrences_24h ---
         if result.occurrences_24h < 0:
