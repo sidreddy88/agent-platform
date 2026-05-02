@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+def _as_naive(dt: datetime) -> datetime:
+    """Strip timezone info so naive and aware datetimes can be compared."""
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
 class EventSource(str, Enum):
     CLOUDWATCH = "cloudwatch"
     DIGITAL_OCEAN = "digital_ocean"
@@ -118,9 +123,9 @@ class IncidentState(BaseModel):
     @property
     def mttr_seconds(self) -> Optional[float]:
         if self.resolved_at:
-            return (self.resolved_at - self.detected_at).total_seconds()
+            return (_as_naive(self.resolved_at) - _as_naive(self.detected_at)).total_seconds()
         return None
 
     @property
     def age_seconds(self) -> float:
-        return (datetime.utcnow() - self.detected_at).total_seconds()
+        return (datetime.utcnow() - _as_naive(self.detected_at)).total_seconds()
