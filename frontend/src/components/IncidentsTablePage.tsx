@@ -219,7 +219,7 @@ export function IncidentsTablePage({ incidents }: Props) {
 
   const isArchived = (inc: Incident) => inc.archived || localArchived.has(inc.id);
   const isWrongFix = (inc: Incident) => inc.wrong_fix || localWrongFix.has(inc.id);
-  const isResolved = (inc: Incident) => inc.status === "resolved" || localResolved.has(inc.id);
+  const isResolved = (inc: Incident) => inc.outcome === "fix_merged";
 
   const TERMINAL = new Set(["resolved", "noise", "duplicate", "rejected"]);
 
