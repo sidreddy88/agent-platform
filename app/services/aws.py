@@ -501,7 +501,7 @@ class AWSService:
                 logGroupName=log_group,
                 startTime=start_ms,
                 endTime=end_ms,
-                filterPattern='?"ERROR" ?"Error" ?"error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback"',
+                filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback"',
                 limit=limit,
             )
         except (BotoCoreError, ClientError) as exc:
