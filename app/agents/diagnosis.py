@@ -75,6 +75,12 @@ _KNOWN_INCIDENTS: list[dict] = [
         "root_cause": "S3 operation attempted on a key that no longer exists — no existence check before copy/delete",
         "resolution": "Added headObject check before copyObject, or catch NoSuchKey specifically and return early",
     },
+    {
+        "id": "INC-007",
+        "symptoms": ["TypeError", "undefined", "cannot read property", "null", "classification", "llm"],
+        "root_cause": "LLM wrapper function does not handle API failure — returns without the expected .classification field when OpenAI call throws, so callers receive an incomplete object",
+        "resolution": "Fixed the LLM wrapper to catch errors and return a safe default object with all required fields, so callers always receive a well-formed response",
+    },
 ]
 
 
@@ -343,15 +349,30 @@ STEPS — call tools in this order:
 5. search_codebase — find the function in code (query="{event.error_type or event.title}")
 6. Answer with a JSON diagnosis
 
+CRITICAL — NULL / UNDEFINED ERRORS:
+If the error is a TypeError (cannot read property, undefined, null) or NullPointerException:
+- root_cause MUST identify the function that PRODUCES the undefined value and WHY it returns
+  undefined/null in this situation. Do NOT describe the crash line itself as the root cause.
+  BAD:  "classifyResult.classification is undefined when accessed at line 296"
+  GOOD: "classifyFields() returns an incomplete response object when the OpenAI API call fails —
+         the function does not handle API errors and returns without a .classification field"
+- fix_approach MUST describe what the PRODUCER function should do differently.
+  Do NOT suggest adding null checks, optional chaining (?.), nullish coalescing (??),
+  or try/catch at the property access site — those are symptom fixes that hide the problem.
+  BAD:  "Add defensive validation: check if classifyResult?.classification exists before accessing"
+  GOOD: "In classifyFields(), catch OpenAI API failures and return a safe default object
+         { classification: { publish_decision: 'block', ... } } instead of undefined"
+- affected_function should be the PRODUCER function (e.g. classifyFields), not the crash function.
+
 Answer with ONLY a valid JSON object:
 {{
-  "root_cause": "precise description of why the error is occurring",
+  "root_cause": "precise description of WHY the error occurs — name the producer function for null errors",
   "confidence": 0.82,
   "evidence": [
     "specific fact from logs or code that supports root cause",
     "another concrete observation"
   ],
-  "fix_approach": "concrete description of what code change fixes this",
+  "fix_approach": "what the PRODUCER function must do differently — never 'add null check at access site'",
   "affected_function": "functionName or null",
   "affected_file": "path/to/file.js or null",
   "reproduction_confirmed": true
