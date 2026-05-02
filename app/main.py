@@ -56,6 +56,20 @@ app.include_router(debug_routes.router)
 app.include_router(sessions_routes.router)
 
 
+async def _backfill_rag_index() -> None:
+    """Index all existing incidents that have a diagnosis + pr_url but were never indexed."""
+    try:
+        from app.services.incident_store import incident_store
+        from app.services.rag import RAGService
+        rag = RAGService()
+        terminal = {"resolved", "noise", "duplicate", "rejected"}
+        for incident in incident_store.list_all():
+            if incident.diagnosis and incident.pr_url and incident.status.value not in terminal:
+                await rag.index_incident(incident)
+    except Exception as exc:
+        logging.getLogger(__name__).debug("[Startup] RAG backfill skipped: %s", exc)
+
+
 async def _agent_status_broadcaster() -> None:
     """
     Broadcast agent status to all WS clients.
@@ -76,12 +90,11 @@ async def _agent_status_broadcaster() -> None:
 @app.on_event("startup")
 async def _startup():
     init_db()
-    # Detection runs on-demand via POST /incidents/scan, not on a background loop
-    # asyncio.create_task(detection_service.run_forever())
     asyncio.create_task(threshold_monitor.run_forever())
     asyncio.create_task(orchestrator.run_forever())
     asyncio.create_task(drift_detector.run_forever())
     asyncio.create_task(_agent_status_broadcaster())
+    asyncio.create_task(_backfill_rag_index())
 
 
 @app.on_event("shutdown")
