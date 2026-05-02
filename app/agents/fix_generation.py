@@ -367,7 +367,10 @@ class FixGenerationAgent(BaseAgent):
             sandbox_result = await _sandbox.run({file_path: new_content}, incident.id)
             _sess = session_logger.get(incident.id)
             if _sess:
-                _sess.log_sandbox_attempt(attempt, sandbox_result.passed, sandbox_result.output or "")
+                _sess.log_sandbox_attempt(
+                    attempt, sandbox_result.passed, sandbox_result.output or "",
+                    fix_content=new_function,
+                )
             if sandbox_result.passed:
                 steps.append(f"✓ Sandbox tests passed (attempt {attempt}/{_MAX_ATTEMPTS})")
                 logger.info("[FixGen] Sandbox passed on attempt %d for %s", attempt, incident.id)
