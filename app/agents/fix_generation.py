@@ -26,7 +26,7 @@ from app.core.config import settings
 from app.models.events import IncidentState
 from app.services.blast_radius import BlastRadiusGuard
 from app.services.github import GitHubError, GitHubService
-from app.services.llm import LLMService
+from app.services.llm import HAIKU_MODEL, LLMService
 from app.services.session_logger import session_logger
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ class FixGenerationAgent(BaseAgent):
 
     def __init__(self, github: GitHubService | None = None) -> None:
         super().__init__(llm=LLMService())
+        self._llm_haiku = LLMService(model=HAIKU_MODEL)
         self._github = github or GitHubService()
         self._owner, self._repo = settings.fix_target_repo.split("/", 1)
         self._rag = None
@@ -1068,10 +1069,9 @@ class FixGenerationAgent(BaseAgent):
             f"3. Verdict: LOOKS CORRECT / NEEDS REVIEW / LIKELY WRONG"
         )
         try:
-            return await self._llm.complete(
+            return await self._llm_haiku.complete(
                 messages=[{"role": "user", "content": prompt}],
                 system=self._with_harness("You are a skeptical senior engineer reviewing an AI-generated fix. Be concise and critical."),
-                model="claude-haiku-4-5-20251001",
             )
         except Exception as exc:
             logger.warning("[FixGen] Critique failed: %s", exc)

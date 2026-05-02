@@ -361,7 +361,7 @@ If the error is a TypeError (cannot read property, undefined, null) or NullPoint
   or try/catch at the property access site — those are symptom fixes that hide the problem.
   BAD:  "Add defensive validation: check if classifyResult?.classification exists before accessing"
   GOOD: "In classifyFields(), catch OpenAI API failures and return a safe default object
-         { classification: { publish_decision: 'block', ... } } instead of undefined"
+         {{ classification: {{ publish_decision: 'block', ... }} }} instead of undefined"
 - affected_function should be the PRODUCER function (e.g. classifyFields), not the crash function.
 
 Answer with ONLY a valid JSON object:
