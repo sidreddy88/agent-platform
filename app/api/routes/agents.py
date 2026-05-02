@@ -100,9 +100,25 @@ async def get_pr_stats():
     for incident in resolved:
         event = incident.error_event
 
+        # MTTD: time from error occurrence in production to our system detecting it.
+        # CloudWatch log events store the original log timestamp in metadata["timestamp"].
+        # For non-log events (ECS health, manual triggers) there is no prior occurrence
+        # time so MTTD is null.
         mttd_seconds = None
+        raw_ts = event.metadata.get("timestamp") or event.metadata.get("latest_timestamp")
+        if raw_ts:
+            try:
+                occurred = _as_utc(datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")))
+                mttd_seconds = round(
+                    max(0.0, (_as_utc(incident.detected_at) - occurred).total_seconds()), 1
+                )
+            except Exception:
+                pass
+
+        # Agent processing time: detection → PR created
+        agent_time_seconds = None
         if incident.pr_created_at and incident.detected_at:
-            mttd_seconds = round(
+            agent_time_seconds = round(
                 (_as_utc(incident.pr_created_at) - _as_utc(incident.detected_at)).total_seconds(), 1
             )
 
@@ -133,8 +149,12 @@ async def get_pr_stats():
             or None
         )
 
+        # MTTR: detection → fix merged. Only set when outcome == "fix_merged".
+        mttr_seconds = incident.mttr_seconds if incident.outcome == "fix_merged" else None
+
         results.append({
             "incident_id": incident.id,
+            "outcome": incident.outcome,
             "pr_url": incident.pr_url,
             "pr_number": incident.pr_number,
             "service": event.service,
@@ -150,17 +170,22 @@ async def get_pr_stats():
             "pr_created_at": _utc_iso(incident.pr_created_at),
             "resolved_at": _utc_iso(incident.resolved_at),
             "mttd_seconds": mttd_seconds,
-            "mttr_seconds": incident.mttr_seconds,
+            "agent_time_seconds": agent_time_seconds,
+            "mttr_seconds": mttr_seconds,
             "ci_conclusion": ci_conclusion,
             "ci_checks": ci_checks,
         })
 
-    mttrs = [r["mttr_seconds"] for r in results if r["mttr_seconds"] is not None]
+    merged = [r for r in results if r["outcome"] == "fix_merged"]
+    mttrs = [r["mttr_seconds"] for r in merged if r["mttr_seconds"] is not None]
+    mttds = [r["mttd_seconds"] for r in results if r["mttd_seconds"] is not None]
     confs = [r["confidence"] for r in results if r["confidence"] is not None]
     ci_done = [r for r in results if r["ci_conclusion"] in ("success", "failure")]
 
     summary = {
         "total": len(results),
+        "merged": len(merged),
+        "avg_mttd_seconds": round(sum(mttds) / len(mttds), 1) if mttds else None,
         "avg_mttr_seconds": round(sum(mttrs) / len(mttrs), 1) if mttrs else None,
         "avg_confidence": round(sum(confs) / len(confs), 3) if confs else None,
         "ci_pass_rate": (
