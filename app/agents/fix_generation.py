@@ -251,6 +251,26 @@ class FixGenerationAgent(BaseAgent):
             steps.append(f"✓ Call chain: {len(call_chain.splitlines())} lines of context fetched")
             logger.info("[FixGen] Call chain context fetched for %s", file_path)
 
+        # ── 2c. For null/undefined errors, trace back to the source function ──
+        # The current file may be the consumer of the undefined value, not the producer.
+        # Find the function that RETURNS the undefined object and fix it instead.
+        if self._is_null_access_error(incident):
+            src = await self._trace_undefined_source(content, file_path, incident)
+            if src:
+                src_path, src_fn, src_content = src
+                steps.append(f"✓ Source trace: undefined value produced by '{src_fn}' in {src_path} — retargeting")
+                logger.info("[FixGen] Retargeting fix to source: %s → %s", src_path, src_fn)
+                # Include original caller file as call chain context so the LLM
+                # understands how the return value is used downstream
+                caller_context = (
+                    f"\nCALLER CONTEXT (the function that uses the return value of '{src_fn}'):\n"
+                    f"--- {file_path} ---\n{content[:2000]}\n"
+                )
+                file_path = src_path
+                function_name = src_fn
+                content = src_content
+                call_chain = (call_chain or "") + caller_context
+
         # ── 3. Generate fix via LLM ────────────────────────────────────
         try:
             old_function, new_function = await self._generate_fix(content, function_name, incident, file_path, call_chain)
@@ -807,6 +827,69 @@ class FixGenerationAgent(BaseAgent):
                     return content[start_pos : i + 1]
 
         return ""
+
+    async def _trace_undefined_source(
+        self, content: str, file_path: str, incident: IncidentState
+    ) -> tuple[str, str, str] | None:
+        """
+        For null/undefined access errors, find the function that PRODUCES the
+        undefined value and return (source_file_path, source_function_name, source_content).
+
+        Strategy:
+        1. Ask an LLM to read the file content and identify which function call
+           returns the object whose property is undefined.
+        2. Search the codebase for the definition of that function.
+        3. Return its file + content so the fix targets the producer, not the consumer.
+        """
+        if not self._is_null_access_error(incident):
+            return None
+
+        # Ask the LLM: given this file and this error, what function produces the undefined?
+        try:
+            probe = await self._llm.complete(
+                messages=[{"role": "user", "content": (
+                    f"This file ({file_path}) has a production error:\n"
+                    f"{incident.error_event.description or incident.error_event.title}\n\n"
+                    f"FILE CONTENT (first 3000 chars):\n{content[:3000]}\n\n"
+                    f"Identify the function call in this file that returns an object "
+                    f"whose property is undefined at the crash line. "
+                    f"Return ONLY the function name (e.g. 'classifyFields'). "
+                    f"If you cannot identify it, return 'UNKNOWN'."
+                )}],
+                system=self._with_harness("Return only the function name. Single word or camelCase identifier. No punctuation."),
+                model="claude-haiku-4-5-20251001",
+            )
+            source_fn = probe.strip().split()[0].strip(".,;:()")
+        except Exception as exc:
+            logger.debug("[FixGen] Source trace probe failed: %s", exc)
+            return None
+
+        if not source_fn or source_fn.upper() == "UNKNOWN" or len(source_fn) < 3:
+            return None
+
+        logger.info("[FixGen] Source trace: undefined value produced by '%s'", source_fn)
+
+        # Search the repo for the definition of that function
+        try:
+            matches = await self._github.search_code(self._owner, self._repo, source_fn)
+            _SKIP = ("node_modules", ".test.", ".spec.", "dist/", "build/", "vendor/", "min.js")
+            candidates = [r["path"] for r in matches
+                          if not any(s in r["path"] for s in _SKIP) and r["path"] != file_path]
+            for path in candidates[:5]:
+                try:
+                    src_content, _ = await self._github.get_file_contents(
+                        self._owner, self._repo, path, ref=PR_BASE
+                    )
+                    # Only use this file if it actually DEFINES the function (not just calls it)
+                    if self._extract_js_function(src_content, source_fn):
+                        logger.info("[FixGen] Source trace resolved: %s → %s", source_fn, path)
+                        return path, source_fn, src_content
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("[FixGen] Source trace search failed: %s", exc)
+
+        return None
 
     async def _fetch_call_chain(self, file_path: str, function_name: str, content: str) -> str:
         """
