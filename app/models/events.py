@@ -67,6 +67,8 @@ class IncidentState(BaseModel):
     diagnosis: Optional[str] = None
     confidence: Optional[float] = None  # 0.0 - 1.0
     reproduction_confirmed: Optional[bool] = None
+    diagnosis_affected_file: Optional[str] = None      # producer file identified by DiagnosisAgent
+    diagnosis_affected_function: Optional[str] = None  # producer function identified by DiagnosisAgent
 
     # Fix
     fix_attempted: Optional[str] = None

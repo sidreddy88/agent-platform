@@ -573,9 +573,28 @@ class FixGenerationAgent(BaseAgent):
         Resolve the file and function to fix.
 
         Strategy (in order):
+          0. Diagnosis result — DiagnosisAgent already identified the producer; use it
+             for null/undefined errors where the crash site differs from root cause
           1. Stack trace parsing — exact path from log, no LLM needed
           2. Function name from error context + GitHub code search for the definition
         """
+        # ── 0. Diagnosis-identified producer (null/undefined errors) ───
+        # The diagnosis agent already traced the undefined value back to its producer.
+        # Use that result directly instead of going to the crash frame from the stack trace.
+        if (
+            self._is_null_access_error(incident)
+            and incident.diagnosis_affected_file
+            and incident.diagnosis_affected_function
+        ):
+            diag_file = incident.diagnosis_affected_file.lstrip("/")
+            diag_fn = incident.diagnosis_affected_function
+            try:
+                await self._github.get_file_contents(self._owner, self._repo, diag_file, ref=PR_BASE)
+                logger.info("[FixGen] Using diagnosis target: %s → %s", diag_file, diag_fn)
+                return diag_file, diag_fn
+            except Exception:
+                logger.info("[FixGen] Diagnosis target %s not fetchable — falling back to stack trace", diag_file)
+
         # ── 1. Stack trace (fastest, most accurate) ────────────────────
         frames = self._parse_stack_frames(incident)
         if frames:
