@@ -78,7 +78,8 @@ class IncidentStore:
     @staticmethod
     def _normalize_desc(description: str) -> str:
         """Normalize variable tokens (numbers, hashes, IDs) so similar errors match."""
-        return re.sub(r'\b[a-f0-9]{8,}\b|\b\d+[a-zA-Z]*\b', 'X', description[:100]).strip()
+        collapsed = re.sub(r'\s+', ' ', description[:300]).strip()
+        return re.sub(r'\b[a-f0-9]{8,}\b|\b\d+[a-zA-Z]*\b', 'X', collapsed[:100])
 
     def get_open_pr_for_error(self, error_type: str, service: str, description: str = "") -> Optional[str]:
         """Return PR URL if an open incident matches error_type + service + normalized description."""

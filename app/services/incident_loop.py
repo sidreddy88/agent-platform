@@ -254,6 +254,7 @@ class IncidentLoop:
             "sql_dedup": 0,
             "regression": 0,
             "rag_hit": 0,
+            "rag_hard_block": 0,
             "cold_start": 0,
         }
 
@@ -417,29 +418,45 @@ class IncidentLoop:
                     event.error_type, event.service, past.id,
                 )
 
-        # ── Layer 3: RAG semantic search ──────────────────────────────
-        # Only fires when Layer 2 found nothing. Costs one embedding API call.
-        # Surfaces semantically similar past incidents (score ≥ 0.80) across
-        # all services, not just exact error_type matches.
-        if prior_context is None and self._rag is not None:
+        # ── Layer 3: RAG semantic dedup (hard-block) ─────────────────
+        # Runs unconditionally — Layer 1 can miss when the same error arrives
+        # with different whitespace/formatting from CloudWatch.
+        # Uses live store lookup (not stale ChromaDB metadata) for status check.
+        _rag_similar: list[dict] = []
+        if self._rag is not None:
             try:
                 query = f"{event.title} {event.description[:200]}"
-                similar = await self._rag.search_incidents(query, min_score=0.80)
-                if similar:
-                    lines = ["Semantically similar past incidents (RAG, score ≥ 0.80):"]
-                    for s in similar:
-                        lines.append(
-                            f"  [{s['score']:.2f}] {s['text'][:200]}\n"
-                            f"    PR: {s['pr_url'] or 'none'} | Outcome: {s['status']}"
+                _rag_similar = await self._rag.search_incidents(query, min_score=0.90)
+                _open_statuses = {IncidentStatus.RESOLVED, IncidentStatus.REJECTED,
+                                  IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
+                for s in _rag_similar:
+                    live = incident_store.get(s["incident_id"])
+                    if live and live.status not in _open_statuses and live.pr_url:
+                        logger.info(
+                            "[IncidentLoop] RAG hard-block: %s matches open incident %s (score=%.2f, pr=%s)",
+                            event.id, live.id, s["score"], live.pr_url,
                         )
-                    prior_context = "\n".join(lines)
-                    self._dedup_stats["rag_hit"] += 1
-                    logger.info(
-                        "[IncidentLoop] RAG found %d similar incident(s) for %s",
-                        len(similar), event.id,
-                    )
+                        self._dedup_stats["rag_hard_block"] = self._dedup_stats.get("rag_hard_block", 0) + 1
+                        return
             except Exception as exc:
                 logger.debug("[IncidentLoop] RAG search skipped: %s", exc)
+
+        # ── Layer 3b: RAG context (soft hint to TriageAgent) ──────────
+        # Only fires when Layer 2 found nothing. Surfaces semantically similar
+        # past incidents across all services for the triage LLM.
+        if prior_context is None and _rag_similar:
+            lines = ["Semantically similar past incidents (RAG, score ≥ 0.90):"]
+            for s in _rag_similar:
+                lines.append(
+                    f"  [{s['score']:.2f}] {s['text'][:200]}\n"
+                    f"    PR: {s['pr_url'] or 'none'} | Outcome: {s['status']}"
+                )
+            prior_context = "\n".join(lines)
+            self._dedup_stats["rag_hit"] += 1
+            logger.info(
+                "[IncidentLoop] RAG found %d similar incident(s) for %s",
+                len(_rag_similar), event.id,
+            )
 
         if prior_context is None:
             self._dedup_stats["cold_start"] += 1
