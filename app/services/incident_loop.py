@@ -528,6 +528,8 @@ class IncidentLoop:
         incident.diagnosis = diagnosis.root_cause
         incident.confidence = diagnosis.confidence
         incident.reproduction_confirmed = diagnosis.reproduction_confirmed
+        incident.diagnosis_affected_file = diagnosis.affected_file
+        incident.diagnosis_affected_function = diagnosis.affected_function
         incident.diagnosis_completed_at = datetime.now(timezone.utc)
 
         if diagnosis.escalate:
