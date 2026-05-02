@@ -89,18 +89,35 @@ export function StatsPage() {
       </div>
 
       {prs.length === 0 ? (
-        <p style={emptyStyle}>No resolved agent PRs yet. Stats will appear here once incidents are resolved.</p>
+        <p style={emptyStyle}>No agent PRs yet.</p>
       ) : (
         <div style={cards}>
-          {prs.map((pr) => <PRCard key={pr.incident_id} pr={pr} />)}
+          {prs.map((pr) => (
+            <PRCard
+              key={pr.incident_id}
+              pr={pr}
+              onUnresolve={(id) => setPrs((prev) => prev.filter((p) => p.incident_id !== id))}
+            />
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function PRCard({ pr }: { pr: PRStat }) {
+function PRCard({ pr, onUnresolve }: { pr: PRStat; onUnresolve: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [unresolving, setUnresolving] = useState(false);
+
+  async function handleUnresolve() {
+    setUnresolving(true);
+    try {
+      await fetch(`/incidents/${pr.incident_id}/unresolve`, { method: "POST" });
+      onUnresolve(pr.incident_id);
+    } finally {
+      setUnresolving(false);
+    }
+  }
 
   return (
     <div style={card}>
@@ -122,6 +139,10 @@ function PRCard({ pr }: { pr: PRStat }) {
             </a>
           )}
           <CIBadge conclusion={pr.ci_conclusion} />
+          <button style={actionBtn("#1c2a3a", "#60a5fa", unresolving)} onClick={handleUnresolve} disabled={unresolving}>
+            {unresolving ? "…" : "Unresolve"}
+          </button>
+          <DeleteButton incidentId={pr.incident_id} onDelete={onUnresolve} />
         </div>
       </div>
 
@@ -204,6 +225,25 @@ function ciIcon(conclusion: string | null): string {
 function shortTs(iso: string): string {
   const d = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : iso + "Z");
   return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function DeleteButton({ incidentId, onDelete }: { incidentId: string; onDelete: (id: string) => void }) {
+  const [deleting, setDeleting] = useState(false);
+  async function handleDelete() {
+    if (!window.confirm("Permanently delete this incident?")) return;
+    setDeleting(true);
+    try {
+      await fetch(`/incidents/${incidentId}`, { method: "DELETE" });
+      onDelete(incidentId);
+    } finally {
+      setDeleting(false);
+    }
+  }
+  return (
+    <button style={actionBtn("#3a1e1e", "#f87171", deleting)} onClick={handleDelete} disabled={deleting}>
+      {deleting ? "…" : "Delete"}
+    </button>
+  );
 }
 
 function CIBadge({ conclusion }: { conclusion: "success" | "failure" | "pending" | null }) {
@@ -309,6 +349,14 @@ const prLink: React.CSSProperties = {
   color: "#60a5fa", textDecoration: "none", fontWeight: 700, fontSize: 11,
   border: "1px solid rgba(96,165,250,0.3)", borderRadius: 4, padding: "3px 8px",
 };
+
+const actionBtn = (bg: string, color: string, disabled: boolean): React.CSSProperties => ({
+  background: bg,
+  border: `1px solid ${color}40`,
+  color: disabled ? "#4b5563" : color,
+  borderRadius: 4, padding: "3px 9px", fontSize: 10, fontWeight: 600,
+  cursor: disabled ? "not-allowed" : "pointer", whiteSpace: "nowrap" as const,
+});
 
 const ciBadge = (bg: string, color: string): React.CSSProperties => ({
   fontSize: 10, fontWeight: 700, background: bg, color, borderRadius: 4, padding: "3px 8px",

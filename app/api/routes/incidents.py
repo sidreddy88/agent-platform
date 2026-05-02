@@ -381,6 +381,30 @@ async def resolve_incident(incident_id: str) -> Dict[str, Any]:
     return {"status": "resolved", "incident_id": incident_id}
 
 
+@router.post("/{incident_id}/unresolve")
+async def unresolve_incident(incident_id: str) -> Dict[str, Any]:
+    """Move a resolved incident back to awaiting_approval (PR still exists)."""
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    incident.status = IncidentStatus.AWAITING_APPROVAL
+    incident.human_decision = None
+    incident.outcome = None
+    incident.resolved_at = None
+    incident_store.update(incident)
+    return {"status": "unresolved", "incident_id": incident_id}
+
+
+@router.delete("/{incident_id}")
+async def delete_incident(incident_id: str) -> Dict[str, Any]:
+    """Permanently delete a single incident from the store."""
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    incident_store.delete(incident_id)
+    return {"status": "deleted", "incident_id": incident_id}
+
+
 @router.post("/{incident_id}/archive")
 async def archive_incident(incident_id: str) -> Dict[str, Any]:
     incident = incident_store.get(incident_id)
