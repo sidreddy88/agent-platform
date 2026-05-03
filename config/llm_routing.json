@@ -2,8 +2,8 @@
   "routing": {
     "triage":    { "model": "claude-haiku-4-5-20251001", "fallback_model": "claude-sonnet-4-6" },
     "diagnosis": { "model": "claude-sonnet-4-6" },
-    "fix":       { "model": "claude-sonnet-4-6" },
-    "review":    { "model": "gpt-4.5" },
+    "fix":       { "model": "gpt-4.5" },
+    "review":    { "model": "claude-sonnet-4-6" },
     "critique":  { "model": "claude-haiku-4-5-20251001", "fallback_model": "claude-sonnet-4-6" }
   },
   "cost_per_1k_tokens": {
