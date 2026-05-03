@@ -43,7 +43,7 @@ async def approve_all_events() -> Dict[str, Any]:
 
 @router.post("/{event_id}/dismiss")
 async def dismiss_event(event_id: str) -> Dict[str, Any]:
-    pe = pending_event_store.remove(event_id)
+    pe = pending_event_store.dismiss(event_id)
     if not pe:
         raise HTTPException(status_code=404, detail="Pending event not found")
     await broadcast({"type": "pending_event_removed", "id": event_id})
