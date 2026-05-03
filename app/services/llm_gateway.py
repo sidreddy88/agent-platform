@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -143,7 +144,25 @@ class LLMGateway:
         self._config = self._load_config(Path(config_path))
         self._provider = LiteLLMProvider()
         self._daily_costs: dict[str, dict[str, float]] = {}
+        self._sync_api_keys()
         self._validate_fix_review_providers()
+
+    @staticmethod
+    def _sync_api_keys() -> None:
+        """Sync API keys from pydantic settings into os.environ so LiteLLM can read them.
+
+        pydantic-settings loads .env into the Settings object but does NOT write values
+        back to os.environ. LiteLLM reads keys from os.environ directly, so without this
+        sync it raises AuthenticationError even when keys are present in .env.
+        """
+        from app.core.config import settings  # lazy to avoid circular import at module load
+        pairs = [
+            ("ANTHROPIC_API_KEY", settings.anthropic_api_key),
+            ("OPENAI_API_KEY", settings.openai_api_key),
+        ]
+        for env_var, value in pairs:
+            if value and not os.environ.get(env_var):
+                os.environ[env_var] = value
 
     def _validate_fix_review_providers(self) -> None:
         """Enforce that fix and review always use different LLM providers."""
