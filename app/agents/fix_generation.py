@@ -346,11 +346,11 @@ class FixGenerationAgent(BaseAgent):
                         critique = await self._critique_fix(old_function, new_function, incident, file_path)
                         steps.append(f"✓ Alt-frame critique: {critique[:120]}")
                     else:
-                        steps.append(f"⚠ Alt-frame fix generation failed — proceeding with original")
+                        steps.append("⚠ Alt-frame fix generation failed — proceeding with original")
                 except Exception as exc:
                     steps.append(f"⚠ Alt-frame retry failed: {exc} — proceeding with original")
             else:
-                steps.append(f"⚠ Critique LIKELY WRONG but no alternate frame available — proceeding")
+                steps.append("⚠ Critique LIKELY WRONG but no alternate frame available — proceeding")
 
         # ── 3d. Sandbox validation with retry ─────────────────────────
         from app.services.sandbox import SandboxService

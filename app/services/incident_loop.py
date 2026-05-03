@@ -37,6 +37,7 @@ from app.services.circuit_breaker import CircuitOpenError, circuit_breaker_regis
 from app.services.dod_checker import dod_checker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
+from app.services.llm_gateway import llm_gateway
 from app.services.schema_validator import HandoffValidationError, handoff_validator
 from app.services.session_logger import session_logger
 
@@ -241,10 +242,15 @@ class IncidentLoop:
 
     def __init__(self) -> None:
         self._running = False
-        self._triage = TriageAgent()
+        # TriageAgent accepts llm= directly; others are patched after construction
+        # so no agent subclass code needs to change.
+        self._triage = TriageAgent(llm=llm_gateway.get_llm_service_for("triage"))
         self._diagnosis = DiagnosisAgent()
+        self._diagnosis._llm = llm_gateway.get_llm_service_for("diagnosis")
         self._fix_agent = FixGenerationAgent()
+        self._fix_agent._llm = llm_gateway.get_llm_service_for("fix")
         self._review_agent = CodeReviewAgent()
+        self._review_agent._llm = llm_gateway.get_llm_service_for("review")
         try:
             from app.services.rag import RAGService
             self._rag: RAGService | None = RAGService()

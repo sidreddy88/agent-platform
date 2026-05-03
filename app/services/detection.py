@@ -16,13 +16,12 @@ import logging
 import re
 from typing import List
 
+from app.api.websocket_dashboard import broadcast
 from app.core.config import settings
 from app.models.events import ErrorEvent, EventSource, Severity
 from app.services.aws import AWSService
 from app.services.cloudflare_service import cloudflare_service
 from app.services.digitalocean import do_service
-from app.api.websocket_dashboard import broadcast
-from app.services.event_queue import event_queue
 from app.services.pending_events import pending_event_store
 
 logger = logging.getLogger(__name__)
