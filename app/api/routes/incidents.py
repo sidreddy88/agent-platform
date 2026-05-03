@@ -127,6 +127,8 @@ async def scan_last_24h() -> Dict[str, Any]:
                     },
                 )
                 pe = pending_event_store.add(event)
+                if pe is None:
+                    continue
                 await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
                 queued.append({"id": event.id, "title": event.title, "service": service})
                 await _scan_log(f"  → pending approval: [{error_type}] {msg[:80].strip()}", level="event")
