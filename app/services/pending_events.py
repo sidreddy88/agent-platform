@@ -4,6 +4,7 @@ Events are added by the scan endpoint and removed when approved or dismissed.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -19,13 +20,29 @@ class PendingEvent:
     _event: Any           # the full ErrorEvent, not sent to the client
 
 
+def _content_sig(event: Any) -> str:
+    """Stable content signature for dedup — same error across scan runs has same sig."""
+    desc = event.description or event.title or ""
+    normalized = re.sub(r"\b\d+\b", "N", desc[:120]).strip()
+    return f"{event.service}|{event.error_type}|{normalized[:80]}"
+
+
 class PendingEventStore:
     def __init__(self) -> None:
         self._events: dict[str, PendingEvent] = {}
+        self._sigs: dict[str, str] = {}   # sig → event_id
 
     def add(self, event: Any) -> PendingEvent:
         description = event.description or event.title or ""
         first_line = description.split("\n")[0].strip()[:250]
+
+        # Skip if an identical event is already pending
+        sig = _content_sig(event)
+        if sig in self._sigs:
+            existing_id = self._sigs[sig]
+            if existing_id in self._events:
+                return self._events[existing_id]
+
         pe = PendingEvent(
             id=event.id,
             first_line=first_line,
@@ -36,6 +53,7 @@ class PendingEventStore:
             _event=event,
         )
         self._events[pe.id] = pe
+        self._sigs[sig] = pe.id
         return pe
 
     def list_all(self) -> list[PendingEvent]:
@@ -45,11 +63,16 @@ class PendingEventStore:
         return self._events.get(event_id)
 
     def remove(self, event_id: str) -> Optional[PendingEvent]:
-        return self._events.pop(event_id, None)
+        pe = self._events.pop(event_id, None)
+        if pe:
+            sig = _content_sig(pe._event)
+            self._sigs.pop(sig, None)
+        return pe
 
     def clear(self) -> list[PendingEvent]:
         events = list(self._events.values())
         self._events.clear()
+        self._sigs.clear()
         return events
 
     def serialize(self, pe: PendingEvent) -> Dict[str, Any]:
