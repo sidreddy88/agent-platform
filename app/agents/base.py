@@ -343,7 +343,7 @@ class BaseAgent:
 
         finally:
             if not _failed:
-                agent_tracker.complete(_run_id, _total_input_tokens, _total_output_tokens, self._llm._model)
+                agent_tracker.complete(_run_id, _total_input_tokens, _total_output_tokens, getattr(self._llm, "_model", "unknown"))
 
     # ------------------------------------------------------------------
     # Tool execution
