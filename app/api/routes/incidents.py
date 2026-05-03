@@ -76,14 +76,14 @@ async def _scan_log(message: str, level: str = "info") -> None:
 @router.post("/scan")
 async def scan_last_24h() -> Dict[str, Any]:
     """
-    Scan ECS log groups for errors in the last 7 days and feed each into
+    Scan ECS log groups for errors in the last 14 days and feed each into
     the full triage → diagnosis → fix pipeline.
     """
     aws = AWSService()
     raw: str = getattr(settings, "ecs_log_groups", "")
     log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []
 
-    await _scan_log(f"Scan started — checking {len(log_groups)} log group(s) over last 7 days")
+    await _scan_log(f"Scan started — checking {len(log_groups)} log group(s) over last 14 days")
 
     queued = []
     errors = []
@@ -91,7 +91,7 @@ async def scan_last_24h() -> Dict[str, Any]:
         service = log_group.rstrip("/").split("/")[-1]
         await _scan_log(f"Scanning {log_group} ...")
         try:
-            matches = aws.get_error_logs(log_group, minutes=10080, limit=100)
+            matches = aws.get_error_logs(log_group, minutes=20160, limit=100)
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
             seen: set[str] = set()
