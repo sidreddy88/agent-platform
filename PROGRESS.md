@@ -8,8 +8,8 @@ of each working session.
 ## Current State
 
 - **Branch:** main
-- **Latest commit:** `a605a6c` — chore: ignore incidents.db, .claude/, and memory/ directories
-- **Tests:** 620 pass, 9 pre-existing failures (see Known Issues)
+- **Latest commit:** `7a58bc0` — Merge pull request #80 from sidreddy88/feat/llm-gateway
+- **Tests:** 621 pass, 9 pre-existing failures (see Known Issues)
 - **Lint:** clean (`make lint` passes)
 
 ---
@@ -66,6 +66,14 @@ All five must be true before a session is considered complete.
 - Event approval flow (pending events queue)
 - Archive and mark-wrong-fix actions
 - Circuit breaker status UI
+
+### LLM Gateway (PR #80)
+- `LLMGateway` — config-driven routing via `config/llm_routing.json`; all agents route through it
+- `LiteLLMProvider` — single universal adapter replacing separate Anthropic/OpenAI SDK clients
+- `GatewayLLMService` — duck-typed drop-in for `LLMService`; injected into all pipeline agents
+- fix=`claude-sonnet-4-6`, review=`gpt-4.5`; hard validation at init prevents same-provider config
+- Cost accumulation by task type and provider; exposed via `/metrics`
+- Langfuse generation spans wired into every LLM call
 
 ### Infrastructure
 - SQLite persistence (`agent_platform.db`) — WAL mode, 5 tables
