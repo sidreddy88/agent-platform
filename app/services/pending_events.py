@@ -83,6 +83,10 @@ class PendingEventStore:
             self._dismissed_sigs.add(sig)
         return pe
 
+    def reset_dismissed(self) -> None:
+        """Clear dismissed-sig memory so the next scan surfaces all found events."""
+        self._dismissed_sigs.clear()
+
     def clear(self) -> list[PendingEvent]:
         events = list(self._events.values())
         self._events.clear()

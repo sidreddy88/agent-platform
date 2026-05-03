@@ -83,6 +83,7 @@ async def scan_last_24h() -> Dict[str, Any]:
     raw: str = getattr(settings, "ecs_log_groups", "")
     log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []
 
+    pending_event_store.reset_dismissed()
     await _scan_log(f"Scan started — checking {len(log_groups)} log group(s) over last 14 days")
 
     queued = []
