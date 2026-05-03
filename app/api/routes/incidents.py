@@ -167,8 +167,9 @@ async def list_active_incidents() -> List[Dict[str, Any]]:
 
 @router.get("/metrics")
 async def get_metrics() -> Dict[str, Any]:
-    """MTTD/MTTR, false positive rate, totals, and dedup layer hit rates."""
+    """MTTD/MTTR, false positive rate, totals, dedup layer hit rates, and LLM costs."""
     from app.services.incident_loop import incident_loop
+    from app.services.llm_gateway import llm_gateway
     metrics = incident_store.metrics()
     stats = incident_loop.dedup_stats
     total = sum(stats.values()) or 1
@@ -179,6 +180,7 @@ async def get_metrics() -> Dict[str, Any]:
         "rag_hit_pct":     round(stats["rag_hit"]    / total * 100, 1),
         "cold_start_pct":  round(stats["cold_start"] / total * 100, 1),
     }
+    metrics.update(llm_gateway.costs_today())
     return metrics
 
 

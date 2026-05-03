@@ -184,8 +184,9 @@ class BaseAgent:
             print(step)
     """
 
-    def __init__(self, llm: LLMService | None = None) -> None:
+    def __init__(self, llm: LLMService | None = None, gateway: Any = None) -> None:
         self._llm = llm or LLMService()
+        self._gateway = gateway
         # name → (async callable, description shown to Claude)
         self._tools: dict[str, tuple[ToolFn, str]] = {}
         # set by @trace_agent at runtime — no-op sentinel until then
@@ -220,6 +221,28 @@ class BaseAgent:
         if not docs:
             return system
         return f"{docs}\n\n---\n\n{system}"
+
+    async def _call_llm(
+        self,
+        messages: list[dict],
+        task_type: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Call the LLM via the gateway (if configured) and return LLMResponse.
+        Falls back to LLMService when no gateway is injected."""
+        if self._gateway is not None:
+            return await self._gateway.complete(messages, task_type or "unknown", **kwargs)
+
+        from app.services.llm_gateway import LLMResponse
+        text = await self._llm.complete(messages, **kwargs)
+        return LLMResponse(
+            content=text,
+            input_tokens=self._llm.last_input_tokens,
+            output_tokens=self._llm.last_output_tokens,
+            provider="anthropic",
+            model=getattr(self._llm, "_model", "unknown"),
+            cost_usd=0.0,
+        )
 
     # ------------------------------------------------------------------
     # Tool registration

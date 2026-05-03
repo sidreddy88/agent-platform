@@ -8,8 +8,8 @@ of each working session.
 ## Current State
 
 - **Branch:** main
-- **Latest commit:** `65b630b` — Trim AGENTS.md to 85-line routing file; move content to topic docs
-- **Tests:** 585 pass, 4 pre-existing failures (see Known Issues)
+- **Latest commit:** `a605a6c` — chore: ignore incidents.db, .claude/, and memory/ directories
+- **Tests:** 620 pass, 9 pre-existing failures (see Known Issues)
 - **Lint:** clean (`make lint` passes)
 
 ---
@@ -79,25 +79,22 @@ All five must be true before a session is considered complete.
 
 _Nothing actively in progress._
 
-<!-- Template for active work:
-- [ ] Feature name (NN% — current blocker or next micro-step)
-  **Scope:** <files/areas to touch>
-  **Exclusions:** <what not to touch>
-  _Done when:_ <acceptance criterion>
--->
-
 ---
 
 ## Known Issues
 
 Pre-existing test failures — do not fix by removing assertions:
-- `tests/test_blast_radius.py::TestFixGenerationBlastRadius::test_protected_file_path_blocks_pr_creation`
-- `tests/test_blast_radius.py::TestFixGenerationBlastRadius::test_safe_fix_passes_blast_radius`
+- `tests/test_blast_radius.py::TestFixGenerationBlastRadius` (2 tests)
 - `tests/test_orchestrator.py::TestPipelineDispatch::test_cloudwatch_incident_fires_enrichment`
 - `tests/test_orchestrator.py::TestRouteLog::test_stats_incremented_correctly`
+- `tests/test_checkpoint.py::TestBaseAgentCheckpointIntegration` (2 tests)
+- `tests/test_incident_pipeline.py::TestApprovalResolution::test_approve_resolves_incident`
+- `tests/test_refix_from_review.py::TestRunPostFixRequestChanges` (3 tests)
+- `tests/test_schema_validator.py::TestValidateTriageViolations::test_unknown_blast_radius_raises`
 
 Root cause: LLM mock responses don't trigger blast radius evaluation; orchestrator
-`enrichment_fired` stat counter not incrementing. Needs underlying service behavior fixed.
+`enrichment_fired` stat counter not incrementing; checkpoint and refix tests rely on
+internal mocking patterns that diverged from current implementation.
 
 ---
 
