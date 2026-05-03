@@ -2,7 +2,7 @@
 Unit tests for LLMGateway:
   - LLMResponse cost calculation
   - Routing config loading
-  - AnthropicProvider response normalization
+  - LiteLLMProvider response normalization
   - complete_with_fallback trigger on low confidence
 """
 from __future__ import annotations
@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.llm_gateway import (
-    AnthropicProvider,
     GatewayLLMService,
+    LiteLLMProvider,
     LLMGateway,
     LLMResponse,
 )
@@ -25,8 +25,8 @@ from app.services.llm_gateway import (
 
 ROUTING_CONFIG = {
     "routing": {
-        "triage":    {"provider": "anthropic", "model": "claude-haiku-4-5-20251001", "fallback_model": "claude-sonnet-4-6"},
-        "diagnosis": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+        "triage":    {"model": "claude-haiku-4-5-20251001", "fallback_model": "claude-sonnet-4-6"},
+        "diagnosis": {"model": "claude-sonnet-4-6"},
     },
     "cost_per_1k_tokens": {
         "claude-haiku-4-5-20251001": {"input": 0.00025, "output": 0.00125},
@@ -40,7 +40,7 @@ def _make_gateway(config: dict | None = None) -> LLMGateway:
     cfg = config if config is not None else ROUTING_CONFIG
     gw = LLMGateway.__new__(LLMGateway)
     gw._config = cfg
-    gw._providers = {"anthropic": MagicMock(spec=AnthropicProvider)}
+    gw._provider = MagicMock(spec=LiteLLMProvider)
     gw._daily_costs = {}
     return gw
 
@@ -92,13 +92,13 @@ class TestRoutingConfig:
     def test_loads_provider_and_model(self):
         gw = _make_gateway()
         provider, model = gw._get_routing("triage")
-        assert provider == "anthropic"
+        assert provider == "anthropic"  # inferred from "claude-haiku-*"
         assert model == "claude-haiku-4-5-20251001"
 
     def test_unknown_task_type_uses_defaults(self):
         gw = _make_gateway()
         provider, model = gw._get_routing("unknown_task")
-        assert provider == "anthropic"
+        assert provider == "unknown"  # empty model string → can't infer provider
         assert model == "claude-sonnet-4-6"
 
     def test_missing_config_file_returns_empty(self):
@@ -118,38 +118,29 @@ class TestRoutingConfig:
 
 
 # ---------------------------------------------------------------------------
-# 3. AnthropicProvider response normalization
+# 3. LiteLLMProvider response normalization
 # ---------------------------------------------------------------------------
 
-class TestAnthropicProviderNormalization:
+def _make_litellm_response(content: str, prompt_tokens: int, completion_tokens: int) -> MagicMock:
+    """Build a minimal litellm-style response object."""
+    mock_usage = MagicMock(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    mock_message = MagicMock(content=content)
+    mock_choice = MagicMock(message=mock_message)
+    return MagicMock(choices=[mock_choice], usage=mock_usage)
+
+
+class TestLiteLLMProviderNormalization:
     @pytest.mark.asyncio
     async def test_complete_returns_llm_response(self):
-        mock_usage = MagicMock(input_tokens=100, output_tokens=50)
-        mock_content = MagicMock(text="Hello, world!")
-        mock_response = MagicMock(
-            content=[mock_content],
-            usage=mock_usage,
-        )
-        with patch("anthropic.AsyncAnthropic") as mock_cls:
-            mock_client = AsyncMock()
-            mock_client.messages.create = AsyncMock(return_value=mock_response)
-            mock_cls.return_value = mock_client
+        mock_resp = _make_litellm_response("Hello, world!", 100, 50)
 
-            with patch("app.services.llm_gateway.circuit_breaker_registry") as mock_cb_reg:
-                async def _passthrough(coro):
-                    return await coro
-                mock_cb = MagicMock()
-                mock_cb.call = _passthrough
-                mock_cb_reg.get_or_create.return_value = mock_cb
-
-                provider = AnthropicProvider()
-                provider._client = mock_client
-
-                result = await provider.complete(
-                    messages=[{"role": "user", "content": "hi"}],
-                    model="claude-haiku-4-5-20251001",
-                    system="You are helpful.",
-                )
+        with patch("litellm.acompletion", new=AsyncMock(return_value=mock_resp)):
+            provider = LiteLLMProvider()
+            result = await provider.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-haiku-4-5-20251001",
+                system="You are helpful.",
+            )
 
         assert isinstance(result, LLMResponse)
         assert result.content == "Hello, world!"
@@ -160,30 +151,35 @@ class TestAnthropicProviderNormalization:
         assert result.cost_usd == 0.0  # set by gateway, not provider
 
     @pytest.mark.asyncio
-    async def test_system_prompt_passed_to_sdk(self):
-        mock_usage = MagicMock(input_tokens=10, output_tokens=5)
-        mock_response = MagicMock(content=[MagicMock(text="ok")], usage=mock_usage)
+    async def test_system_prompt_prepended_as_message(self):
+        """System prompt becomes the first message in the list passed to litellm."""
+        mock_resp = _make_litellm_response("ok", 10, 5)
 
-        with patch("app.services.llm_gateway.circuit_breaker_registry") as mock_cb_reg:
-            async def _passthrough(coro):
-                return await coro
-            mock_cb = MagicMock()
-            mock_cb.call = _passthrough
-            mock_cb_reg.get_or_create.return_value = mock_cb
-
-            provider = AnthropicProvider.__new__(AnthropicProvider)
-            mock_client = AsyncMock()
-            mock_client.messages.create = AsyncMock(return_value=mock_response)
-            provider._client = mock_client
-
+        with patch("litellm.acompletion", new=AsyncMock(return_value=mock_resp)) as mock_call:
+            provider = LiteLLMProvider()
             await provider.complete(
                 messages=[{"role": "user", "content": "hi"}],
                 model="claude-haiku-4-5-20251001",
                 system="Be concise.",
             )
 
-        call_kwargs = mock_client.messages.create.call_args.kwargs
-        assert call_kwargs["system"] == "Be concise."
+        sent_messages = mock_call.call_args.kwargs["messages"]
+        assert sent_messages[0] == {"role": "system", "content": "Be concise."}
+        assert sent_messages[1] == {"role": "user", "content": "hi"}
+
+    @pytest.mark.asyncio
+    async def test_openai_model_inferred_as_openai_provider(self):
+        mock_resp = _make_litellm_response("done", 20, 10)
+
+        with patch("litellm.acompletion", new=AsyncMock(return_value=mock_resp)):
+            provider = LiteLLMProvider()
+            result = await provider.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4.1",
+            )
+
+        assert result.provider == "openai"
+        assert result.model == "gpt-4.1"
 
 
 # ---------------------------------------------------------------------------
