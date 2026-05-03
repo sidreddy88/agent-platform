@@ -17,6 +17,7 @@ from app.services.llm_gateway import (
     LiteLLMProvider,
     LLMGateway,
     LLMResponse,
+    _infer_provider,
 )
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,37 @@ class TestRoutingConfig:
         provider, model = gw._get_routing("triage")
         assert provider == "openai"
         assert model == "gpt-4o-mini"
+
+    def test_fix_and_review_use_different_providers(self):
+        """fix=Claude, review=GPT — providers must differ."""
+        cfg = {
+            **ROUTING_CONFIG,
+            "routing": {
+                **ROUTING_CONFIG["routing"],
+                "fix":    {"model": "claude-sonnet-4-6"},
+                "review": {"model": "gpt-4.5"},
+            },
+        }
+        gw = _make_gateway(cfg)
+        _, fix_model = gw._get_routing("fix")
+        _, review_model = gw._get_routing("review")
+        assert _infer_provider(fix_model) != _infer_provider(review_model)
+
+    def test_same_provider_for_fix_and_review_raises(self):
+        """Gateway init must raise if fix and review resolve to the same provider."""
+        bad_cfg = {
+            "routing": {
+                "fix":    {"model": "claude-sonnet-4-6"},
+                "review": {"model": "claude-haiku-4-5-20251001"},
+            },
+            "cost_per_1k_tokens": {},
+        }
+        gw = LLMGateway.__new__(LLMGateway)
+        gw._config = bad_cfg
+        gw._provider = MagicMock(spec=LiteLLMProvider)
+        gw._daily_costs = {}
+        with pytest.raises(ValueError, match="fix and review must use different providers"):
+            gw._validate_fix_review_providers()
 
 
 # ---------------------------------------------------------------------------

@@ -141,10 +141,22 @@ class GatewayLLMService:
 class LLMGateway:
     def __init__(self, config_path: str | Path = _DEFAULT_CONFIG) -> None:
         self._config = self._load_config(Path(config_path))
-        # Single LiteLLM adapter handles all providers
         self._provider = LiteLLMProvider()
-        # {date_iso: {"_total": float, "task:<n>": float, "provider:<n>": float}}
         self._daily_costs: dict[str, dict[str, float]] = {}
+        self._validate_fix_review_providers()
+
+    def _validate_fix_review_providers(self) -> None:
+        """Enforce that fix and review always use different LLM providers."""
+        _, fix_model = self._get_routing("fix")
+        _, review_model = self._get_routing("review")
+        fix_provider = _infer_provider(fix_model)
+        review_provider = _infer_provider(review_model)
+        if fix_provider == review_provider and fix_provider != "unknown":
+            raise ValueError(
+                f"fix and review must use different providers, but both resolved to "
+                f"'{fix_provider}' (fix={fix_model}, review={review_model}). "
+                "Update config/llm_routing.json to use opposite providers."
+            )
 
     @staticmethod
     def _load_config(path: Path) -> dict:
