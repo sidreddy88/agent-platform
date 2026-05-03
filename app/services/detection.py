@@ -21,7 +21,9 @@ from app.models.events import ErrorEvent, EventSource, Severity
 from app.services.aws import AWSService
 from app.services.cloudflare_service import cloudflare_service
 from app.services.digitalocean import do_service
+from app.api.websocket_dashboard import broadcast
 from app.services.event_queue import event_queue
+from app.services.pending_events import pending_event_store
 
 logger = logging.getLogger(__name__)
 
@@ -481,10 +483,11 @@ class DetectionService:
 
         for event in all_events:
             try:
-                event_queue.enqueue_nowait(event)
-                logger.info("[%s] Enqueued: %s", event.severity, event.title)
+                pe = pending_event_store.add(event)
+                await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
+                logger.info("[%s] Pending approval: %s", event.severity, event.title)
             except Exception:
-                logger.warning("Event queue full — dropping: %s", event.title)
+                logger.warning("Failed to queue for approval: %s", event.title)
 
         return all_events
 
