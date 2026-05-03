@@ -123,6 +123,11 @@ class GatewayLLMService:
         self.last_input_tokens: int = 0
         self.last_output_tokens: int = 0
 
+    @property
+    def _model(self) -> str:
+        _, model = self._gateway._get_routing(self._task_type)
+        return model
+
     async def complete(
         self,
         messages: list[dict],
