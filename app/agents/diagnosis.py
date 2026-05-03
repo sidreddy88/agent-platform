@@ -123,20 +123,46 @@ class DiagnosisResult:
     raw_llm: str = ""
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Return the first top-level {...} from text, respecting quoted strings and nested braces."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text[start:], start):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+        elif not in_string:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+    return None
+
+
 def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
     # Extraction strategies in priority order:
     # 1. JSON fenced code block  (```json ... ```)
-    # 2. Last {...} block        (LLMs sometimes emit a preamble with stray braces)
-    # 3. First {...} block       (original behaviour)
+    # 2. Balanced brace extraction — handles {} nested inside string values
     candidates: list[str] = []
-    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", answer, re.DOTALL)
+    code_block = re.search(r"```(?:json)?\s*(.*?)\s*```", answer, re.DOTALL)
     if code_block:
-        candidates.append(code_block.group(1))
-    all_blocks = re.findall(r"\{.*?\}", answer, re.DOTALL)
-    if all_blocks:
-        candidates.append(all_blocks[-1])   # last block
-        if len(all_blocks) > 1:
-            candidates.append(all_blocks[0])  # first block as last resort
+        block = code_block.group(1).strip()
+        if block.startswith("{"):
+            candidates.append(block)
+    outer = _extract_json_object(answer)
+    if outer:
+        candidates.append(outer)
 
     for candidate in candidates:
         try:
