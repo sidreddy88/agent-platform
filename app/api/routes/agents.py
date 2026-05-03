@@ -8,9 +8,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.models.events import ErrorEvent, EventSource, IncidentStatus
+from app.api.websocket_dashboard import broadcast
 from app.services.agent_tracker import agent_tracker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
+from app.services.pending_events import pending_event_store
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -289,12 +291,13 @@ async def run_demo():
             detected_at=datetime.utcnow(),
         )
 
-    await event_queue.enqueue(event)
+    pe = pending_event_store.add(event)
+    await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
 
     return {
         "event_id": event.id,
         "title": event.title,
         "service": event.service,
         "source": origin,
-        "message": "Event injected — watch the Agents tab for live progress",
+        "message": "Event added to approval queue — approve it in the Events tab to start the pipeline",
     }

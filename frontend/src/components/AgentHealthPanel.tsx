@@ -184,15 +184,14 @@ export function AgentHealthPanel({ snapshot, connected }: Props) {
             onClick={runDemo}
             disabled={demo.status === "loading" || demo.status === "running"}
           >
-            {demo.status === "loading" ? "Injecting..." : "Run on latest ECS error"}
+            {demo.status === "loading" ? "Queuing..." : "Queue latest ECS error"}
           </button>
           {demo.status === "running" && (
             <div style={demoStatus}>
               <span style={pulseDot} />
               <span style={demoLabel}>
-                Running pipeline on{" "}
                 <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{demo.title}</span>
-                {" "}· {demo.service}
+                {" "}· {demo.service} added to Events tab — approve to start pipeline
                 {demo.source === "synthetic" && (
                   <span style={{ color: "#6b7280" }}> (synthetic)</span>
                 )}
