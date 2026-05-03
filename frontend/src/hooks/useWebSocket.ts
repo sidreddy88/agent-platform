@@ -61,7 +61,9 @@ export function useDashboardWS() {
           return [...prev, entry];
         });
       } else if (msg.type === "pending_event_added") {
-        setPendingEvents((prev) => [...prev, msg.event]);
+        setPendingEvents((prev) =>
+          prev.some((e) => e.id === msg.event.id) ? prev : [...prev, msg.event]
+        );
       } else if (msg.type === "pending_event_removed") {
         setPendingEvents((prev) => prev.filter((e) => e.id !== msg.id));
       } else if (msg.type === "pending_events_cleared") {
