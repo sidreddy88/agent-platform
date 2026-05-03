@@ -6,6 +6,10 @@ config/llm_routing.json to select the right provider and model.  All calls
 are logged (provider, model, task_type, tokens, cost, latency) and costs
 are accumulated for the /metrics endpoint.
 
+LiteLLM is used as the single universal adapter — it supports Anthropic,
+OpenAI, and 100+ other providers through a unified API.  Adding a new
+provider requires only a config change, no new provider class.
+
 Usage inside IncidentLoop:
     gateway = LLMGateway()
     triage_agent = TriageAgent(llm=gateway.get_llm_service_for("triage"))
@@ -20,11 +24,6 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
-
-import anthropic
-
-from app.core.config import settings
-from app.services.circuit_breaker import circuit_breaker_registry
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +59,8 @@ class BaseProvider(ABC):
     ) -> LLMResponse: ...
 
 
-class AnthropicProvider(BaseProvider):
-    def __init__(self) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+class LiteLLMProvider(BaseProvider):
+    """Universal provider backed by LiteLLM — works with any supported model."""
 
     async def complete(
         self,
@@ -71,66 +69,40 @@ class AnthropicProvider(BaseProvider):
         max_tokens: int = 4096,
         **kwargs: Any,
     ) -> LLMResponse:
-        system: str | None = kwargs.pop("system", None)
-        call_kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": messages,
-        }
-        if system:
-            call_kwargs["system"] = system
+        import litellm
 
-        async def _call() -> LLMResponse:
-            response = await self._client.messages.create(**call_kwargs)
-            return LLMResponse(
-                content=response.content[0].text,
-                input_tokens=response.usage.input_tokens if response.usage else 0,
-                output_tokens=response.usage.output_tokens if response.usage else 0,
-                provider="anthropic",
-                model=model,
-                cost_usd=0.0,
-            )
-
-        cb = circuit_breaker_registry.get_or_create(
-            "anthropic_llm", failure_threshold=5, timeout_seconds=60.0
-        )
-        return await cb.call(_call())
-
-
-class OpenAIProvider(BaseProvider):
-    def __init__(self) -> None:
-        try:
-            import openai
-            self._client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
-        except ImportError as exc:
-            raise ValueError("openai package is not installed") from exc
-
-    async def complete(
-        self,
-        messages: list[dict],
-        model: str,
-        max_tokens: int = 4096,
-        **kwargs: Any,
-    ) -> LLMResponse:
         system: str | None = kwargs.pop("system", None)
         msgs = list(messages)
         if system:
             msgs = [{"role": "system", "content": system}] + msgs
 
-        response = await self._client.chat.completions.create(
+        response = await litellm.acompletion(
             model=model,
-            max_tokens=max_tokens,
             messages=msgs,
+            max_tokens=max_tokens,
         )
         usage = response.usage
+        provider = _infer_provider(model)
         return LLMResponse(
             content=response.choices[0].message.content or "",
             input_tokens=usage.prompt_tokens if usage else 0,
             output_tokens=usage.completion_tokens if usage else 0,
-            provider="openai",
+            provider=provider,
             model=model,
             cost_usd=0.0,
         )
+
+
+def _infer_provider(model: str) -> str:
+    """Best-effort provider label for logging/cost tracking."""
+    m = model.lower()
+    if "/" in m:
+        return m.split("/")[0]
+    if "claude" in m:
+        return "anthropic"
+    if "gpt" in m or "o1" in m or "o3" in m:
+        return "openai"
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -169,15 +141,8 @@ class GatewayLLMService:
 class LLMGateway:
     def __init__(self, config_path: str | Path = _DEFAULT_CONFIG) -> None:
         self._config = self._load_config(Path(config_path))
-        self._providers: dict[str, BaseProvider] = {
-            "anthropic": AnthropicProvider(),
-        }
-        if settings.openai_api_key:
-            try:
-                self._providers["openai"] = OpenAIProvider()
-            except Exception as exc:
-                logger.warning("[gateway] OpenAI provider unavailable: %s", exc)
-
+        # Single LiteLLM adapter handles all providers
+        self._provider = LiteLLMProvider()
         # {date_iso: {"_total": float, "task:<n>": float, "provider:<n>": float}}
         self._daily_costs: dict[str, dict[str, float]] = {}
 
@@ -191,7 +156,8 @@ class LLMGateway:
 
     def _get_routing(self, task_type: str) -> tuple[str, str]:
         entry = self._config.get("routing", {}).get(task_type, {})
-        return entry.get("provider", "anthropic"), entry.get("model", "claude-sonnet-4-6")
+        provider = entry.get("provider") or _infer_provider(entry.get("model", ""))
+        return provider, entry.get("model", "claude-sonnet-4-6")
 
     def _compute_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
         rates = self._config.get("cost_per_1k_tokens", {}).get(model, {})
@@ -264,10 +230,9 @@ class LLMGateway:
         **kwargs: Any,
     ) -> LLMResponse:
         provider_name, model = self._get_routing(task_type)
-        provider = self._providers.get(provider_name) or self._providers["anthropic"]
 
         start = time.perf_counter()
-        raw = await self._call_provider(provider, messages, model, task_type, system=system, **kwargs)
+        raw = await self._call_provider(self._provider, messages, model, task_type, system=system, **kwargs)
         latency_ms = (time.perf_counter() - start) * 1000
 
         cost = self._compute_cost(model, raw.input_tokens, raw.output_tokens)
@@ -307,12 +272,11 @@ class LLMGateway:
         if not fallback_model:
             return resp
 
-        provider_name = routing.get("provider", "anthropic")
-        provider = self._providers.get(provider_name) or self._providers["anthropic"]
+        provider_name = routing.get("provider") or _infer_provider(fallback_model)
         fallback_task = f"{task_type}_fallback"
 
         start = time.perf_counter()
-        raw = await self._call_provider(provider, messages, fallback_model, fallback_task, system=system, **kwargs)
+        raw = await self._call_provider(self._provider, messages, fallback_model, fallback_task, system=system, **kwargs)
         latency_ms = (time.perf_counter() - start) * 1000
 
         cost = self._compute_cost(fallback_model, raw.input_tokens, raw.output_tokens)

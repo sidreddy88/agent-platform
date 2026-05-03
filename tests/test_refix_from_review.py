@@ -23,7 +23,6 @@ from app.agents.fix_generation import FixResult
 from app.models.events import ErrorEvent, EventSource, IncidentState, IncidentStatus
 from app.services.incident_loop import _extract_review_recommendation
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
