@@ -292,6 +292,14 @@ async def run_demo():
         )
 
     pe = pending_event_store.add(event)
+    if pe is None:
+        return {
+            "event_id": event.id,
+            "title": event.title,
+            "service": event.service,
+            "source": origin,
+            "message": "Event was previously dismissed — clear dismissed events or restart to re-queue it",
+        }
     await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
 
     return {

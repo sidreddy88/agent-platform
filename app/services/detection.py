@@ -484,6 +484,8 @@ class DetectionService:
         for event in all_events:
             try:
                 pe = pending_event_store.add(event)
+                if pe is None:
+                    continue
                 await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
                 logger.info("[%s] Pending approval: %s", event.severity, event.title)
             except Exception:

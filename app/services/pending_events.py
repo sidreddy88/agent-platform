@@ -30,14 +30,18 @@ def _content_sig(event: Any) -> str:
 class PendingEventStore:
     def __init__(self) -> None:
         self._events: dict[str, PendingEvent] = {}
-        self._sigs: dict[str, str] = {}   # sig → event_id
+        self._sigs: dict[str, str] = {}          # sig → event_id (pending)
+        self._dismissed_sigs: set[str] = set()   # sigs the user has dismissed this session
 
-    def add(self, event: Any) -> PendingEvent:
+    def add(self, event: Any) -> Optional[PendingEvent]:
         description = event.description or event.title or ""
         first_line = description.split("\n")[0].strip()[:250]
 
-        # Skip if an identical event is already pending
         sig = _content_sig(event)
+        if sig in self._dismissed_sigs:
+            return None
+
+        # Return existing pending event for same content
         if sig in self._sigs:
             existing_id = self._sigs[sig]
             if existing_id in self._events:
@@ -63,16 +67,27 @@ class PendingEventStore:
         return self._events.get(event_id)
 
     def remove(self, event_id: str) -> Optional[PendingEvent]:
+        """Remove event without marking it dismissed (used for approve path)."""
         pe = self._events.pop(event_id, None)
         if pe:
             sig = _content_sig(pe._event)
             self._sigs.pop(sig, None)
         return pe
 
+    def dismiss(self, event_id: str) -> Optional[PendingEvent]:
+        """Remove event and prevent its content from resurfacing this session."""
+        pe = self._events.pop(event_id, None)
+        if pe:
+            sig = _content_sig(pe._event)
+            self._sigs.pop(sig, None)
+            self._dismissed_sigs.add(sig)
+        return pe
+
     def clear(self) -> list[PendingEvent]:
         events = list(self._events.values())
         self._events.clear()
         self._sigs.clear()
+        self._dismissed_sigs.clear()
         return events
 
     def serialize(self, pe: PendingEvent) -> Dict[str, Any]:
