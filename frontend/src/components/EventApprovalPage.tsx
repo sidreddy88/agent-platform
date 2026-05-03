@@ -9,6 +9,8 @@ export function EventApprovalPage({ events }: Props) {
   const [approving, setApproving] = useState<string | null>(null);
   const [approvingAll, setApprovingAll] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [dismissing, setDismissing] = useState<Set<string>>(new Set());
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded((prev) => {
@@ -28,7 +30,16 @@ export function EventApprovalPage({ events }: Props) {
   }
 
   async function handleDismiss(id: string) {
-    await fetch(`/events/${id}/dismiss`, { method: "POST" });
+    setDismissing((prev) => new Set([...prev, id]));
+    setDismissed((prev) => new Set([...prev, id]));
+    try {
+      await fetch(`/events/${id}/dismiss`, { method: "POST" });
+    } catch {
+      // revert on error
+      setDismissed((prev) => { const n = new Set(prev); n.delete(id); return n; });
+    } finally {
+      setDismissing((prev) => { const n = new Set(prev); n.delete(id); return n; });
+    }
   }
 
   async function handleApproveAll() {
@@ -40,68 +51,78 @@ export function EventApprovalPage({ events }: Props) {
     }
   }
 
+  const visible = events.filter((e) => !dismissed.has(e.id));
+
   return (
     <div style={container}>
       {/* Header */}
       <div style={header}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <h2 style={title}>Event Approval</h2>
-          {events.length > 0 && (
-            <span style={countBadge}>{events.length} pending</span>
+          {visible.length > 0 && (
+            <span style={countBadge}>{visible.length} pending</span>
           )}
         </div>
-        {events.length > 0 && (
+        {visible.length > 0 && (
           <button style={approveAllBtn(approvingAll)} onClick={handleApproveAll} disabled={approvingAll}>
-            {approvingAll ? "Queuing all..." : `Approve All (${events.length})`}
+            {approvingAll ? "Queuing all..." : `Approve All (${visible.length})`}
           </button>
         )}
       </div>
 
-      {events.length === 0 ? (
+      {visible.length === 0 ? (
         <div style={empty}>
           <p style={emptyText}>No pending errors. Run a scan to detect new issues.</p>
         </div>
       ) : (
         <div style={list}>
-          {events.map((ev) => (
-            <div key={ev.id} style={row}>
-              <div style={rowLeft}>
-                <div style={rowTop}>
-                  <span style={svcBadge}>{ev.service}</span>
-                  <span style={errorTypeBadge}>{ev.error_type}</span>
-                  {ev.log_group && <span style={logGroupText}>{ev.log_group}</span>}
-                </div>
-                <p style={firstLine}>{ev.first_line}</p>
-                {ev.full_description && (
-                  <div>
-                    <button
-                      style={expandBtn}
-                      onClick={() => toggleExpand(ev.id)}
-                    >
-                      <span style={expandChevron(expanded.has(ev.id))}>▸</span>
-                      {expanded.has(ev.id) ? "Hide details" : "Show details"}
-                    </button>
-                    {expanded.has(ev.id) && (
-                      <pre style={detailPre}>{ev.full_description}</pre>
-                    )}
+          {visible.map((ev) => {
+            const hasMore = ev.full_description && ev.full_description.trim() !== ev.first_line.trim();
+            const isDismissing = dismissing.has(ev.id);
+            return (
+              <div key={ev.id} style={row}>
+                <div style={rowLeft}>
+                  <div style={rowTop}>
+                    <span style={svcBadge}>{ev.service}</span>
+                    <span style={errorTypeBadge}>{ev.error_type}</span>
+                    {ev.log_group && <span style={logGroupText}>{ev.log_group}</span>}
                   </div>
-                )}
-                <span style={detectedAt}>{new Date(ev.detected_at).toLocaleTimeString()}</span>
+                  <p style={firstLine}>{ev.first_line}</p>
+                  {hasMore && (
+                    <div>
+                      <button
+                        style={expandBtn}
+                        onClick={() => toggleExpand(ev.id)}
+                      >
+                        <span style={expandChevron(expanded.has(ev.id))}>▸</span>
+                        {expanded.has(ev.id) ? "Hide details" : "Show details"}
+                      </button>
+                      {expanded.has(ev.id) && (
+                        <pre style={detailPre}>{ev.full_description}</pre>
+                      )}
+                    </div>
+                  )}
+                  <span style={detectedAt}>{new Date(ev.detected_at).toLocaleTimeString()}</span>
+                </div>
+                <div style={rowActions}>
+                  <button
+                    style={approveBtn(approving === ev.id)}
+                    onClick={() => handleApprove(ev.id)}
+                    disabled={approving === ev.id}
+                  >
+                    {approving === ev.id ? "Queuing..." : "Approve"}
+                  </button>
+                  <button
+                    style={dismissBtnStyle(isDismissing)}
+                    onClick={() => handleDismiss(ev.id)}
+                    disabled={isDismissing}
+                  >
+                    {isDismissing ? "Dismissing..." : "Dismiss"}
+                  </button>
+                </div>
               </div>
-              <div style={rowActions}>
-                <button
-                  style={approveBtn(approving === ev.id)}
-                  onClick={() => handleApprove(ev.id)}
-                  disabled={approving === ev.id}
-                >
-                  {approving === ev.id ? "Queuing..." : "Approve"}
-                </button>
-                <button style={dismissBtn} onClick={() => handleDismiss(ev.id)}>
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -201,13 +222,14 @@ const approveBtn = (loading: boolean): React.CSSProperties => ({
   cursor: loading ? "not-allowed" : "pointer", whiteSpace: "nowrap" as const,
 });
 
-const dismissBtn: React.CSSProperties = {
+const dismissBtnStyle = (loading: boolean): React.CSSProperties => ({
   background: "transparent",
   border: "1px solid #2d3149",
-  color: "#4b5563",
+  color: loading ? "#374151" : "#4b5563",
   borderRadius: 5, padding: "5px 16px", fontSize: 12, fontWeight: 600,
-  cursor: "pointer", whiteSpace: "nowrap" as const,
-};
+  cursor: loading ? "not-allowed" : "pointer", whiteSpace: "nowrap" as const,
+  opacity: loading ? 0.5 : 1,
+});
 
 const expandBtn: React.CSSProperties = {
   background: "none", border: "none", padding: 0,
