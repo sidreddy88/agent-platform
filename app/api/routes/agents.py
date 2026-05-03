@@ -7,10 +7,9 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.models.events import ErrorEvent, EventSource, IncidentStatus
 from app.api.websocket_dashboard import broadcast
+from app.models.events import ErrorEvent, EventSource, IncidentStatus
 from app.services.agent_tracker import agent_tracker
-from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 from app.services.pending_events import pending_event_store
 

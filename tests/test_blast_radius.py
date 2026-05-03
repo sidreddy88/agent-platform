@@ -354,7 +354,6 @@ class TestFixGenerationBlastRadius:
         """A fix within limits proceeds to PR creation normally."""
         from app.agents.fix_generation import FixGenerationAgent
         from app.models.events import ErrorEvent, EventSource, IncidentState
-        from app.services.github import GitHubError
 
         old_fn = "async function moveAndRemoveFileFromS3(key) {\n  await s3.copy(key);\n}"
         new_fn = "async function moveAndRemoveFileFromS3(key) {\n  try {\n    await s3.copy(key);\n  } catch(e) {\n    if (e.code === 'NoSuchKey') return;\n    throw e;\n  }\n}"

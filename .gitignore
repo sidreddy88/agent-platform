@@ -19,6 +19,13 @@ app/evals/golden_dataset.jsonl
 agent_platform.db
 agent_platform.db-wal
 agent_platform.db-shm
+incidents.db
+incidents.db-wal
+incidents.db-shm
+
+# Claude Code local config and memory
+.claude/
+memory/
 .incidents.json.migrated
 lecture.md
 plans/
