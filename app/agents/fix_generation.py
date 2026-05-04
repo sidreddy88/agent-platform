@@ -596,21 +596,16 @@ class FixGenerationAgent(BaseAgent):
         Resolve the file and function to fix.
 
         Strategy (in order):
-          0. Diagnosis result — DiagnosisAgent already identified the producer; use it
-             for null/undefined errors where the crash site differs from root cause
+          0. Diagnosis result — DiagnosisAgent already named the file + function; use it
+             for all error types when both fields are populated
           1. Stack trace parsing — exact path from log, no LLM needed
-          2. Function name from error context + GitHub code search for the definition
+          2. Code search using diagnosis function name (most reliable) or regex extraction
         """
-        # ── 0. Diagnosis-identified producer (null/undefined errors) ───
-        # The diagnosis agent already traced the undefined value back to its producer.
-        # Use that result directly instead of going to the crash frame from the stack trace.
-        # Verify the function is actually DEFINED in the diagnosis file (not just called there) —
-        # the diagnosis sometimes names the caller file instead of the definer.
-        if (
-            self._is_null_access_error(incident)
-            and incident.diagnosis_affected_file
-            and incident.diagnosis_affected_function
-        ):
+        # ── 0. Diagnosis-identified target (all error types) ──────────
+        # The DiagnosisAgent has already reasoned about root cause and named the file
+        # and function. Use this directly for any error type — it's more reliable than
+        # regex extraction. Verify the function is defined there (not just called).
+        if incident.diagnosis_affected_file and incident.diagnosis_affected_function:
             diag_file = incident.diagnosis_affected_file.lstrip("/")
             diag_fn = incident.diagnosis_affected_function
             try:
@@ -619,7 +614,7 @@ class FixGenerationAgent(BaseAgent):
                     logger.info("[FixGen] Using diagnosis target: %s → %s", diag_file, diag_fn)
                     return diag_file, diag_fn
                 logger.info(
-                    "[FixGen] Diagnosis target %s does not define %s (only calls it) — falling back to code search",
+                    "[FixGen] Diagnosis target %s does not define %s — falling back to stack trace",
                     diag_file, diag_fn,
                 )
             except Exception:
@@ -631,7 +626,6 @@ class FixGenerationAgent(BaseAgent):
             is_null = self._is_null_access_error(incident)
             # For null/undefined errors the crash frame is the symptom site.
             # Try caller frames first — that's where the null originates.
-            # Fall back to the crash frame only if no caller frame exists in the repo.
             ordered = frames[1:] + frames[:1] if is_null and len(frames) > 1 else frames
             for raw_path, fn_name in ordered:
                 try:
@@ -645,15 +639,10 @@ class FixGenerationAgent(BaseAgent):
                     continue
             logger.info("[FixGen] No stack frame path found in repo — falling back")
 
-        # ── 2. Function name from error context + code search ──────────
-        # For null errors: if diagnosis named the function but it wasn't in the diagnosis file,
-        # use the diagnosis function name directly for code search (more reliable than regex).
-        # For other errors: extract from error text / diagnosis prose.
-        fn_name = (
-            incident.diagnosis_affected_function
-            if self._is_null_access_error(incident) and incident.diagnosis_affected_function
-            else self._extract_function_name_from_error(incident)
-        )
+        # ── 2. Code search using diagnosis function name or regex extraction ──
+        # Prefer diagnosis_affected_function over regex — it's already been reasoned
+        # about by the DiagnosisAgent and is far less likely to be a service/class name.
+        fn_name = incident.diagnosis_affected_function or self._extract_function_name_from_error(incident)
         if fn_name:
             logger.info("[FixGen] No stack trace — trying code search for function '%s'", fn_name)
             try:
@@ -665,7 +654,6 @@ class FixGenerationAgent(BaseAgent):
                         content, _ = await self._github.get_file_contents(
                             self._owner, self._repo, path, ref=PR_BASE
                         )
-                        # Verify this file actually defines the function (not just calls it)
                         if self._extract_js_function(content, fn_name):
                             logger.info("[FixGen] Code search resolved: %s → %s", fn_name, path)
                             return path, fn_name
@@ -1011,126 +999,217 @@ class FixGenerationAgent(BaseAgent):
 
         return resolved
 
+    # ------------------------------------------------------------------
+    # Agentic fix tools
+    # ------------------------------------------------------------------
+
+    _FIX_TOOLS = [
+        {
+            "name": "read_file",
+            "description": (
+                "Read any file from the repository. Use this to understand imports, "
+                "callers, type definitions, or any related code before writing the fix."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repo-relative file path"}
+                },
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "search_code",
+            "description": "Search for a symbol or string across the repository. Returns matching file paths.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Symbol name or code string to search for"}
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "apply_edit",
+            "description": (
+                "Apply the fix. The old text is already known — you only need to provide the fixed version.\n"
+                "Only call this once you understand the root cause and are confident in the fix."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "new_text": {
+                        "type": "string",
+                        "description": "The complete fixed version of the target function",
+                    },
+                },
+                "required": ["new_text"],
+            },
+        },
+    ]
+
     async def _generate_fix(
         self, content: str, function_name: str, incident: IncidentState,
         file_path: str = "", call_chain: str = "", test_failures: str = ""
     ) -> tuple[str, str]:
         """
-        Ask the LLM to locate the function in the file and return (old_text, fixed_text).
+        Agentic fix generation using Claude tool_use — mirrors how Claude Code works.
 
-        Passes the full file content + RAG context so the LLM can reason about callers
-        and dependencies, not just the crash site.
-        Returns ("", "") if the function cannot be located.
+        The LLM receives the target file and tools to read any other files it needs.
+        When ready it calls apply_edit with the exact minimal snippet to change.
+        No delimiter parsing, no hallucinated old-text.
+        Returns ("", "") if the fix cannot be generated.
         """
-        human_notes_section = ""
-        if incident.human_notes:
-            human_notes_section = (
-                f"\nHUMAN FEEDBACK (from previous fix attempt — you MUST follow this):\n"
-                f"{incident.human_notes}\n"
+        human_notes_section = (
+            f"\nHUMAN FEEDBACK (from previous attempt — MUST follow):\n{incident.human_notes}\n"
+            if incident.human_notes else ""
+        )
+        test_failures_section = (
+            f"\nTEST FAILURES from previous attempt — new fix must not break these:\n{test_failures}\n"
+            if test_failures else ""
+        )
+        call_chain_hint = (
+            f"\nRELATED FILES (imports / callers — use read_file to explore them):\n{call_chain[:1000]}\n"
+            if call_chain else ""
+        )
+        additional_fix_section = ""
+        if incident.diagnosis_additional_fix:
+            secondary_loc = ""
+            if incident.diagnosis_additional_fix_function and incident.diagnosis_additional_fix_file:
+                secondary_loc = f" ({incident.diagnosis_additional_fix_function} in {incident.diagnosis_additional_fix_file})"
+            elif incident.diagnosis_additional_fix_function:
+                secondary_loc = f" ({incident.diagnosis_additional_fix_function})"
+            additional_fix_section = (
+                f"\nSECONDARY FIX NEEDED{secondary_loc}: {incident.diagnosis_additional_fix}\n"
+                f"Note: Your primary target is {function_name} in {file_path}. "
+                f"Use read_file to also understand the secondary location and include that context in your analysis.\n"
             )
 
-        test_failures_section = ""
-        if test_failures:
-            test_failures_section = (
-                f"\nTEST FAILURES FROM PREVIOUS FIX ATTEMPT — your new fix must not break these tests:\n"
-                f"{test_failures}\n"
-                f"Study the failures above. Understand which invariant your previous fix violated "
-                f"before writing the new version.\n"
+        # Pre-extract the target function so the LLM never needs to reproduce old text.
+        # If extraction succeeds, apply_edit only needs new_text — old_text comes from here.
+        extracted_old = self._extract_js_function(content, function_name)
+        if extracted_old:
+            function_ref = (
+                f"\nCURRENT FUNCTION (do NOT reproduce this in apply_edit — it is already known):\n"
+                f"<OLD_REFERENCE>\n{extracted_old}\n</OLD_REFERENCE>\n\n"
+                f"Call apply_edit(new_text=<your fixed version>) when ready.\n"
+            )
+        else:
+            function_ref = (
+                f"\nThe function '{function_name}' could not be pre-extracted. "
+                f"Read the file carefully and call apply_edit(new_text=<complete fixed function>) when ready.\n"
             )
 
-        rag_section = ""
-        if self._rag is not None and file_path:
-            try:
-                if self._rag._collection.count() > 0:
-                    query = f"{file_path} {function_name} {incident.diagnosis or ''}"
-                    chunks = await self._rag.search(query, n_results=6)
-                    chunks = [c for c in chunks if c.file_path != file_path][:4]
-                    if chunks:
-                        lines = ["\nRELATED CODEBASE CONTEXT (callers, dependencies, related modules):"]
-                        for c in chunks:
-                            lines.append(f"\n--- {c.file_path} (lines {c.start_line}–{c.end_line}) ---")
-                            lines.append(c.content[:500])
-                        rag_section = "\n".join(lines)
-            except Exception as exc:
-                logger.debug("[FixGen] RAG context skipped: %s", exc)
-
-        call_chain_section = f"\nCALL CHAIN CONTEXT (files that import or call this function — read before writing the fix):\n{call_chain}\n" if call_chain else ""
-
-        prompt = (
-            f"You are fixing a production bug. Study the root cause carefully before writing any code.\n\n"
-            f"ROOT CAUSE: {incident.diagnosis}\n"
+        initial_prompt = (
+            f"Fix this production bug.\n\n"
             f"ERROR TYPE: {incident.error_event.error_type or 'unknown'}\n"
-            f"ERROR DETAIL: {incident.error_event.description or ''}\n"
-            f"{human_notes_section}"
-            f"{test_failures_section}"
-            f"{call_chain_section}"
-            f"{rag_section}\n\n"
-            f"FILE TO FIX ({file_path}):\n{content}\n\n"
-            f"RULES — read these before writing the fix:\n"
-            f"1. Fix the ROOT CAUSE, not the symptom. Ask yourself: 'Am I eliminating the\n"
-            f"   reason this error occurs, or just catching/converting/hiding it?'\n"
-            f"   - BAD: wrapping JSON.parse in try/catch, adding input sanitization after the fact,\n"
-            f"     silencing exceptions, converting invalid values instead of rejecting them.\n"
-            f"   - GOOD: fixing the upstream source (e.g. API call config, schema validation,\n"
-            f"     correct algorithm, proper error propagation).\n"
-            f"2. NULL / UNDEFINED GUARD RULE — this is the most common symptom-fix mistake:\n"
-            f"   If the error is 'Cannot read properties of undefined/null' or a NullPointerException\n"
-            f"   at line N, DO NOT add a null check, optional chaining (?.), nullish coalescing (??),\n"
-            f"   or try/catch at line N. That only hides the problem.\n"
-            f"   Instead: identify the DIRECT PRODUCER — the function whose return value is assigned\n"
-            f"   to the variable being accessed at the crash site. Fix THAT function.\n"
-            f"   WRAPPER / INTERMEDIATE FUNCTION PATTERN (very common):\n"
-            f"     A wrapper function may already guard against the underlying API failure:\n"
-            f"       if (!classification) return {{ ok: false, error: '...' }};\n"
-            f"     But if that error return OMITS the field the caller expects (.classification),\n"
-            f"     THAT is the root cause — not the underlying API. The fix is to add the missing\n"
-            f"     field to every return path that currently omits it:\n"
-            f"       return {{ ok: false, error: '...', classification: {{ publish_decision: 'block', ... }} }};\n"
-            f"     Check ALL return statements and early exits — every path must return the\n"
-            f"     complete structure callers depend on.\n"
-            f"3. If the related context above shows the real fix belongs in a different layer\n"
-            f"   (e.g. the API call should use structured output, or validation belongs at ingestion),\n"
-            f"   fix it at that layer within the target function — do not patch the crash site.\n"
-            f"4. The fix must handle ALL invalid inputs, not just the specific value that triggered this error.\n"
-            f"5. Do not add logging, comments, or unrelated cleanup.\n\n"
-            f"Find the function '{function_name}' (or the closest handler for this error) and fix it.\n"
-            f"Return your answer using EXACTLY these delimiters — do NOT use JSON or markdown:\n\n"
-            f"<OLD>\n"
-            f"exact verbatim text of the function as it appears in the file\n"
-            f"</OLD>\n"
-            f"<NEW>\n"
-            f"complete fixed version\n"
-            f"</NEW>\n\n"
-            f"The text inside <OLD> must be copy-pasted exactly — no changes to whitespace or quotes."
+            f"ERROR: {incident.error_event.description or incident.error_event.title}\n"
+            f"ROOT CAUSE: {incident.diagnosis}\n"
+            f"TARGET FUNCTION: {function_name} in {file_path}\n"
+            f"{human_notes_section}{test_failures_section}{call_chain_hint}{additional_fix_section}"
+            f"FILE: {file_path}\n{content}\n"
+            f"{function_ref}"
+            f"ROOT CAUSE RULES (violation = wrong fix):\n"
+            f"1. Fix the cause, not the symptom. No null guards / optional chaining / try-catch at crash sites.\n"
+            f"2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value — "
+            f"every return path must include the complete structure callers depend on.\n"
+            f"3. The fix must handle ALL invalid inputs, not just the one that triggered this error.\n"
+            f"4. No unrelated cleanup, logging, or comments.\n"
         )
 
-        try:
-            response = await self._llm.complete(
-                messages=[{"role": "user", "content": prompt}],
-                system=self._with_harness("You are a senior software engineer who always fixes root causes, never symptoms. Use only <OLD> and <NEW> delimiters as instructed."),
-            )
-            old_match = re.search(r"<OLD>\s*(.*?)\s*</OLD>", response, re.DOTALL)
-            new_match = re.search(r"<NEW>\s*(.*?)\s*</NEW>", response, re.DOTALL)
-            old_function = old_match.group(1) if old_match else ""
-            new_function = new_match.group(1) if new_match else ""
-        except Exception as exc:
-            logger.error("[FixGen] LLM fix generation failed: %s", exc)
+        system = self._with_harness(
+            "You are a senior software engineer fixing production bugs. "
+            "Read the code carefully, explore related files as needed, then call apply_edit "
+            "with the minimum precise change. Always fix root causes — never symptoms."
+        )
+
+        messages: list[dict] = [{"role": "user", "content": initial_prompt}]
+        edit_result: dict | None = None
+        _SKIP = ("node_modules", "dist/", "build/", ".min.js")
+
+        for iteration in range(10):
+            try:
+                text, tool_calls, stop_reason = await self._llm.complete_with_tools(
+                    messages, self._FIX_TOOLS, system=system
+                )
+            except Exception as exc:
+                logger.error("[FixGen] Agentic LLM call failed (iteration %d): %s", iteration, exc)
+                return "", ""
+
+            apply_call = next((tc for tc in tool_calls if tc["name"] == "apply_edit"), None)
+            if apply_call:
+                edit_result = apply_call["input"]
+                break
+
+            if stop_reason == "end_turn" or not tool_calls:
+                logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
+                break
+
+            # Add assistant message with tool calls to history
+            import json as _json
+            messages.append({
+                "role": "assistant",
+                "content": text,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {"name": tc["name"], "arguments": _json.dumps(tc["input"])},
+                    }
+                    for tc in tool_calls
+                ],
+            })
+
+            # Execute tool calls and add results to history
+            for tc in tool_calls:
+                name = tc["name"]
+                if name == "read_file":
+                    path = tc["input"].get("path", "")
+                    try:
+                        file_content, _ = await self._github.get_file_contents(
+                            self._owner, self._repo, path, ref=PR_BASE
+                        )
+                        result = file_content
+                    except Exception as exc:
+                        result = f"Error reading {path}: {exc}"
+                    logger.debug("[FixGen] Agentic read_file: %s", path)
+                elif name == "search_code":
+                    query = tc["input"].get("query", "")
+                    try:
+                        matches = await self._github.search_code(self._owner, self._repo, query)
+                        paths = [r["path"] for r in matches if not any(s in r["path"] for s in _SKIP)][:10]
+                        result = "\n".join(paths) if paths else "No results"
+                    except Exception as exc:
+                        result = f"Search failed: {exc}"
+                    logger.debug("[FixGen] Agentic search_code: %s", query)
+                else:
+                    result = f"Unknown tool: {name}"
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+        if not edit_result:
+            logger.error("[FixGen] Agentic fix: no apply_edit call after %d iterations", iteration + 1)
             return "", ""
 
-        if not old_function:
-            logger.error(
-                "[FixGen] LLM returned empty 'old' function for %s — raw response (first 500 chars): %s",
-                function_name, response[:500] if "response" in dir() else "no response",
-            )
+        new_text = edit_result.get("new_text", "")
+        if not new_text:
+            logger.error("[FixGen] Agentic apply_edit: empty new_text")
             return "", ""
 
-        # Verify old_function actually appears in the file before returning
-        if old_function not in content and old_function.strip() not in content:
-            logger.error("[FixGen] LLM-returned 'old' text not found verbatim in file — likely hallucinated")
+        # Use pre-extracted old_text — never rely on LLM to reproduce it verbatim
+        if extracted_old:
+            old_text = extracted_old
+        else:
+            # Fallback: LLM was asked to write the complete function as new_text;
+            # we have no pre-extracted anchor so we can't do a targeted replace.
+            logger.error("[FixGen] Agentic apply_edit: no pre-extracted old_text for %s", function_name)
             return "", ""
 
-        logger.info("[FixGen] Generated fix (old=%d chars, new=%d chars)", len(old_function), len(new_function))
-        return old_function, new_function.strip()
+        if old_text not in content and old_text.strip() not in content:
+            logger.error("[FixGen] Agentic apply_edit: pre-extracted old_text not found in %s", file_path)
+            return "", ""
+
+        logger.info("[FixGen] Agentic fix: %d chars → %d chars in %s", len(old_text), len(new_text), file_path)
+        return old_text, new_text.strip()
 
     def _extract_test_failures(self, output: str) -> str:
         """Extract the meaningful lines from jest test output for LLM context."""

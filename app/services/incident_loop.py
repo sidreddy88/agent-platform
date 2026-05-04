@@ -557,6 +557,9 @@ class IncidentLoop:
         incident.reproduction_confirmed = diagnosis.reproduction_confirmed
         incident.diagnosis_affected_file = diagnosis.affected_file
         incident.diagnosis_affected_function = diagnosis.affected_function
+        incident.diagnosis_additional_fix = diagnosis.additional_fix
+        incident.diagnosis_additional_fix_file = diagnosis.additional_fix_file
+        incident.diagnosis_additional_fix_function = diagnosis.additional_fix_function
         incident.diagnosis_completed_at = datetime.now(timezone.utc)
 
         if diagnosis.escalate:
@@ -879,6 +882,25 @@ class IncidentLoop:
             except Exception as exc:
                 logger.warning("[IncidentLoop] %s — could not close old PR: %s", incident_id, exc)
 
+        # If the review mentions a different file/function than the current target,
+        # update diagnosis_affected_file/function so the fix agent targets the right place.
+        # This is NOT re-diagnosis — just extracting what the reviewer explicitly named.
+        if incident.human_notes:
+            try:
+                review_target = await self._extract_review_target(incident.human_notes, incident)
+                if review_target:
+                    new_file, new_fn = review_target
+                    if new_file != incident.diagnosis_affected_file or new_fn != incident.diagnosis_affected_function:
+                        logger.info(
+                            "[IncidentLoop] %s — review names different target: %s → %s (was %s → %s)",
+                            incident_id, new_file, new_fn,
+                            incident.diagnosis_affected_file, incident.diagnosis_affected_function,
+                        )
+                        incident.diagnosis_affected_file = new_file
+                        incident.diagnosis_affected_function = new_fn
+            except Exception as exc:
+                logger.warning("[IncidentLoop] %s — review target extraction failed: %s", incident_id, exc)
+
         # Reset fix fields; keep human_notes (the code review feedback)
         incident.status = IncidentStatus.FIXING
         incident.pr_url = None
@@ -955,6 +977,38 @@ class IncidentLoop:
         await self._run_post_fix(incident, fix)
         _rsess.log_fix_outcome(pr_url=fix.pr_url, pr_number=fix.pr_number, blast_radius_violation=False, failure_reason=None)
         session_logger.finish(incident.id, "pr_created")
+
+    async def _extract_review_target(
+        self, review_text: str, incident: "IncidentState"
+    ) -> tuple[str, str] | None:
+        """
+        Parse a code review body to find the file and function the reviewer explicitly
+        asks to change. Returns (file_path, function_name) or None if not mentioned.
+        This is NOT re-diagnosis — it only reads the reviewer's own words.
+        """
+        from app.services.llm_gateway import llm_gateway
+        llm = llm_gateway.get_llm_service_for("triage")  # cheap haiku call
+        prompt = (
+            f"A code reviewer left feedback on a PR. "
+            f"Current target: {incident.diagnosis_affected_function} in {incident.diagnosis_affected_file}.\n\n"
+            f"REVIEW:\n{review_text[:1500]}\n\n"
+            f"Does the review explicitly name a DIFFERENT function or file to fix? "
+            f"If yes, return JSON: {{\"file\": \"path/to/file.js\", \"function\": \"functionName\"}}. "
+            f"If the review does not name a specific different target, return: {{\"file\": null, \"function\": null}}."
+        )
+        try:
+            resp = await llm.complete(messages=[{"role": "user", "content": prompt}])
+            import json as _json, re as _re
+            m = _re.search(r"\{.*\}", resp, _re.DOTALL)
+            if not m:
+                return None
+            data = _json.loads(m.group(0))
+            f, fn = data.get("file"), data.get("function")
+            if f and fn:
+                return f.lstrip("/"), fn
+        except Exception:
+            pass
+        return None
 
     async def _check_merged_prs(self) -> None:
         """

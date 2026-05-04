@@ -139,6 +139,75 @@ class GatewayLLMService:
         self.last_output_tokens = resp.output_tokens
         return resp.content
 
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        system: str | None = None,
+    ) -> tuple[str, list[dict], str]:
+        """
+        Single tool-use round via LiteLLM.
+
+        Args:
+            messages: Conversation history (no system message — pass via system=).
+            tools:    Anthropic-format tool definitions (name/description/input_schema).
+            system:   Optional system prompt prepended to every call.
+
+        Returns:
+            (text_content, tool_calls, stop_reason)
+            tool_calls: list of {"id": str, "name": str, "input": dict}
+            stop_reason: "tool_use" | "end_turn"
+        """
+        import json
+        import litellm
+
+        _, model = self._gateway._get_routing(self._task_type)
+
+        # Convert Anthropic tool format → LiteLLM/OpenAI format
+        litellm_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+            for t in tools
+        ]
+
+        msgs = list(messages)
+        if system:
+            msgs = [{"role": "system", "content": system}] + msgs
+
+        response = await litellm.acompletion(
+            model=model,
+            messages=msgs,
+            tools=litellm_tools,
+            tool_choice="auto",
+            max_tokens=4096,
+        )
+
+        choice = response.choices[0]
+        message = choice.message
+        text: str = message.content or ""
+        stop_reason = "tool_use" if choice.finish_reason == "tool_calls" else "end_turn"
+
+        tool_calls: list[dict] = []
+        if getattr(message, "tool_calls", None):
+            for tc in message.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except Exception:
+                    args = {}
+                tool_calls.append({"id": tc.id, "name": tc.function.name, "input": args})
+
+        if response.usage:
+            self.last_input_tokens = response.usage.prompt_tokens
+            self.last_output_tokens = response.usage.completion_tokens
+
+        return text, tool_calls, stop_reason
+
 
 # ---------------------------------------------------------------------------
 # LLMGateway
