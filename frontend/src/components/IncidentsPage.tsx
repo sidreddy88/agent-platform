@@ -228,6 +228,8 @@ function IncidentCard({ inc }: { inc: Incident }) {
   const [showNotes, setShowNotes] = useState(false);
   const [notes, setNotes] = useState("");
   const [refixing, setRefixing] = useState(false);
+  const [showRefixNotes, setShowRefixNotes] = useState(false);
+  const [refixNotes, setRefixNotes] = useState("");
   async function handleRestart() {
     setRestarting(true);
     setShowNotes(false);
@@ -245,7 +247,13 @@ function IncidentCard({ inc }: { inc: Incident }) {
   async function handleApproveRefix() {
     setRefixing(true);
     try {
-      await fetch(`/incidents/${inc.id}/refix`, { method: "POST" });
+      await fetch(`/incidents/${inc.id}/refix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: refixNotes.trim() || null }),
+      });
+      setRefixNotes("");
+      setShowRefixNotes(false);
     } finally {
       setRefixing(false);
     }
@@ -292,6 +300,34 @@ function IncidentCard({ inc }: { inc: Incident }) {
         </div>
       )}
 
+      {/* Error clarity */}
+      {inc.clarity_summary && (
+        <div style={{ ...diagBox, borderColor: "#818cf8", background: "rgba(129,140,248,0.06)" }}>
+          <span style={{ ...diagLabel, color: "#818cf8" }}>Error Clarity</span>
+          <span style={diagText}>{inc.clarity_summary}</span>
+          {inc.clarity_pr_url && (
+            <a href={inc.clarity_pr_url} target="_blank" rel="noreferrer"
+               style={{ fontSize: 11, color: "#818cf8", marginTop: 4, display: "block" }}>
+              Observability PR #{inc.clarity_pr_number} ↗
+            </a>
+          )}
+        </div>
+      )}
+
+      {/* Merge decision */}
+      {inc.merge_decision && (
+        <div style={{
+          ...diagBox,
+          borderColor: inc.merge_decision === "merge_now" ? "#22c55e" : "#f97316",
+          background: inc.merge_decision === "merge_now" ? "rgba(34,197,94,0.06)" : "rgba(249,115,22,0.06)",
+        }}>
+          <span style={{ ...diagLabel, color: inc.merge_decision === "merge_now" ? "#22c55e" : "#f97316" }}>
+            {inc.merge_decision === "merge_now" ? "Merge Decision: Ship Now" : "Merge Decision: Refix First"}
+          </span>
+          <span style={diagText}>{inc.merge_decision_reasoning}</span>
+        </div>
+      )}
+
       {/* Restart notes input */}
       {showNotes && (
         <div style={{ marginTop: 8 }}>
@@ -326,8 +362,27 @@ function IncidentCard({ inc }: { inc: Incident }) {
         )}
         {inc.status === "awaiting_refix_approval" ? (
           <>
+            {showRefixNotes && (
+              <textarea
+                value={refixNotes}
+                onChange={e => setRefixNotes(e.target.value)}
+                placeholder="Optional instruction for the fix agent (e.g. 'make sure to add response_format: json_object')..."
+                rows={3}
+                style={{
+                  width: "100%", boxSizing: "border-box" as const, padding: "6px 8px",
+                  fontSize: 12, borderRadius: 6, border: "1px solid #d97706",
+                  resize: "vertical" as const, fontFamily: "inherit", marginBottom: 6,
+                }}
+              />
+            )}
             <button style={refixApproveBtn(refixing)} onClick={handleApproveRefix} disabled={refixing}>
               {refixing ? "Re-fixing..." : "✓ Approve Re-fix"}
+            </button>
+            <button
+              style={{ ...refixApproveBtn(false), background: "#d97706" }}
+              onClick={() => setShowRefixNotes(v => !v)}
+            >
+              {showRefixNotes ? "Hide note" : "+ Add note"}
             </button>
             <button style={refixRejectBtn} onClick={handleRejectRefix}>
               ✕ Reject Re-fix

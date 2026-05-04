@@ -217,6 +217,11 @@ export interface Incident {
   archived: boolean;
   wrong_fix: boolean;
   wrong_fix_notes: string | null;
+  merge_decision: "merge_now" | "refix_first" | null;
+  merge_decision_reasoning: string | null;
+  clarity_summary: string | null;
+  clarity_pr_url: string | null;
+  clarity_pr_number: number | null;
   detected_at: string;
   resolved_at: string | null;
   mttr_seconds: number | null;

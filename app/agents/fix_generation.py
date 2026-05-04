@@ -210,13 +210,26 @@ class FixGenerationAgent(BaseAgent):
             .replace("_", "-")
         )
 
-        # ── 2. Fetch the file from PR_BASE (staging) ───────────────────
+        # ── 2. Fetch the file ─────────────────────────────────────────
+        # If the review said "fix is correct, extend it", human_notes carries
+        # a BASE BRANCH hint pointing to the PR branch with the fix already applied.
+        # Use that branch so the LLM builds on the fixed code, not the pre-fix staging.
+        fetch_ref = PR_BASE
+        base_branch_hint = re.search(
+            r"\[BASE BRANCH FOR THIS FIX:\s*([^\]]+)\]",
+            incident.human_notes or "",
+        )
+        if base_branch_hint:
+            fetch_ref = base_branch_hint.group(1).strip()
+            steps.append(f"✓ Review intent=EXTEND — fetching from PR branch {fetch_ref}")
+            logger.info("[FixGen] EXTEND mode: fetching from PR branch %s", fetch_ref)
+
         try:
             content, file_sha = await self._github.get_file_contents(
-                self._owner, self._repo, file_path, ref=PR_BASE
+                self._owner, self._repo, file_path, ref=fetch_ref
             )
-            steps.append(f"✓ Fetched {file_path} from {PR_BASE} (sha={file_sha[:8]}, {len(content)} chars)")
-            logger.info("[FixGen] Fetched %s (%d chars) from %s", file_path, len(content), PR_BASE)
+            steps.append(f"✓ Fetched {file_path} from {fetch_ref} (sha={file_sha[:8]}, {len(content)} chars)")
+            logger.info("[FixGen] Fetched %s (%d chars) from %s", file_path, len(content), fetch_ref)
         except GitHubError as exc:
             # 404 — try to find the file elsewhere in the repo by basename
             if "404" in str(exc):
@@ -274,7 +287,7 @@ class FixGenerationAgent(BaseAgent):
 
         # ── 3. Generate fix via LLM ────────────────────────────────────
         try:
-            old_function, new_function = await self._generate_fix(content, function_name, incident, file_path, call_chain)
+            old_function, new_function, patches = await self._generate_fix(content, function_name, incident, file_path, call_chain)
         except Exception as exc:
             steps.append(f"✗ LLM fix generation failed: {exc}")
             logger.error("[FixGen] LLM error: %s", exc)
@@ -285,14 +298,15 @@ class FixGenerationAgent(BaseAgent):
             return _fail(f"{function_name} not found in {file_path}", branch=branch_name)
 
         steps.append(
-            f"✓ Generated fix (old={len(old_function)} chars, new={len(new_function)} chars)"
+            f"✓ Generated fix (old={len(old_function)} chars, new={len(new_function)} chars"
+            + (f", +{len(patches)} patch_line edits" if patches else "") + ")"
         )
         logger.info("[FixGen] Generated fix")
 
         # ── 3b. Blast radius check ────────────────────────────────────
         files_to_touch = [file_path]
-        additions = len(new_function.splitlines())
-        deletions = len(old_function.splitlines())
+        additions = len(new_function.splitlines()) + sum(len(ns.splitlines()) for _, ns in patches)
+        deletions = len(old_function.splitlines()) + sum(len(os_.splitlines()) for os_, _ in patches)
         br_result = BlastRadiusGuard().check(files_to_touch, additions=additions, deletions=deletions)
         if not br_result.allowed:
             steps.append(f"✗ Blast radius violated: {br_result.reason}")
@@ -328,7 +342,7 @@ class FixGenerationAgent(BaseAgent):
                     alt_call_chain = await self._fetch_call_chain(
                         alt_path, alt_fn or function_name, alt_content
                     )
-                    alt_old, alt_new = await self._generate_fix(
+                    alt_old, alt_new, alt_patches = await self._generate_fix(
                         alt_content, alt_fn or function_name, incident, alt_path, alt_call_chain,
                         test_failures=(
                             f"PREVIOUS FIX WAS REJECTED — critique said:\n{critique}\n\n"
@@ -343,6 +357,7 @@ class FixGenerationAgent(BaseAgent):
                         call_chain = alt_call_chain
                         old_function = alt_old
                         new_function = alt_new
+                        patches = alt_patches
                         critique = await self._critique_fix(old_function, new_function, incident, file_path)
                         steps.append(f"✓ Alt-frame critique: {critique[:120]}")
                     else:
@@ -360,9 +375,7 @@ class FixGenerationAgent(BaseAgent):
         new_content = ""
 
         for attempt in range(1, _MAX_ATTEMPTS + 1):
-            new_content = content.replace(old_function, new_function, 1)
-            if new_content == content:
-                new_content = content.replace(old_function.strip(), new_function.strip(), 1)
+            new_content = self._apply_all_edits(content, old_function, new_function, patches)
 
             sandbox_result = await _sandbox.run({file_path: new_content}, incident.id)
             _sess = session_logger.get(incident.id)
@@ -389,7 +402,7 @@ class FixGenerationAgent(BaseAgent):
 
             steps.append(f"↻ Regenerating fix with test failure context (attempt {attempt + 1}/{_MAX_ATTEMPTS})")
             try:
-                old_function, new_function = await self._generate_fix(
+                old_function, new_function, patches = await self._generate_fix(
                     content, function_name, incident, file_path, call_chain,
                     test_failures=_test_failures,
                 )
@@ -603,8 +616,8 @@ class FixGenerationAgent(BaseAgent):
         """
         # ── 0. Diagnosis-identified target (all error types) ──────────
         # The DiagnosisAgent has already reasoned about root cause and named the file
-        # and function. Use this directly for any error type — it's more reliable than
-        # regex extraction. Verify the function is defined there (not just called).
+        # and function. Prefer files where the function is defined; fall back to files
+        # where it is called (the call site may itself be the bug).
         if incident.diagnosis_affected_file and incident.diagnosis_affected_function:
             diag_file = incident.diagnosis_affected_file.lstrip("/")
             diag_fn = incident.diagnosis_affected_function
@@ -613,8 +626,15 @@ class FixGenerationAgent(BaseAgent):
                 if self._extract_js_function(content, diag_fn):
                     logger.info("[FixGen] Using diagnosis target: %s → %s", diag_file, diag_fn)
                     return diag_file, diag_fn
+                # Function not defined here but may be called here — still a valid fix site.
+                if diag_fn in content:
+                    logger.info(
+                        "[FixGen] Diagnosis target %s calls but doesn't define %s — using call site",
+                        diag_file, diag_fn,
+                    )
+                    return diag_file, diag_fn
                 logger.info(
-                    "[FixGen] Diagnosis target %s does not define %s — falling back to stack trace",
+                    "[FixGen] Diagnosis target %s has no reference to %s — falling back to stack trace",
                     diag_file, diag_fn,
                 )
             except Exception:
@@ -649,18 +669,44 @@ class FixGenerationAgent(BaseAgent):
                 matches = await self._github.search_code(self._owner, self._repo, fn_name)
                 _SKIP = ("node_modules", ".test.", ".spec.", "dist/", "build/", "vendor/", "min.js")
                 candidates = [r["path"] for r in matches if not any(s in r["path"] for s in _SKIP)]
+                # First pass: prefer files that define the function
+                first_reference: tuple[str, str] | None = None
                 for path in candidates[:5]:
                     try:
                         content, _ = await self._github.get_file_contents(
                             self._owner, self._repo, path, ref=PR_BASE
                         )
                         if self._extract_js_function(content, fn_name):
-                            logger.info("[FixGen] Code search resolved: %s → %s", fn_name, path)
+                            logger.info("[FixGen] Code search resolved (definition): %s → %s", fn_name, path)
                             return path, fn_name
+                        if first_reference is None and fn_name in content:
+                            first_reference = (path, fn_name)
                     except Exception:
                         pass
+                # Second pass: accept a call-site reference if no definition found
+                if first_reference:
+                    logger.info(
+                        "[FixGen] Code search resolved (reference): %s → %s", fn_name, first_reference[0]
+                    )
+                    return first_reference
             except Exception as exc:
                 logger.debug("[FixGen] Code search for '%s' failed: %s", fn_name, exc)
+
+        # ── 3. Keyword search from error message ──────────────────────────
+        # Extracts distinctive model/collection/resource names from the error text
+        # and searches for those when function-name search turns up nothing.
+        # Example: "Error inserting into AppMasterReferrals" → search "AppMasterReferrals"
+        for keyword in self._extract_error_keywords(incident):
+            logger.info("[FixGen] Trying keyword search: '%s'", keyword)
+            try:
+                matches = await self._github.search_code(self._owner, self._repo, keyword)
+                _SKIP = ("node_modules", ".test.", ".spec.", "dist/", "build/", "vendor/", "min.js")
+                candidates = [r["path"] for r in matches if not any(s in r["path"] for s in _SKIP)]
+                if candidates:
+                    logger.info("[FixGen] Keyword search resolved: '%s' → %s", keyword, candidates[0])
+                    return candidates[0], incident.diagnosis_affected_function or keyword
+            except Exception as exc:
+                logger.debug("[FixGen] Keyword search for '%s' failed: %s", keyword, exc)
 
         logger.info("[FixGen] Could not resolve target file/function for incident %s", incident.id)
         return None, None
@@ -693,6 +739,54 @@ class FixGenerationAgent(BaseAgent):
                     seen.add(name)
                     return name
         return None
+
+    def _extract_error_keywords(self, incident: IncidentState) -> list[str]:
+        """
+        Extract distinctive model/collection/resource identifiers from the error message
+        to use as fallback code-search terms when function-name search finds nothing.
+
+        Examples:
+          "Error inserting into AppMasterReferrals"  → ["AppMasterReferrals"]
+          "S3NoSuchKey bucket my-bucket key foo/bar" → ["my-bucket"]
+          "Failed to update UserProfile document"    → ["UserProfile"]
+        """
+        text = " ".join(filter(None, [
+            incident.error_event.description or "",
+            incident.error_event.title or "",
+        ]))
+        keywords: list[str] = []
+        seen: set[str] = set()
+        _NOISE = {
+            "error", "failed", "cannot", "undefined", "null", "object",
+            "function", "collection", "document", "database", "index",
+            "mongobulkwriteerror", "bulkwriteerror", "duplicate",
+        }
+
+        # Pattern 1 — "Error [verb] into/from/for ModelName"
+        for m in re.finditer(
+            r'(?:inserting|updating|deleting|fetching|reading|writing)\s+(?:into|from|for|to)?\s*([A-Z][a-zA-Z0-9]{3,})',
+            text, re.IGNORECASE,
+        ):
+            kw = m.group(1)
+            if kw.lower() not in _NOISE and kw not in seen:
+                seen.add(kw)
+                keywords.append(kw)
+
+        # Pattern 2 — standalone PascalCase identifiers (model/class names)
+        for m in re.finditer(r'\b([A-Z][a-z]+(?:[A-Z][a-z0-9]+)+)\b', text):
+            kw = m.group(1)
+            if kw.lower() not in _NOISE and kw not in seen and len(kw) > 5:
+                seen.add(kw)
+                keywords.append(kw)
+
+        # Pattern 3 — MongoDB collection name from "collection: db.collectionName"
+        for m in re.finditer(r'collection:\s*\w+\.(\w+)', text, re.IGNORECASE):
+            kw = m.group(1)
+            if kw.lower() not in _NOISE and kw not in seen:
+                seen.add(kw)
+                keywords.append(kw)
+
+        return keywords[:3]  # at most 3 searches
 
     def _test_file_candidates(self, file_path: str) -> tuple[list[str], str]:
         """Derive test file path candidates from the source file path."""
@@ -1032,33 +1126,78 @@ class FixGenerationAgent(BaseAgent):
         {
             "name": "apply_edit",
             "description": (
-                "Apply the fix. The old text is already known — you only need to provide the fixed version.\n"
-                "Only call this once you understand the root cause and are confident in the fix."
+                "Replace the primary target function with the fixed version. "
+                "If the old function text was pre-extracted, only supply new_text. "
+                "If not pre-extracted, supply both old_text (verbatim from file) and new_text. "
+                "Call this ONCE for the main function fix."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "new_text": {
                         "type": "string",
-                        "description": "The complete fixed version of the target function",
+                        "description": "Complete fixed version of the target function",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Verbatim text to replace (required when function was not pre-extracted)",
                     },
                 },
                 "required": ["new_text"],
             },
         },
+        {
+            "name": "patch_line",
+            "description": (
+                "Make a targeted replacement anywhere in the file — for issues OUTSIDE the primary function: "
+                "wrong model IDs, missing error handling, stale comments, adjacent bugs, etc.\n"
+                "Rules for old_snippet:\n"
+                "- Copy EXACT verbatim text from the file (1–5 lines). Short and unique.\n"
+                "- Do NOT use this to replace the primary function — use apply_edit for that.\n"
+                "You can call this multiple times for different issues in the file."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "old_snippet": {
+                        "type": "string",
+                        "description": "Exact verbatim text to replace (1–5 lines, copied from the file)",
+                    },
+                    "new_snippet": {
+                        "type": "string",
+                        "description": "Replacement text",
+                    },
+                },
+                "required": ["old_snippet", "new_snippet"],
+            },
+        },
     ]
+
+    def _apply_all_edits(
+        self, content: str, old_function: str, new_function: str, patches: list[tuple[str, str]]
+    ) -> str:
+        """Apply the primary function replacement then all patch_line edits sequentially."""
+        new_content = content.replace(old_function, new_function, 1)
+        if new_content == content:
+            new_content = content.replace(old_function.strip(), new_function.strip(), 1)
+        for old_snip, new_snip in patches:
+            if old_snip in new_content:
+                new_content = new_content.replace(old_snip, new_snip, 1)
+            else:
+                logger.warning("[FixGen] patch_line: snippet not found verbatim — skipping")
+        return new_content
 
     async def _generate_fix(
         self, content: str, function_name: str, incident: IncidentState,
         file_path: str = "", call_chain: str = "", test_failures: str = ""
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, list[tuple[str, str]]]:
         """
         Agentic fix generation using Claude tool_use — mirrors how Claude Code works.
 
         The LLM receives the target file and tools to read any other files it needs.
-        When ready it calls apply_edit with the exact minimal snippet to change.
-        No delimiter parsing, no hallucinated old-text.
-        Returns ("", "") if the fix cannot be generated.
+        It calls apply_edit for the primary function fix, then patch_line for adjacent
+        issues (wrong model IDs, missing error handling, stale values, etc.).
+        Returns (old_function, new_function, patches) or ("", "", []) on failure.
         """
         human_notes_section = (
             f"\nHUMAN FEEDBACK (from previous attempt — MUST follow):\n{incident.human_notes}\n"
@@ -1096,8 +1235,14 @@ class FixGenerationAgent(BaseAgent):
             )
         else:
             function_ref = (
-                f"\nThe function '{function_name}' could not be pre-extracted. "
-                f"Read the file carefully and call apply_edit(new_text=<complete fixed function>) when ready.\n"
+                f"\nThe function '{function_name}' could not be pre-extracted (may be a class method, "
+                f"arrow function, or React component method).\n"
+                f"Read the file above, find the specific code that needs changing, then:\n"
+                f"  • For a small targeted change (wrapping a call, changing a value): "
+                f"use patch_line(old_snippet=<verbatim 1-5 lines from file>, new_snippet=<replacement>).\n"
+                f"  • For replacing a whole function: "
+                f"use apply_edit(old_text=<verbatim function from file>, new_text=<fixed version>).\n"
+                f"Do NOT guess at text — copy it exactly from the file content shown above.\n"
             )
 
         initial_prompt = (
@@ -1114,39 +1259,52 @@ class FixGenerationAgent(BaseAgent):
             f"2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value — "
             f"every return path must include the complete structure callers depend on.\n"
             f"3. The fix must handle ALL invalid inputs, not just the one that triggered this error.\n"
-            f"4. No unrelated cleanup, logging, or comments.\n"
+            f"4. No unrelated cleanup, logging, or comments.\n\n"
+            f"IF THE TARGET FUNCTION IS NOT IN THIS FILE:\n"
+            f"The function '{function_name}' may be defined in a different file than the one shown above "
+            f"(e.g. it may be a backend service called by this frontend component, or a helper in a "
+            f"sibling directory). If you cannot find it here:\n"
+            f"1. Use search_code to search for '{function_name}' — this will find where it is actually defined.\n"
+            f"2. Use read_file on the correct file.\n"
+            f"3. Apply your fix there using patch_line or apply_edit.\n"
+            f"Do not spin in place — if the function is not here, find where it is.\n\n"
+            f"MULTI-EDIT WORKFLOW:\n"
+            f"1. Call apply_edit or patch_line ONCE for the primary function fix.\n"
+            f"2. After the fix, review the file as a senior engineer doing code review.\n"
+            f"   Fix every issue you would flag — not just the primary bug.\n"
+            f"3. Call patch_line for each additional issue found (can call multiple times).\n"
+            f"4. Only call end_turn when ALL issues in the file are addressed.\n"
         )
 
         system = self._with_harness(
             "You are a senior software engineer fixing production bugs. "
             "Read the code carefully, explore related files as needed, then call apply_edit "
-            "with the minimum precise change. Always fix root causes — never symptoms."
+            "with the minimum precise change. After apply_edit, review the file as you would "
+            "in a code review — apply the same quality bar you'd hold a junior engineer to. "
+            "Call patch_line for every issue you'd flag. Always fix root causes — never symptoms. "
+            "Call end_turn only when the file would pass your review."
         )
 
         messages: list[dict] = [{"role": "user", "content": initial_prompt}]
         edit_result: dict | None = None
+        patch_calls: list[dict] = []
         _SKIP = ("node_modules", "dist/", "build/", ".min.js")
+        import json as _json
 
-        for iteration in range(10):
+        for iteration in range(14):
             try:
                 text, tool_calls, stop_reason = await self._llm.complete_with_tools(
                     messages, self._FIX_TOOLS, system=system
                 )
             except Exception as exc:
                 logger.error("[FixGen] Agentic LLM call failed (iteration %d): %s", iteration, exc)
-                return "", ""
-
-            apply_call = next((tc for tc in tool_calls if tc["name"] == "apply_edit"), None)
-            if apply_call:
-                edit_result = apply_call["input"]
-                break
+                return "", "", []
 
             if stop_reason == "end_turn" or not tool_calls:
-                logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
+                if not edit_result:
+                    logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
                 break
 
-            # Add assistant message with tool calls to history
-            import json as _json
             messages.append({
                 "role": "assistant",
                 "content": text,
@@ -1160,10 +1318,22 @@ class FixGenerationAgent(BaseAgent):
                 ],
             })
 
-            # Execute tool calls and add results to history
             for tc in tool_calls:
                 name = tc["name"]
-                if name == "read_file":
+                if name == "apply_edit":
+                    if edit_result is None:
+                        edit_result = tc["input"]
+                    result = (
+                        "✓ Primary function fix recorded. "
+                        "Now scan the ENTIRE file for adjacent issues — wrong model IDs, "
+                        "missing error handling, stale hardcoded values — and call patch_line "
+                        "for each one found. Call end_turn when done."
+                    )
+                elif name == "patch_line":
+                    patch_calls.append(tc)
+                    snip = tc["input"].get("old_snippet", "")[:60].replace("\n", "↵")
+                    result = f"✓ patch_line recorded ({snip}). Continue scanning for more issues or call end_turn."
+                elif name == "read_file":
                     path = tc["input"].get("path", "")
                     try:
                         file_content, _ = await self._github.get_file_contents(
@@ -1188,28 +1358,38 @@ class FixGenerationAgent(BaseAgent):
 
         if not edit_result:
             logger.error("[FixGen] Agentic fix: no apply_edit call after %d iterations", iteration + 1)
-            return "", ""
+            return "", "", []
 
         new_text = edit_result.get("new_text", "")
         if not new_text:
             logger.error("[FixGen] Agentic apply_edit: empty new_text")
-            return "", ""
+            return "", "", []
 
-        # Use pre-extracted old_text — never rely on LLM to reproduce it verbatim
+        # Prefer pre-extracted old_text; fall back to LLM-supplied old_text
         if extracted_old:
             old_text = extracted_old
         else:
-            # Fallback: LLM was asked to write the complete function as new_text;
-            # we have no pre-extracted anchor so we can't do a targeted replace.
-            logger.error("[FixGen] Agentic apply_edit: no pre-extracted old_text for %s", function_name)
-            return "", ""
+            llm_old = edit_result.get("old_text", "").strip()
+            if not llm_old:
+                logger.error("[FixGen] Agentic apply_edit: no old_text for %s (not pre-extracted and not provided)", function_name)
+                return "", "", []
+            old_text = llm_old
+            logger.info("[FixGen] Agentic apply_edit: using LLM-supplied old_text for %s", function_name)
 
         if old_text not in content and old_text.strip() not in content:
-            logger.error("[FixGen] Agentic apply_edit: pre-extracted old_text not found in %s", file_path)
-            return "", ""
+            logger.error("[FixGen] Agentic apply_edit: old_text not found in %s", file_path)
+            return "", "", []
 
-        logger.info("[FixGen] Agentic fix: %d chars → %d chars in %s", len(old_text), len(new_text), file_path)
-        return old_text, new_text.strip()
+        patches = [
+            (tc["input"]["old_snippet"], tc["input"]["new_snippet"])
+            for tc in patch_calls
+            if tc["input"].get("old_snippet") and tc["input"].get("new_snippet")
+        ]
+        logger.info(
+            "[FixGen] Agentic fix: %d chars → %d chars in %s, patch_line calls=%d",
+            len(old_text), len(new_text), file_path, len(patches),
+        )
+        return old_text, new_text.strip(), patches
 
     def _extract_test_failures(self, output: str) -> str:
         """Extract the meaningful lines from jest test output for LLM context."""

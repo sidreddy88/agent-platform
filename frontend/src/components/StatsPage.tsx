@@ -27,7 +27,9 @@ interface PRStat {
   mttd_seconds: number | null;
   agent_time_seconds: number | null;
   mttr_seconds: number | null;
+  total_cost_usd: number;
   ci_conclusion: "success" | "failure" | "pending" | null;
+  ci_source: "check_runs" | "master_workflow" | null;
   ci_checks: CICheck[];
 }
 
@@ -38,6 +40,8 @@ interface Summary {
   avg_agent_time_seconds: number | null;
   avg_mttr_seconds: number | null;
   avg_confidence: number | null;
+  avg_cost_usd: number | null;
+  total_cost_usd: number | null;
   ci_pass_rate: number | null;
 }
 
@@ -100,12 +104,18 @@ export function StatsPage() {
               label="CI Pass Rate"
               value={summary.ci_pass_rate !== null ? `${Math.round(summary.ci_pass_rate * 100)}%` : "—"}
               color={summary.ci_pass_rate !== null && summary.ci_pass_rate >= 0.9 ? "#22c55e" : "#f97316"}
-              title="% of agent PRs where CI went green on first run"
+              title="% of agent PRs where CI passed. Uses PR check-runs when available; falls back to next master deployment run after PR creation."
             />
             <SummaryChip
               label="Avg Confidence"
               value={summary.avg_confidence !== null ? `${Math.round(summary.avg_confidence * 100)}%` : "—"}
               color="#60a5fa"
+            />
+            <SummaryChip
+              label="Avg Cost"
+              value={summary.avg_cost_usd !== null ? `$${summary.avg_cost_usd.toFixed(4)}` : "—"}
+              color="#a78bfa"
+              title={`Avg LLM cost per incident. Total across all PRs: ${summary.total_cost_usd !== null ? "$" + summary.total_cost_usd.toFixed(4) : "—"}`}
             />
           </div>
         )}
@@ -190,6 +200,7 @@ function PRCard({ pr, onUnresolve }: { pr: PRStat; onUnresolve: (id: string) => 
       {/* 4-column data grid */}
       <div style={dataGrid}>
         <DataCell label="Bug" value={pr.error_description.split("\n")[0].slice(0, 120)} mono />
+        <DataCell label="Agent Cost" value={pr.total_cost_usd > 0 ? `$${pr.total_cost_usd.toFixed(4)}` : "—"} />
         <DataCell label="Log Source" value={pr.log_source ?? "—"} mono />
         <DataCell
           label={`Files Changed (${pr.files_changed.length})`}
@@ -197,7 +208,7 @@ function PRCard({ pr, onUnresolve }: { pr: PRStat; onUnresolve: (id: string) => 
           mono
         />
         <DataCell
-          label="CI Checks"
+          label={pr.ci_source === "master_workflow" ? "CI (master deploy)" : "CI Checks"}
           value={
             pr.ci_checks.length === 0
               ? "—"
