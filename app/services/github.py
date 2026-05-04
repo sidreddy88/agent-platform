@@ -391,15 +391,31 @@ class GitHubService:
             await self._raise_for_status(response)
             return response.json()["object"]["sha"]
 
+    async def delete_branch(self, owner: str, repo: str, branch_name: str) -> None:
+        """Delete a branch (best-effort — ignores 404)."""
+        async with self._client() as client:
+            response = await client.delete(
+                f"/repos/{owner}/{repo}/git/refs/heads/{branch_name}"
+            )
+            if response.status_code not in (204, 404, 422):
+                await self._raise_for_status(response)
+
     async def create_branch(
         self, owner: str, repo: str, branch_name: str, from_sha: str
     ) -> None:
-        """Create a new branch from a commit SHA."""
+        """Create a new branch from a commit SHA, deleting any stale branch of the same name first."""
         async with self._client() as client:
             response = await client.post(
                 f"/repos/{owner}/{repo}/git/refs",
                 json={"ref": f"refs/heads/{branch_name}", "sha": from_sha},
             )
+            if response.status_code == 422:
+                # Branch already exists from a prior attempt — delete and retry
+                await self.delete_branch(owner, repo, branch_name)
+                response = await client.post(
+                    f"/repos/{owner}/{repo}/git/refs",
+                    json={"ref": f"refs/heads/{branch_name}", "sha": from_sha},
+                )
             await self._raise_for_status(response)
 
     async def update_file(

@@ -92,15 +92,15 @@ async def scan_last_24h() -> Dict[str, Any]:
         service = log_group.rstrip("/").split("/")[-1]
         await _scan_log(f"Scanning {log_group} ...")
         try:
-            matches = aws.get_error_logs(log_group, minutes=20160, limit=100)
+            matches = aws.get_error_logs(log_group, minutes=20160)
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
-            seen: set[str] = set()
+            seen: set[tuple[str, str, str]] = set()
             for log in matches:
                 msg = log["message"]
-                # Normalize variable parts (byte offsets, numbers) for dedup
-                normalized = re.sub(r'\b\d+\b', 'N', msg[:120]).strip()
-                sig = normalized[:80]
+                stream = log["stream"]
+                timestamp = str(log["timestamp"])
+                sig = (stream, timestamp, msg[:600])
                 if sig in seen:
                     continue
                 seen.add(sig)
@@ -110,8 +110,8 @@ async def scan_last_24h() -> Dict[str, Any]:
                 )
                 error_type = exc_match.group(1).upper() if exc_match else "ECS_ERROR"
 
-                stream_parts = log["stream"].rsplit("/", 1)
-                task_id = stream_parts[-1] if len(stream_parts) > 1 else log["stream"]
+                stream_parts = stream.rsplit("/", 1)
+                task_id = stream_parts[-1] if len(stream_parts) > 1 else stream
 
                 event = ErrorEvent(
                     source=EventSource.CLOUDWATCH,
@@ -133,10 +133,6 @@ async def scan_last_24h() -> Dict[str, Any]:
                 await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
                 queued.append({"id": event.id, "title": event.title, "service": service})
                 await _scan_log(f"  → pending approval: [{error_type}] {msg[:80].strip()}", level="event")
-
-                if len(seen) >= 10:
-                    await _scan_log(f"  Reached 10-event cap for {log_group}")
-                    break
 
         except Exception as exc:
             errors.append({"log_group": log_group, "error": str(exc)})

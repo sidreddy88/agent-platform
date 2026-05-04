@@ -21,7 +21,24 @@ class PendingEvent:
 
 
 def _content_sig(event: Any) -> str:
-    """Stable content signature for dedup — same error across scan runs has same sig."""
+    """Stable content signature for dedup.
+
+    CloudWatch scans should surface every distinct raw log match, even when the
+    message template is repeated with different IDs. The log metadata gives us a
+    stable per-entry key so repeated scans do not duplicate the same pending
+    event while different raw matches remain visible.
+
+    Message content is included as a tiebreaker so that multiple distinct errors
+    from the same task at the same millisecond are not collapsed to one event.
+    """
+    metadata = getattr(event, "metadata", {}) or {}
+    log_group = metadata.get("log_group")
+    timestamp = metadata.get("timestamp") or metadata.get("latest_timestamp")
+    task_id = metadata.get("task_id")
+    if log_group and timestamp is not None:
+        first_line = (event.description or event.title or "").split("\n")[0].strip()[:120]
+        return f"log|{log_group}|{task_id or ''}|{timestamp}|{event.error_type or ''}|{first_line}"
+
     desc = event.description or event.title or ""
     normalized = re.sub(r"\b\d+\b", "N", desc[:120]).strip()
     return f"{event.service}|{event.error_type}|{normalized[:80]}"

@@ -31,8 +31,8 @@ from typing import Sequence
 # ---------------------------------------------------------------------------
 
 DEFAULT_MAX_FILES = 5
-DEFAULT_MAX_LINES_ADDED = 200
-DEFAULT_MAX_LINES_DELETED = 150
+DEFAULT_MAX_LINES_ADDED = 500
+DEFAULT_MAX_LINES_DELETED = 300
 
 # Paths the AI must never touch — matched against each file with fnmatch.
 # Patterns are checked against the raw path AND a leading-slash-stripped version.

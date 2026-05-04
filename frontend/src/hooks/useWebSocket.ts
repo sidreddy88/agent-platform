@@ -14,14 +14,23 @@ export function useDashboardWS() {
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const refreshPendingEvents = useCallback(async () => {
+    const res = await fetch("/events/pending");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const events: PendingEvent[] = await res.json();
+    setPendingEvents(events);
+  }, []);
+
   // Load initial state via HTTP so the page isn't blank while WS connects
   useEffect(() => {
     Promise.all([
       fetch("/incidents").then(r => r.json()),
       fetch("/incidents/metrics").then(r => r.json()),
-    ]).then(([incs, mets]) => {
+      fetch("/events/pending").then(r => r.json()),
+    ]).then(([incs, mets, pending]) => {
       setIncidents(incs);
       setMetrics(mets);
+      setPendingEvents(pending);
     }).catch(() => {});
   }, []);
 
@@ -90,5 +99,5 @@ export function useDashboardWS() {
     };
   }, [connect]);
 
-  return { incidents, metrics, agentSnapshot, connected, scanLog, pendingEvents };
+  return { incidents, metrics, agentSnapshot, connected, scanLog, pendingEvents, refreshPendingEvents };
 }
