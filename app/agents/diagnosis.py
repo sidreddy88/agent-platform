@@ -91,14 +91,28 @@ _KNOWN_INCIDENTS: list[dict] = [
         "root_cause": "Intermediate wrapper function (e.g. runValidationCheck) already guards the underlying API failure but its error/early-exit return paths omit the `classification` field that callers always access — the direct producer of the crashing object is the wrapper, not the deep API call",
         "resolution": "Added `classification: { publish_decision: 'block', ... }` to every return path in the wrapper that previously omitted it, so all callers always receive a complete object regardless of which code path executed",
     },
+    {
+        "id": "INC-009",
+        "symptoms": ["duplicate key", "E11000", "insertMany", "bulk write", "parallel", "workers", "race condition", "concurrent", "chunks"],
+        "root_cause": "Parallel workers each receive a chunk of the same input; duplicates within the file are not eliminated before chunking, so the same unique key can land in two worker chunks simultaneously — the first worker inserts it, the second hits a duplicate key error",
+        "resolution": "Deduplicate the input data by the unique key before splitting into chunks so each value appears in exactly one worker's chunk",
+    },
 ]
+
+_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "is", "are", "was", "were", "be", "been",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "cannot", "can", "not", "no", "in", "on",
+    "at", "to", "of", "with", "from", "by", "for", "about",
+    "error", "type", "null", "undefined", "read", "property", "object",
+})
 
 
 def _find_similar_incidents(symptoms: str) -> list[dict]:
-    words = set(symptoms.lower().split())
+    words = {w for w in symptoms.lower().split() if w not in _STOPWORDS}
     scored = []
     for inc in _KNOWN_INCIDENTS:
-        inc_words = set(" ".join(inc["symptoms"]).lower().split())
+        inc_words = {w for w in " ".join(inc["symptoms"]).lower().split() if w not in _STOPWORDS}
         overlap = len(words & inc_words)
         if overlap > 0:
             scored.append((overlap, inc))
@@ -323,12 +337,16 @@ class DiagnosisAgent(BaseAgent):
             return "\n\n".join(parts)
 
         async def _get_file_contents(file_path: str) -> str:
-            """Fetch the full source of a file from the target repo. Use this to read ALL return paths of a function — RAG only returns fragments."""
+            """Fetch the full source of a file from the target repo."""
             try:
                 content, _ = await github.get_file_contents(owner, repo, file_path.lstrip("/"))
-                # Cap at 8 000 chars to stay within context — enough for any single file
-                if len(content) > 8000:
-                    return content[:8000] + f"\n\n[truncated — {len(content)} chars total]"
+                if len(content) > 12000:
+                    return (
+                        content[:12000]
+                        + f"\n\n[TRUNCATED — file is {len(content)} chars, only first 12000 shown. "
+                        f"If the function you need is not visible, call get_file_contents again "
+                        f"with a more specific path or search for the function name via search_codebase.]"
+                    )
                 return content
             except Exception as exc:
                 return f"Could not fetch {file_path}: {exc}"
@@ -378,7 +396,9 @@ class DiagnosisAgent(BaseAgent):
             _search_codebase,
             (
                 "Search the indexed codebase for code relevant to the incident. "
-                "Use function names, error types, or file paths as the query. "
+                "Use specific terms from the stack trace (function names, file names) or "
+                "the operation that failed (e.g. 'insertMany appmasterreferrals', "
+                "'classifyFields OpenAI') — not just the raw error type. "
                 "Input: {query: string}"
             ),
         )
@@ -389,8 +409,9 @@ class DiagnosisAgent(BaseAgent):
                 "Fetch the complete source of a file from the target repository. "
                 "Use this after search_codebase identifies a candidate file — read the FULL file "
                 "to see every return statement and code path, not just RAG fragments. "
-                "Critical for null/undefined errors: you must read all return paths of the "
-                "producer function to find which one omits the expected field. "
+                "If the file calls workers, helpers, or other modules relevant to the failure, "
+                "call this again on those files. Follow the code until you reach the failure site. "
+                "If a file is truncated, search for the specific function name via search_codebase. "
                 "Input: {file_path: string (e.g. 'constants/validationMain.js')}"
             ),
         )
@@ -399,7 +420,8 @@ class DiagnosisAgent(BaseAgent):
             _search_similar_incidents,
             (
                 "Search the incident knowledge base for past incidents with similar symptoms. "
-                "Input: {symptoms: string (space-separated keywords)}"
+                "Input: {symptoms: string (space-separated domain-specific keywords — "
+                "use operation names, error codes, and system components, not generic words like 'error' or 'null')}"
             ),
         )
 
@@ -408,6 +430,15 @@ class DiagnosisAgent(BaseAgent):
         event = incident.error_event
         log_group = event.metadata.get("log_group", "")
         pattern = event.metadata.get("pattern", event.error_type or event.title)
+
+        log_group_warning = ""
+        if not log_group:
+            logger.warning("DiagnosisAgent: log_group missing from incident metadata — log-based steps will produce no results")
+            log_group_warning = (
+                "\nWARNING: log_group is not set for this incident. Steps 1–3 (log tools) will "
+                "return no data. Skip them and proceed directly to steps 4–6 (knowledge base + codebase search). "
+                "Set reproduction_confirmed=false and cap confidence at 0.75.\n"
+            )
 
         prior_section = ""
         if prior_context:
@@ -428,18 +459,48 @@ INCIDENT:
   occurrences_24h : {incident.occurrences_24h}
   blast_radius    : {incident.blast_radius}
   triage_reasoning: {incident.triage_reasoning}
-{prior_section}
-STEPS — call tools in this order:
-1. get_error_samples — see the actual error messages (log_group="{log_group}", pattern="{pattern}", minutes=120)
-2. check_still_occurring — confirm if error is ongoing (log_group="{log_group}", pattern="{pattern}")
-3. get_occurrence_timeline — understand the trend (log_group="{log_group}", pattern="{pattern}", hours=24)
-4. search_similar_incidents — check knowledge base (symptoms="{event.error_type or ''} {event.description[:50]}")
-5. search_codebase — find candidate file paths (query="{event.error_type or event.title}")
+{log_group_warning}{prior_section}
+STEPS — call tools in this exact order. Do not skip steps 1–3 unless log_group is missing.
+Complete each step before moving to the next.
+
+1. get_error_samples — see the actual error messages
+   log_group="{log_group}", pattern="{pattern}", minutes=120
+   → Extract: exact error text, function names in stack trace, any file paths or line numbers.
+     These become your search terms for step 5.
+
+2. check_still_occurring — confirm if error is ongoing
+   log_group="{log_group}", pattern="{pattern}"
+
+3. get_occurrence_timeline — understand the trend
+   log_group="{log_group}", pattern="{pattern}", hours=24
+
+4. search_similar_incidents — check knowledge base
+   symptoms = domain-specific keywords from the error: operation names, error codes, component names.
+   Do NOT use generic words like "error", "null", "undefined" — they match everything.
+   Good: "E11000 duplicate insertMany parallel workers"
+   Bad:  "TypeError undefined cannot read property"
+
+5. search_codebase — find candidate file paths
+   Use specific terms from the stack trace (function names, file paths) found in step 1,
+   NOT just the raw error type. If the stack trace shows `insertMany appmasterreferrals`,
+   query that. If it shows `classifyFields`, query that function name.
+
 6. get_file_contents — fetch the FULL source of the file(s) identified in step 5.
-   RAG returns 400-char fragments — you MUST read the full file to see every return statement.
-   For null/undefined errors: find the function that returns the crashing object and read
-   ALL its return paths to find which one omits the expected field.
-7. Answer with a JSON diagnosis
+   RAG returns 400-char fragments — you MUST read the full file to understand the code.
+   Do not stop at one file. If that file spawns workers, calls helpers, or delegates to
+   other modules that are part of the failure path, read those too.
+
+   At each file, ask:
+     - What data enters this function and where does it come from?
+     - What assumptions does this code make that the error shows are violated?
+     - Does this function call something else that is part of the failure path?
+     - Are there naming clues (function names, variable names, comments) that reveal intent?
+     - For parallel/concurrent code: can two execution paths touch the same data simultaneously?
+   Keep reading until you can explain the failure completely from first principles.
+
+   If a file is truncated, search for the specific function name via search_codebase.
+
+7. Answer with a JSON diagnosis.
 
 CRITICAL — NULL / UNDEFINED ERRORS:
 If the error is a TypeError (cannot read property, undefined, null) or NullPointerException:
@@ -457,27 +518,14 @@ STEP 2 — check ALL return paths of that producer:
                error path returns {{ ok: false, error: "..." }}   ← missing `classification`
   The missing field on the error path is the root cause, not the bottom-level API failure.
 
-STEP 3 — write root_cause and fix_approach:
+STEP 3 — write root_cause and fix_approach based solely on what you read in the code.
   root_cause MUST name the DIRECT PRODUCER function and which return path omits the field.
-  BAD:  "classifyResult.classification is undefined when accessed at line 296"
-  BAD:  "classifyFields() returns null when OpenAI fails"   ← wrong level if wrapper already handles it
-  GOOD: "runValidationCheck() returns {{ ok: false, error: '...' }} on classification failure but omits
-         the `classification` field — callers always access .classification so all error return paths
-         must include it"
+  fix_approach MUST fix the upstream source — do NOT suggest null guards, optional chaining,
+  or try/catch at the crash site. Those hide the problem instead of fixing it.
 
-  fix_approach MUST fix the upstream source of the problem — not add null guards, optional chaining,
-  or try/catch at crash sites.
-  Do NOT suggest null checks, optional chaining (?.), nullish coalescing (??), or try/catch
-  at the property access site — those are symptom fixes that hide the problem.
-  BAD:  "Add defensive validation: check if classifyResult?.classification exists before accessing"
-  GOOD: "In classifyFields(), add response_format: {{ type: 'json_object' }} to the OpenAI call — this
-         prevents the parse error at the source"
-
-- affected_function and affected_file should identify the PRIMARY root cause location — the UPSTREAM
-  function where the bug originates, not the crash site or symptom location.
-  Priority order: (1) misconfigured API call, (2) wrong algorithm/logic, (3) missing field on all return paths.
-  If there are TWO changes needed (e.g. fix the API call AND fix error return paths), put the upstream
-  fix in affected_function/affected_file, and describe the secondary fix in additional_fix.
+- affected_function and affected_file identify the PRIMARY root cause location (upstream, not crash site).
+- If TWO changes are needed, put the upstream fix in affected_function/affected_file and
+  describe the secondary fix in additional_fix.
 
 Answer with ONLY a valid JSON object:
 {{
@@ -487,7 +535,7 @@ Answer with ONLY a valid JSON object:
     "specific fact from logs or code that supports root cause",
     "another concrete observation"
   ],
-  "fix_approach": "what must change at the upstream source — never 'add null check at access site'",
+  "fix_approach": "what must change at the upstream source",
   "affected_function": "primaryFunctionToFix or null",
   "affected_file": "path/to/primary/file.js or null",
   "additional_fix": "optional: describe any secondary change in a different function/file, or null",
@@ -500,7 +548,8 @@ Confidence guide:
   0.90+ → near certain, clear evidence in code + logs
   0.70-0.90 → probable, strong log evidence but limited code visibility
   0.50-0.70 → possible, pattern matches but incomplete evidence
-  <0.50 → uncertain, escalate to human"""
+  <0.50 → uncertain, escalate to human
+  If log_group was missing and steps 1–3 returned no data, cap confidence at 0.75."""
 
         result = await self.run(prompt)
         return _parse_diagnosis_result(result.answer)

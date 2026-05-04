@@ -48,22 +48,43 @@ class TriageResult:
     reasoning: str
 
 
+def _sanitize_json_strings(text: str) -> str:
+    """Escape literal newlines/tabs inside JSON string values."""
+    result: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if escaped:
+            escaped = False; result.append(ch); continue
+        if ch == "\\" and in_string:
+            escaped = True; result.append(ch); continue
+        if ch == '"':
+            in_string = not in_string; result.append(ch); continue
+        if in_string and ch in ("\n", "\r", "\t"):
+            result.append("\\n" if ch == "\n" else "\\r" if ch == "\r" else "\\t")
+            continue
+        result.append(ch)
+    return "".join(result)
+
+
 def _parse_triage_result(answer: str) -> TriageResult:
     """Extract the JSON triage decision from the agent's Answer field."""
     match = re.search(r"\{.*\}", answer, re.DOTALL)
     if match:
-        try:
-            data = json.loads(match.group())
-            return TriageResult(
-                decision=data.get("decision", "real"),
-                severity=data.get("severity", "P2"),
-                blast_radius=data.get("blast_radius", "unknown"),
-                occurrences_24h=int(data.get("occurrences_24h") or 0),
-                duplicate_pr=data.get("duplicate_pr"),
-                reasoning=data.get("reasoning", ""),
-            )
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
+        raw = match.group()
+        for attempt in (raw, _sanitize_json_strings(raw)):
+            try:
+                data = json.loads(attempt)
+                return TriageResult(
+                    decision=data.get("decision", "real"),
+                    severity=data.get("severity", "P2"),
+                    blast_radius=data.get("blast_radius", "unknown"),
+                    occurrences_24h=int(data.get("occurrences_24h") or 0),
+                    duplicate_pr=data.get("duplicate_pr"),
+                    reasoning=data.get("reasoning", ""),
+                )
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
 
     logger.warning("TriageAgent returned non-JSON answer — defaulting to real/P2. Raw: %s", answer[:300])
     return TriageResult(
@@ -165,7 +186,12 @@ class TriageAgent(BaseAgent):
             else "2. Skip get_occurrence_count — no log_group available"
         )
 
+        from datetime import date
+        today = date.today().isoformat()
+
         prompt = f"""You are a triage agent. Classify this production error event.
+
+TODAY'S DATE: {today}  ← use this as the reference for "recent" / "current" / "future"
 
 ERROR EVENT:
   id          : {event.id}

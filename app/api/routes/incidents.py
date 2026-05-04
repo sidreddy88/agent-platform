@@ -330,10 +330,15 @@ async def reject_fix(incident_id: str, body: RestartBody = RestartBody()) -> Dic
     return {"status": "rejected", "incident_id": incident_id}
 
 
+class RefixBody(BaseModel):
+    notes: Optional[str] = None
+
+
 @router.post("/{incident_id}/refix")
-async def approve_refix(incident_id: str, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+async def approve_refix(incident_id: str, background_tasks: BackgroundTasks, body: RefixBody = RefixBody()) -> Dict[str, Any]:
     """
     Approve re-running fix generation with the code review feedback as human_notes.
+    Optional notes are prepended to the existing human_notes so the fix agent sees them.
     Only valid when the incident is in AWAITING_REFIX_APPROVAL status.
     """
     incident = incident_store.get(incident_id)
@@ -344,6 +349,10 @@ async def approve_refix(incident_id: str, background_tasks: BackgroundTasks) -> 
             status_code=400,
             detail=f"Incident is not awaiting re-fix approval (status={incident.status})",
         )
+    if body.notes:
+        existing = incident.human_notes or ""
+        incident.human_notes = f"HUMAN INSTRUCTION: {body.notes.strip()}\n\n{existing}".strip()
+        incident_store.update(incident)
     from app.services.incident_loop import incident_loop
     background_tasks.add_task(incident_loop.refix_from_review, incident_id)
     return {"status": "refix_queued", "incident_id": incident_id}

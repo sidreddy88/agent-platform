@@ -251,6 +251,8 @@ class IncidentLoop:
         self._fix_agent._llm = llm_gateway.get_llm_service_for("fix")
         self._review_agent = CodeReviewAgent()
         self._review_agent._llm = llm_gateway.get_llm_service_for("review")
+        from app.agents.merge_decision import MergeDecisionAgent
+        self._merge_decision_agent = MergeDecisionAgent()
         try:
             from app.services.rag import RAGService
             self._rag: RAGService | None = RAGService()
@@ -564,6 +566,26 @@ class IncidentLoop:
 
         if diagnosis.escalate:
             event = incident.error_event
+
+            # If origin is unclear (no affected file identified), run ErrorClarityAgent
+            # to add observability before escalating to human. This improves diagnosability
+            # for the next occurrence even if we can't fix this one yet.
+            if not diagnosis.affected_file:
+                try:
+                    from app.agents.error_clarity import ErrorClarityAgent
+                    clarity_agent = ErrorClarityAgent()
+                    clarity = await clarity_agent.analyze(incident)
+                    incident.clarity_summary = clarity.summary
+                    incident.clarity_pr_url = clarity.pr_url
+                    incident.clarity_pr_number = clarity.pr_number
+                    incident_store.update(incident)
+                    logger.info(
+                        "[IncidentLoop] %s — ErrorClarityAgent: %d addition(s), pr=%s",
+                        incident.id, len(clarity.additions), clarity.pr_url or "none",
+                    )
+                except Exception as exc:
+                    logger.error("[IncidentLoop] ErrorClarityAgent failed for %s: %s", incident.id, exc)
+
             sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
             approval_req = await approval_service.request_approval(
                 agent_name="DiagnosisAgent",
@@ -697,15 +719,33 @@ class IncidentLoop:
             incident_store.update(incident)
 
         if _extract_review_recommendation(review_text or "") == "REQUEST_CHANGES":
-            incident.human_notes = review_text
-            incident.status = IncidentStatus.AWAITING_REFIX_APPROVAL
-            incident_store.update(incident)
-            await _notify_refix_approval_needed(incident, review_text)
-            logger.info(
-                "[IncidentLoop] %s — REQUEST_CHANGES from code review, awaiting refix approval",
-                incident.id,
-            )
-            return
+            # Ask MergeDecisionAgent: are the outstanding issues blocking, or can we
+            # ship the fix now because the core issue is fixed and severity is high?
+            merge_decision = None
+            try:
+                merge_decision = await self._merge_decision_agent.decide(incident, review_text or "")
+                incident.merge_decision = merge_decision.decision
+                incident.merge_decision_reasoning = merge_decision.reasoning
+                incident_store.update(incident)
+            except Exception as exc:
+                logger.error("[IncidentLoop] MergeDecisionAgent failed for %s: %s", incident.id, exc)
+
+            if merge_decision and merge_decision.decision == "merge_now":
+                logger.info(
+                    "[IncidentLoop] %s — MergeDecision=merge_now (REQUEST_CHANGES overridden): %s",
+                    incident.id, merge_decision.reasoning,
+                )
+                # Fall through to the approval gate — fix is good enough to ship
+            else:
+                incident.human_notes = review_text
+                incident.status = IncidentStatus.AWAITING_REFIX_APPROVAL
+                incident_store.update(incident)
+                await _notify_refix_approval_needed(incident, review_text)
+                logger.info(
+                    "[IncidentLoop] %s — REQUEST_CHANGES + MergeDecision=refix_first, awaiting refix approval",
+                    incident.id,
+                )
+                return
 
         event = incident.error_event
         sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
@@ -871,6 +911,29 @@ class IncidentLoop:
             )
             return
 
+        # Classify review intent before closing the PR — if the fix is already correct
+        # and the reviewer only wants additions, use the PR branch as the fix base so
+        # the LLM builds on the already-fixed code rather than the pre-fix staging branch.
+        review_intent = "REWORK"
+        pr_branch_for_base: str | None = None
+        if incident.human_notes and incident.pr_branch:
+            try:
+                review_intent = await self._classify_review_intent(incident.human_notes)
+                if review_intent == "EXTEND":
+                    pr_branch_for_base = incident.pr_branch
+                    # Inject the PR branch name so fix_generation knows to fetch from there
+                    existing_note = incident.human_notes or ""
+                    incident.human_notes = (
+                        f"[REVIEW INTENT: fix is correct — extend it, do NOT redo the core fix]\n"
+                        f"[BASE BRANCH FOR THIS FIX: {pr_branch_for_base} — fetch the file from this branch "
+                        f"to see the already-applied fix before adding improvements]\n\n"
+                        + existing_note
+                    )
+                    logger.info("[IncidentLoop] %s — review intent=EXTEND, will base refix on PR branch %s",
+                                incident_id, pr_branch_for_base)
+            except Exception as exc:
+                logger.warning("[IncidentLoop] %s — review intent classification failed: %s", incident_id, exc)
+
         # Close the old PR best-effort so the branch can be reused
         if incident.pr_number:
             try:
@@ -977,6 +1040,32 @@ class IncidentLoop:
         await self._run_post_fix(incident, fix)
         _rsess.log_fix_outcome(pr_url=fix.pr_url, pr_number=fix.pr_number, blast_radius_violation=False, failure_reason=None)
         session_logger.finish(incident.id, "pr_created")
+
+    async def _classify_review_intent(self, review_text: str) -> str:
+        """
+        Classify what the code review is asking for.
+        Returns 'EXTEND' (fix is good, just improve/add to it)
+                or 'REWORK' (fix logic is wrong, redo it).
+        """
+        from app.services.llm_gateway import llm_gateway
+        llm = llm_gateway.get_llm_service_for("triage")
+        prompt = (
+            f"A code reviewer left feedback on an AI-generated fix PR.\n\n"
+            f"REVIEW:\n{review_text[:1500]}\n\n"
+            f"Classify the reviewer's intent:\n"
+            f"- EXTEND: the reviewer says the fix logic is correct/good but wants additions "
+            f"(more error handling, validation, edge cases, logging, etc.) on top of the existing fix.\n"
+            f"- REWORK: the reviewer says the fix is wrong, incomplete, targets the wrong place, "
+            f"or needs to be redone differently.\n\n"
+            f"Return ONLY one word: EXTEND or REWORK."
+        )
+        try:
+            resp = await llm.complete(messages=[{"role": "user", "content": prompt}])
+            if "EXTEND" in resp.upper():
+                return "EXTEND"
+        except Exception:
+            pass
+        return "REWORK"
 
     async def _extract_review_target(
         self, review_text: str, incident: "IncidentState"

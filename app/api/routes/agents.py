@@ -83,6 +83,9 @@ async def get_pr_stats():
     Return enriched stats for all resolved agent PRs.
 
     Fetches PR description and CI check results from GitHub for each PR.
+    CI fallback: when fix PRs target a branch that has no workflow (e.g. staging),
+    we look for the next completed main-branch run after the PR was created —
+    that is the actual CI signal available in such repos.
     GitHub calls are best-effort — fields are null if the API is unreachable.
     """
     from app.core.config import settings
@@ -91,6 +94,18 @@ async def get_pr_stats():
     fix_repo = getattr(settings, "fix_target_repo", "")
     owner, repo = fix_repo.split("/", 1) if "/" in fix_repo else ("", "")
     gh = GitHubService()
+
+    # Fetch recent master/main workflow runs once — used as CI fallback for PRs whose
+    # branches don't trigger CI directly (e.g. fix/* → staging, CI only runs on master).
+    master_runs: list[dict] = []
+    if owner:
+        for branch in ("master", "main"):
+            try:
+                master_runs = await gh.get_workflow_runs(owner, repo, limit=50, branch=branch)
+                if master_runs:
+                    break
+            except Exception:
+                pass
 
     resolved = [
         i for i in incident_store.list_all()
@@ -126,6 +141,7 @@ async def get_pr_stats():
         pr_description = None
         ci_conclusion = None
         ci_checks: list[dict] = []
+        ci_source = None  # "check_runs" | "master_workflow"
 
         if owner and incident.pr_number:
             try:
@@ -134,6 +150,7 @@ async def get_pr_stats():
 
                 ci_checks = await gh.get_commit_checks(owner, repo, pr_details.head_sha)
                 if ci_checks:
+                    ci_source = "check_runs"
                     conclusions = {c["conclusion"] for c in ci_checks if c["conclusion"]}
                     if "failure" in conclusions or "timed_out" in conclusions:
                         ci_conclusion = "failure"
@@ -144,6 +161,27 @@ async def get_pr_stats():
             except Exception:
                 pass
 
+        # Fallback: if the fix branch has no check-runs (e.g. CI only runs on master),
+        # find the next completed master run after this PR was created.
+        if ci_conclusion is None and incident.pr_created_at and master_runs:
+            pr_created = _as_utc(incident.pr_created_at)
+            for run in reversed(master_runs):  # oldest-first
+                try:
+                    run_created = _as_utc(datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")))
+                except Exception:
+                    continue
+                if run_created >= pr_created and run.get("conclusion") in ("success", "failure"):
+                    ci_conclusion = run["conclusion"]
+                    ci_source = "master_workflow"
+                    ci_checks = [{
+                        "name": run["name"],
+                        "status": "completed",
+                        "conclusion": run["conclusion"],
+                        "url": run.get("html_url"),
+                        "note": "master branch deployment run after PR creation",
+                    }]
+                    break
+
         log_source = (
             event.metadata.get("log_group")
             or event.resource_id
@@ -152,6 +190,9 @@ async def get_pr_stats():
 
         # MTTR: detection → fix merged. Only set when outcome == "fix_merged".
         mttr_seconds = incident.mttr_seconds if incident.outcome == "fix_merged" else None
+
+        agent_runs = agent_tracker.get_runs_for_incident(incident.id)
+        total_cost_usd = round(sum(r.get("cost_usd", 0.0) for r in agent_runs), 6)
 
         results.append({
             "incident_id": incident.id,
@@ -173,7 +214,9 @@ async def get_pr_stats():
             "mttd_seconds": mttd_seconds,
             "agent_time_seconds": agent_time_seconds,
             "mttr_seconds": mttr_seconds,
+            "total_cost_usd": total_cost_usd,
             "ci_conclusion": ci_conclusion,
+            "ci_source": ci_source,
             "ci_checks": ci_checks,
         })
 
@@ -182,6 +225,7 @@ async def get_pr_stats():
     mttds = [r["mttd_seconds"] for r in results if r["mttd_seconds"] is not None]
     agent_times = [r["agent_time_seconds"] for r in results if r["agent_time_seconds"] is not None]
     confs = [r["confidence"] for r in results if r["confidence"] is not None]
+    costs = [r["total_cost_usd"] for r in results if r["total_cost_usd"] > 0]
     ci_done = [r for r in results if r["ci_conclusion"] in ("success", "failure")]
 
     summary = {
@@ -191,6 +235,8 @@ async def get_pr_stats():
         "avg_agent_time_seconds": round(sum(agent_times) / len(agent_times), 1) if agent_times else None,
         "avg_mttr_seconds": round(sum(mttrs) / len(mttrs), 1) if mttrs else None,
         "avg_confidence": round(sum(confs) / len(confs), 3) if confs else None,
+        "avg_cost_usd": round(sum(costs) / len(costs), 4) if costs else None,
+        "total_cost_usd": round(sum(costs), 4) if costs else None,
         "ci_pass_rate": (
             round(sum(1 for r in ci_done if r["ci_conclusion"] == "success") / len(ci_done), 3)
             if ci_done else None

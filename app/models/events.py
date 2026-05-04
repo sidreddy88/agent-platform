@@ -96,6 +96,11 @@ class IncidentState(BaseModel):
     pr_test_added: bool = False
     review_posted: bool = False
     approval_id: Optional[str] = None
+    merge_decision: Optional[str] = None           # "merge_now" | "refix_first" — set by MergeDecisionAgent
+    merge_decision_reasoning: Optional[str] = None
+    clarity_summary: Optional[str] = None          # ErrorClarityAgent: why root cause is unclear
+    clarity_pr_url: Optional[str] = None           # observability PR created by ErrorClarityAgent
+    clarity_pr_number: Optional[int] = None
 
     @field_validator("approval_id", mode="before")
     @classmethod
