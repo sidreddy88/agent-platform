@@ -166,16 +166,20 @@ class GitHubService:
         repo: str,
         limit: int = 10,
         status: str | None = None,
+        branch: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return recent workflow runs for a repo.
 
         Args:
             limit:  Max runs to return (capped at 100).
             status: Optional filter — "failure", "success", "in_progress", etc.
+            branch: Optional branch name filter.
         """
         params: dict[str, Any] = {"per_page": min(limit, 100)}
         if status:
             params["status"] = status
+        if branch:
+            params["branch"] = branch
 
         async with self._client() as client:
             response = await client.get(

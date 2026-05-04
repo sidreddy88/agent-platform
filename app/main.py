@@ -19,6 +19,7 @@ from app.api.routes import orchestrator as orchestrator_routes
 from app.api.routes import sessions as sessions_routes
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.database import init_db
+from app.services.detection import detection_service
 from app.services.drift_detector import drift_detector
 from app.services.orchestrator import orchestrator
 from app.services.threshold_monitor import threshold_monitor
@@ -90,6 +91,7 @@ async def _agent_status_broadcaster() -> None:
 @app.on_event("startup")
 async def _startup():
     init_db()
+    asyncio.create_task(detection_service.run_forever())
     asyncio.create_task(threshold_monitor.run_forever())
     asyncio.create_task(orchestrator.run_forever())
     asyncio.create_task(drift_detector.run_forever())
@@ -99,7 +101,7 @@ async def _startup():
 
 @app.on_event("shutdown")
 async def _shutdown():
-    # detection_service.stop()
+    detection_service.stop()
     threshold_monitor.stop()
     orchestrator.stop()
     drift_detector.stop()

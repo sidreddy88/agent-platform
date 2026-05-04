@@ -222,8 +222,8 @@ class TestMaxLines:
         assert result.allowed
 
     def test_default_limits(self):
-        assert DEFAULT_MAX_LINES_ADDED == 200
-        assert DEFAULT_MAX_LINES_DELETED == 150
+        assert DEFAULT_MAX_LINES_ADDED == 500
+        assert DEFAULT_MAX_LINES_DELETED == 500
 
 
 # ---------------------------------------------------------------------------
@@ -333,10 +333,11 @@ class TestFixGenerationBlastRadius:
 
             agent._github.get_default_branch = AsyncMock(return_value="main")
             agent._github.get_file_contents = AsyncMock(return_value=(_file_content, "abc123"))
-            agent._llm.complete = AsyncMock(return_value=(
-                f"<OLD>\n{_file_content}\n</OLD>\n"
-                "<NEW>\nasync function moveAndRemoveFileFromS3() { try {} catch(e) {} }\n</NEW>"
-            ))
+            _new_fn = "function moveAndRemoveFileFromS3() { try {} catch(e) {} }"
+            agent._llm.complete_with_tools = AsyncMock(side_effect=[
+                ("", [{"id": "c1", "name": "apply_edit", "input": {"new_text": _new_fn}}], "tool_use"),
+                ("", [], "end_turn"),
+            ])
 
             result, steps = await agent.fix_with_steps(incident)
 
@@ -395,10 +396,9 @@ class TestFixGenerationBlastRadius:
         agent._github.create_pull_request = AsyncMock(return_value=(11, "https://github.com/org/repo/pull/11"))
 
         agent._llm = MagicMock()
-        # LLM calls (in order): 1. _generate_fix  2. _critique_fix
-        agent._llm.complete = AsyncMock(side_effect=[
-            f"<OLD>\n{old_fn}\n</OLD>\n<NEW>\n{new_fn}\n</NEW>",
-            "LOOKS CORRECT",
+        agent._llm.complete_with_tools = AsyncMock(side_effect=[
+            ("", [{"id": "c1", "name": "apply_edit", "input": {"new_text": new_fn}}], "tool_use"),
+            ("", [], "end_turn"),
         ])
 
         with patch("app.agents.fix_generation.BlastRadiusGuard") as MockGuard, \
