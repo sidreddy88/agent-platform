@@ -118,6 +118,9 @@ class DiagnosisResult:
     fix_approach: str = ""
     affected_function: str | None = None
     affected_file: str | None = None
+    additional_fix: str | None = None          # secondary change description
+    additional_fix_function: str | None = None # secondary function name
+    additional_fix_file: str | None = None     # secondary file path
     reproduction_confirmed: bool = False
     escalate: bool = False      # True when confidence < CONFIDENCE_THRESHOLD
     raw_llm: str = ""
@@ -177,6 +180,9 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
                 fix_approach=data.get("fix_approach", ""),
                 affected_function=data.get("affected_function"),
                 affected_file=data.get("affected_file"),
+                additional_fix=data.get("additional_fix"),
+                additional_fix_function=data.get("additional_fix_function"),
+                additional_fix_file=data.get("additional_fix_file"),
                 reproduction_confirmed=bool(data.get("reproduction_confirmed", False)),
                 escalate=confidence < CONFIDENCE_THRESHOLD,
                 raw_llm=answer,
@@ -459,26 +465,34 @@ STEP 3 — write root_cause and fix_approach:
          the `classification` field — callers always access .classification so all error return paths
          must include it"
 
-  fix_approach MUST add the missing field to the error return path(s) of the direct producer.
+  fix_approach MUST fix the upstream source of the problem — not add null guards, optional chaining,
+  or try/catch at crash sites.
   Do NOT suggest null checks, optional chaining (?.), nullish coalescing (??), or try/catch
   at the property access site — those are symptom fixes that hide the problem.
   BAD:  "Add defensive validation: check if classifyResult?.classification exists before accessing"
-  GOOD: "In runValidationCheck(), add `classification: {{ publish_decision: 'block', ... }}` to every
-         return path that currently omits it (error returns, early exits, catch blocks)"
+  GOOD: "In classifyFields(), add response_format: {{ type: 'json_object' }} to the OpenAI call — this
+         prevents the parse error at the source"
 
-- affected_function should be the DIRECT PRODUCER function, not the crash function or the deep API.
+- affected_function and affected_file should identify the PRIMARY root cause location — the UPSTREAM
+  function where the bug originates, not the crash site or symptom location.
+  Priority order: (1) misconfigured API call, (2) wrong algorithm/logic, (3) missing field on all return paths.
+  If there are TWO changes needed (e.g. fix the API call AND fix error return paths), put the upstream
+  fix in affected_function/affected_file, and describe the secondary fix in additional_fix.
 
 Answer with ONLY a valid JSON object:
 {{
-  "root_cause": "precise description of WHY the error occurs — name the producer function for null errors",
+  "root_cause": "precise description of WHY the error occurs — name the upstream cause",
   "confidence": 0.82,
   "evidence": [
     "specific fact from logs or code that supports root cause",
     "another concrete observation"
   ],
-  "fix_approach": "what the PRODUCER function must do differently — never 'add null check at access site'",
-  "affected_function": "functionName or null",
-  "affected_file": "path/to/file.js or null",
+  "fix_approach": "what must change at the upstream source — never 'add null check at access site'",
+  "affected_function": "primaryFunctionToFix or null",
+  "affected_file": "path/to/primary/file.js or null",
+  "additional_fix": "optional: describe any secondary change in a different function/file, or null",
+  "additional_fix_function": "secondaryFunctionName or null",
+  "additional_fix_file": "path/to/secondary/file.js or null",
   "reproduction_confirmed": true
 }}
 

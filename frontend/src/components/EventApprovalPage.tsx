@@ -24,6 +24,7 @@ export function EventApprovalPage({ events }: Props) {
     setApproving(id);
     try {
       await fetch(`/events/${id}/approve`, { method: "POST" });
+      setDismissed((prev) => new Set([...prev, id]));
     } finally {
       setApproving(null);
     }
@@ -46,6 +47,7 @@ export function EventApprovalPage({ events }: Props) {
     setApprovingAll(true);
     try {
       await fetch("/events/approve-all", { method: "POST" });
+      setDismissed(new Set(events.map((e) => e.id)));
     } finally {
       setApprovingAll(false);
     }

@@ -482,9 +482,10 @@ class AWSService:
             })
         return sorted(events, key=lambda e: e["timestamp"], reverse=True)
 
-    def get_error_logs(self, log_group: str, minutes: int = 60, limit: int = 100) -> list[dict]:
+    def get_error_logs(self, log_group: str, minutes: int = 60) -> list[dict]:
         """Fetch error-level log events from a CloudWatch log group.
 
+        Paginates through all results via nextToken so no cap is applied.
         For each matching error line, fetches the next 20 lines from the same
         log stream within a 5-second window to capture Node.js / Python stack
         traces that appear on the lines immediately following the error.
@@ -496,19 +497,30 @@ class AWSService:
         start_ms = int((now - timedelta(minutes=minutes)).timestamp() * 1000)
         end_ms = int(now.timestamp() * 1000)
 
-        try:
-            resp = logs.filter_log_events(
-                logGroupName=log_group,
-                startTime=start_ms,
-                endTime=end_ms,
-                filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback"',
-                limit=limit,
-            )
-        except (BotoCoreError, ClientError) as exc:
-            raise AWSError("CloudWatchLogs", str(exc)) from exc
+        base_kwargs = dict(
+            logGroupName=log_group,
+            startTime=start_ms,
+            endTime=end_ms,
+            filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback"',
+        )
+
+        _MAX_EVENTS = 200
+        raw_events: list[dict] = []
+        next_token: str | None = None
+        while len(raw_events) < _MAX_EVENTS:
+            try:
+                kwargs = {**base_kwargs, **({"nextToken": next_token} if next_token else {})}
+                resp = logs.filter_log_events(**kwargs)
+            except (BotoCoreError, ClientError) as exc:
+                raise AWSError("CloudWatchLogs", str(exc)) from exc
+            raw_events.extend(resp.get("events", []))
+            next_token = resp.get("nextToken")
+            if not next_token:
+                break
+        raw_events = raw_events[:_MAX_EVENTS]
 
         events = []
-        for ev in resp.get("events", []):
+        for ev in raw_events:
             ts = datetime.fromtimestamp(ev["timestamp"] / 1000, tz=timezone.utc).isoformat()
             message = ev.get("message", "").rstrip()
 

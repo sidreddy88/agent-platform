@@ -72,8 +72,11 @@ class IncidentState(BaseModel):
     diagnosis: Optional[str] = None
     confidence: Optional[float] = None  # 0.0 - 1.0
     reproduction_confirmed: Optional[bool] = None
-    diagnosis_affected_file: Optional[str] = None      # producer file identified by DiagnosisAgent
-    diagnosis_affected_function: Optional[str] = None  # producer function identified by DiagnosisAgent
+    diagnosis_affected_file: Optional[str] = None      # primary fix file identified by DiagnosisAgent
+    diagnosis_affected_function: Optional[str] = None  # primary fix function identified by DiagnosisAgent
+    diagnosis_additional_fix: Optional[str] = None         # secondary fix description
+    diagnosis_additional_fix_file: Optional[str] = None    # secondary fix file
+    diagnosis_additional_fix_function: Optional[str] = None  # secondary fix function
 
     # Fix
     fix_attempted: Optional[str] = None
