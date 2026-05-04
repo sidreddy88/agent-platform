@@ -76,9 +76,16 @@ interface Props {
   metrics: IncidentMetrics | null;
   connected: boolean;
   scanLog: ScanLogEntry[];
+  onPendingEventsChanged: () => Promise<void>;
 }
 
-export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props) {
+export function IncidentsPage({
+  incidents,
+  metrics,
+  connected,
+  scanLog,
+  onPendingEventsChanged,
+}: Props) {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ events_found: number } | null>(null);
   const [clearing, setClearing] = useState(false);
@@ -104,6 +111,7 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
     setClearingEvents(true);
     try {
       await fetch("/incidents/events", { method: "DELETE" });
+      await onPendingEventsChanged();
     } finally {
       setClearingEvents(false);
     }
@@ -115,6 +123,7 @@ export function IncidentsPage({ incidents, metrics, connected, scanLog }: Props)
     try {
       const res = await fetch("/incidents/scan", { method: "POST" });
       setScanResult(await res.json());
+      await onPendingEventsChanged();
     } catch {
       setScanResult({ events_found: 0 });
     } finally {
@@ -218,6 +227,7 @@ function IncidentCard({ inc }: { inc: Incident }) {
   const [restarting, setRestarting] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
   const [notes, setNotes] = useState("");
+  const [refixing, setRefixing] = useState(false);
   async function handleRestart() {
     setRestarting(true);
     setShowNotes(false);
@@ -231,6 +241,17 @@ function IncidentCard({ inc }: { inc: Incident }) {
     } finally {
       setRestarting(false);
     }
+  }
+  async function handleApproveRefix() {
+    setRefixing(true);
+    try {
+      await fetch(`/incidents/${inc.id}/refix`, { method: "POST" });
+    } finally {
+      setRefixing(false);
+    }
+  }
+  async function handleRejectRefix() {
+    await fetch(`/incidents/${inc.id}/reject-refix`, { method: "POST" });
   }
 
   return (
@@ -303,7 +324,16 @@ function IncidentCard({ inc }: { inc: Incident }) {
         {inc.mttr_seconds !== null && (
           <span style={metaPill}>MTTR {mttr(inc.mttr_seconds)}</span>
         )}
-        {showNotes ? (
+        {inc.status === "awaiting_refix_approval" ? (
+          <>
+            <button style={refixApproveBtn(refixing)} onClick={handleApproveRefix} disabled={refixing}>
+              {refixing ? "Re-fixing..." : "✓ Approve Re-fix"}
+            </button>
+            <button style={refixRejectBtn} onClick={handleRejectRefix}>
+              ✕ Reject Re-fix
+            </button>
+          </>
+        ) : showNotes ? (
           <>
             <button style={restartBtn(restarting)} onClick={handleRestart} disabled={restarting}>
               {restarting ? "↺ Restarting..." : "↺ Confirm Restart"}
@@ -548,6 +578,23 @@ const metaPill: React.CSSProperties = {
   borderRadius: 4, padding: "2px 8px",
 };
 
+const refixApproveBtn = (loading: boolean): React.CSSProperties => ({
+  marginLeft: "auto",
+  background: loading ? "rgba(34,197,94,0.05)" : "rgba(34,197,94,0.1)",
+  border: "1px solid rgba(34,197,94,0.4)",
+  color: loading ? "#4b5563" : "#22c55e",
+  borderRadius: 4, padding: "2px 10px", fontSize: 11, fontWeight: 700,
+  cursor: loading ? "not-allowed" : "pointer",
+});
+
+const refixRejectBtn: React.CSSProperties = {
+  background: "rgba(239,68,68,0.08)",
+  border: "1px solid rgba(239,68,68,0.35)",
+  color: "#f87171",
+  borderRadius: 4, padding: "2px 10px", fontSize: 11, fontWeight: 700,
+  cursor: "pointer",
+};
+
 const scanLogBox: React.CSSProperties = {
   background: "#0d1117", border: "1px solid #2d3149",
   borderRadius: 10, overflow: "hidden",
@@ -619,4 +666,3 @@ const pipelineLabel: React.CSSProperties = {
 const pipelineTotal: React.CSSProperties = {
   fontSize: 10, color: "#2d3149", marginLeft: "auto",
 };
-

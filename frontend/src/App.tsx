@@ -26,7 +26,15 @@ interface CBInfo { name: string; state: string; failure_count: number; total_rej
 
 export default function App() {
   const { data, loading, error, lastUpdated, refetch } = useDashboard();
-  const { incidents, metrics, agentSnapshot, connected, scanLog, pendingEvents } = useDashboardWS();
+  const {
+    incidents,
+    metrics,
+    agentSnapshot,
+    connected,
+    scanLog,
+    pendingEvents,
+    refreshPendingEvents,
+  } = useDashboardWS();
   const [tab, setTab] = useState<Tab>("dashboard");
   const [breakers, setBreakers] = useState<CBInfo[]>([]);
   const [resetting, setResetting] = useState<string | null>(null);
@@ -124,6 +132,7 @@ export default function App() {
           metrics={metrics ?? data?.incidents ?? null}
           connected={connected}
           scanLog={scanLog}
+          onPendingEventsChanged={refreshPendingEvents}
         />
       )}
       {tab === "prs" && (

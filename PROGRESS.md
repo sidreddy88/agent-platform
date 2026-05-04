@@ -85,7 +85,12 @@ All five must be true before a session is considered complete.
 
 ## In Progress
 
-_Nothing actively in progress._
+### Pending Event Rescan Refresh
+
+- **Scope:** `app/services/pending_events.py`, `app/api/routes/incidents.py`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/App.tsx`, `frontend/src/components/IncidentsPage.tsx`
+- **Exclusions:** incident pipeline triage/diagnosis/fix behavior, AWS log fetch implementation
+- **Done when:** clicking `Clear Events` reconciles the UI to zero pending events, and the next `Scan Last 14 Days` creates a pending event for each distinct raw log match returned by the scan instead of collapsing repeated message templates or stopping after 10 events.
+- **Status:** implemented locally; `make lint` passes; `DEBUG=false pytest tests/test_pending_events.py -q` passes. Frontend typecheck blocked because `node`/`npm` are unavailable in this shell.
 
 ---
 
