@@ -235,7 +235,12 @@ Write the review in EXACTLY this format:
 
 **Rationale:** <1-2 sentences explaining the recommendation>
 
-Be specific. Reference actual filenames and line numbers from the analysis."""
+Be specific. Reference actual filenames and line numbers from the analysis.
+
+IMPORTANT: Your review must be grounded solely in the per-file analysis above.
+- Do NOT raise issues not evidenced in the analysis.
+- Do NOT claim something is missing because the PR description mentions it — the description states intent, not ground truth. If the per-file analysis did not flag it as missing, it is not missing.
+- Do NOT invent issues, guess at absent code, or speculate beyond what the diff shows."""
 
     review_text = await llm.complete(
         messages=[{"role": "user", "content": prompt}],
