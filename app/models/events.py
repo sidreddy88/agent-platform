@@ -55,6 +55,7 @@ class IncidentStatus(str, Enum):
     DUPLICATE = "duplicate"  # Existing PR already covers this
     VERIFICATION_FAILED = "verification_failed"  # DoD gate blocked REVIEWING transition
     AWAITING_REFIX_APPROVAL = "awaiting_refix_approval"  # Code review requested changes — awaiting human go/no-go
+    FIX_FAILED = "fix_failed"  # FixGenerationAgent could not produce a PR — escalated to human
 
 
 class IncidentState(BaseModel):

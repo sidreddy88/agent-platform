@@ -87,6 +87,27 @@ export function EventApprovalPage({ events }: Props) {
                   <div style={rowTop}>
                     <span style={svcBadge}>{ev.service}</span>
                     <span style={errorTypeBadge}>{ev.error_type}</span>
+                    {ev.handling && ev.handling !== "unknown" && (
+                      <span
+                        style={handlingBadge(ev.handling)}
+                        title={ev.handling === "uncaught"
+                          ? `Uncaught — no error handler caught this${ev.handling_evidence ? ` (${ev.handling_evidence})` : ""}`
+                          : `Caught — code logged this via an error handler${ev.handling_evidence ? ` (${ev.handling_evidence})` : ""}`}
+                      >
+                        {ev.handling === "uncaught" ? "⚠ uncaught" : "✓ caught"}
+                      </span>
+                    )}
+                    {ev.handling === "unknown" && (
+                      <span style={handlingBadge("unknown")}
+                        title="Could not determine if the error was caught by a handler">
+                        ? handling
+                      </span>
+                    )}
+                    {(ev.occurrences ?? 1) > 1 && (
+                      <span style={occurrenceBadge} title="Identical errors collapsed into this entry">
+                        ×{ev.occurrences}
+                      </span>
+                    )}
                     {ev.log_group && <span style={logGroupText}>{ev.log_group}</span>}
                   </div>
                   <p style={firstLine}>{ev.first_line}</p>
@@ -197,6 +218,30 @@ const errorTypeBadge: React.CSSProperties = {
   fontSize: 11, color: "#f87171",
   background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.25)",
   borderRadius: 4, padding: "2px 8px", fontWeight: 600,
+};
+
+const occurrenceBadge: React.CSSProperties = {
+  fontSize: 11, color: "#fbbf24", fontWeight: 700,
+  background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.35)",
+  borderRadius: 4, padding: "2px 8px",
+};
+
+const handlingBadge = (kind: "caught" | "uncaught" | "unknown"): React.CSSProperties => {
+  if (kind === "uncaught") return {
+    fontSize: 11, color: "#ef4444", fontWeight: 700,
+    background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.4)",
+    borderRadius: 4, padding: "2px 8px",
+  };
+  if (kind === "caught") return {
+    fontSize: 11, color: "#22c55e", fontWeight: 700,
+    background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.35)",
+    borderRadius: 4, padding: "2px 8px",
+  };
+  return {
+    fontSize: 11, color: "#64748b", fontWeight: 600,
+    background: "transparent", border: "1px solid #334155",
+    borderRadius: 4, padding: "2px 8px",
+  };
 };
 
 const logGroupText: React.CSSProperties = {
