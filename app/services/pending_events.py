@@ -5,8 +5,9 @@ Events are added by the scan endpoint and removed when approved or dismissed.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple
 
 
 @dataclass
@@ -16,32 +17,107 @@ class PendingEvent:
     service: str
     error_type: str
     log_group: str
-    detected_at: str      # ISO string
-    _event: Any           # the full ErrorEvent, not sent to the client
+    detected_at: str      # ISO string — first time this signature was seen
+    last_seen_at: str = ""    # ISO string — most recent occurrence
+    occurrences: int = 1      # how many raw matches collapsed into this entry
+    handling: str = "unknown"  # "caught" | "uncaught" | "unknown"
+    handling_evidence: str = ""  # short snippet that drove the classification
+    _event: Any = field(default=None, repr=False)
+
+
+_ID_PATTERNS = [
+    re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I),  # UUIDs
+    re.compile(r"\b[0-9a-f]{16,}\b", re.I),                                                  # long hex/IDs
+    re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[\dZ:.+\-]*\b"),                       # ISO timestamps
+    re.compile(r"\b\d+\b"),                                                                  # bare numbers
+]
 
 
 def _content_sig(event: Any) -> str:
-    """Stable content signature for dedup.
+    """Stable content signature for dedup — collapses identical errors regardless of
+    stream, task id, or occurrence timestamp.
 
-    CloudWatch scans should surface every distinct raw log match, even when the
-    message template is repeated with different IDs. The log metadata gives us a
-    stable per-entry key so repeated scans do not duplicate the same pending
-    event while different raw matches remain visible.
-
-    Message content is included as a tiebreaker so that multiple distinct errors
-    from the same task at the same millisecond are not collapsed to one event.
+    Same service + error_type + normalized first line → one pending event. IDs,
+    UUIDs, ISO timestamps, and bare numbers are scrubbed before comparison so
+    things like "User abc123 not found" and "User def456 not found" merge into
+    a single entry whose `occurrences` reflects how often it was seen.
     """
-    metadata = getattr(event, "metadata", {}) or {}
-    log_group = metadata.get("log_group")
-    timestamp = metadata.get("timestamp") or metadata.get("latest_timestamp")
-    task_id = metadata.get("task_id")
-    if log_group and timestamp is not None:
-        first_line = (event.description or event.title or "").split("\n")[0].strip()[:120]
-        return f"log|{log_group}|{task_id or ''}|{timestamp}|{event.error_type or ''}|{first_line}"
+    desc = (getattr(event, "description", "") or getattr(event, "title", "") or "")
+    first_line = desc.split("\n")[0]
+    normalized = first_line
+    for pat in _ID_PATTERNS:
+        normalized = pat.sub("X", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()[:200]
+    service = (getattr(event, "service", "") or "unknown").lower()
+    error_type = (getattr(event, "error_type", "") or "ERROR").upper()
+    return f"{service}|{error_type}|{normalized}"
 
-    desc = event.description or event.title or ""
-    normalized = re.sub(r"\b\d+\b", "N", desc[:120]).strip()
-    return f"{event.service}|{event.error_type}|{normalized[:80]}"
+
+_UNCAUGHT_MARKERS = (
+    "traceback (most recent call last)",
+    "uncaught exception",
+    "uncaughtexception",
+    "unhandledpromiserejection",
+    "unhandled promise rejection",
+    "unhandledrejection",
+    "fatal error",
+    "[fatal]",
+    "process exited",
+    "segmentation fault",
+    "core dumped",
+    "panic:",
+)
+
+_CAUGHT_MARKERS = (
+    "caught error",
+    "caught exception",
+    "handled error",
+    "fallback used",
+    "retrying after error",
+    "recovered from error",
+    "swallowed error",
+    "ignored error",
+    "error handler invoked",
+)
+
+_PY_FRAME = re.compile(r'File "[^"]+", line \d+')
+_JS_FRAME = re.compile(r"\n\s+at\s+\S+")
+
+
+def classify_handling(message: str) -> tuple[str, str]:
+    """Heuristic: did the application code catch this error or did it crash through?
+
+    Returns ``(label, evidence)`` where label is one of ``caught``, ``uncaught``,
+    or ``unknown``. ``evidence`` is a short fragment of the message that drove
+    the decision — useful to show in the UI tooltip.
+    """
+    if not message:
+        return "unknown", ""
+    lower = message.lower()
+
+    for marker in _UNCAUGHT_MARKERS:
+        if marker in lower:
+            return "uncaught", marker
+
+    py_frames = len(_PY_FRAME.findall(message))
+    js_frames = len(_JS_FRAME.findall(message))
+    if py_frames >= 2:
+        return "uncaught", f"{py_frames} python stack frames"
+    if js_frames >= 2:
+        return "uncaught", f"{js_frames} stack frames"
+
+    for marker in _CAUGHT_MARKERS:
+        if marker in lower:
+            return "caught", marker
+
+    if re.search(r"\b(ERROR|WARN|WARNING)\b\s*[:\]]", message) and py_frames == 0 and js_frames == 0:
+        return "caught", "logged via error/warn level without stack trace"
+
+    return "unknown", ""
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class PendingEventStore:
@@ -50,32 +126,50 @@ class PendingEventStore:
         self._sigs: dict[str, str] = {}          # sig → event_id (pending)
         self._dismissed_sigs: set[str] = set()   # sigs the user has dismissed this session
 
-    def add(self, event: Any) -> Optional[PendingEvent]:
-        description = event.description or event.title or ""
-        first_line = description.split("\n")[0].strip()[:250]
+    def add(self, event: Any) -> Tuple[Optional[PendingEvent], bool]:
+        """Add an event or merge into an existing one with the same content signature.
 
+        Returns ``(pending_event, is_new)``. When the signature is dismissed,
+        returns ``(None, False)``. When merging into an existing entry, the
+        ``occurrences`` counter increments and ``last_seen_at`` updates.
+        """
         sig = _content_sig(event)
         if sig in self._dismissed_sigs:
-            return None
+            return None, False
 
-        # Return existing pending event for same content
+        seen_at = (
+            event.detected_at.isoformat()
+            if hasattr(event, "detected_at") and hasattr(event.detected_at, "isoformat")
+            else _now_iso()
+        )
+
         if sig in self._sigs:
             existing_id = self._sigs[sig]
-            if existing_id in self._events:
-                return self._events[existing_id]
+            existing = self._events.get(existing_id)
+            if existing:
+                existing.occurrences += 1
+                existing.last_seen_at = seen_at
+                return existing, False
 
+        description = event.description or event.title or ""
+        first_line = description.split("\n")[0].strip()[:250]
+        handling, evidence = classify_handling(description)
         pe = PendingEvent(
             id=event.id,
             first_line=first_line,
             service=event.service or "unknown",
             error_type=event.error_type or "ERROR",
             log_group=event.metadata.get("log_group", ""),
-            detected_at=event.detected_at.isoformat(),
+            detected_at=seen_at,
+            last_seen_at=seen_at,
+            occurrences=1,
+            handling=handling,
+            handling_evidence=evidence,
             _event=event,
         )
         self._events[pe.id] = pe
         self._sigs[sig] = pe.id
-        return pe
+        return pe, True
 
     def list_all(self) -> list[PendingEvent]:
         return list(self._events.values())
@@ -121,6 +215,10 @@ class PendingEventStore:
             "error_type": pe.error_type,
             "log_group": pe.log_group,
             "detected_at": pe.detected_at,
+            "last_seen_at": pe.last_seen_at or pe.detected_at,
+            "occurrences": pe.occurrences,
+            "handling": pe.handling,
+            "handling_evidence": pe.handling_evidence,
         }
 
 

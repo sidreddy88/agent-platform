@@ -185,7 +185,8 @@ export type IncidentStatus =
   | "noise"
   | "duplicate"
   | "verification_failed"
-  | "awaiting_refix_approval";
+  | "awaiting_refix_approval"
+  | "fix_failed";
 
 export interface ErrorEvent {
   id: string;
@@ -213,6 +214,8 @@ export interface Incident {
   pending_fix_old: string | null;
   pending_fix_new: string | null;
   pending_fix_critique: string | null;
+  fix_attempted: string | null;
+  fix_description: string | null;
   outcome: string | null;
   archived: boolean;
   wrong_fix: boolean;
@@ -241,6 +244,7 @@ export interface AgentRun {
   input_tokens: number;
   output_tokens: number;
   cost_usd: number;
+  output_summary?: { label: string; value: string }[];
 }
 
 export interface AgentStats {
@@ -295,6 +299,43 @@ export interface PendingEvent {
   error_type: string;
   log_group: string;
   detected_at: string;
+  last_seen_at?: string;
+  occurrences?: number;
+  handling?: "caught" | "uncaught" | "unknown";
+  handling_evidence?: string;
+}
+
+export type FailureCategory =
+  | "wrong_diagnosis"
+  | "wrong_file"
+  | "wrong_fix"
+  | "hallucination"
+  | "missed_root_cause"
+  | "code_not_found"
+  | "symptom_fix"
+  | "wrong_agent_decision"
+  | "other";
+
+export type FailureAgentName =
+  | "triage"
+  | "diagnosis"
+  | "fix_generation"
+  | "code_review"
+  | "merge_decision"
+  | "error_clarity"
+  | "other";
+
+export interface AgentFailure {
+  id: string;
+  incident_id: string;
+  run_id: string | null;
+  agent_name: FailureAgentName;
+  failure_category: FailureCategory;
+  failure_reason: string;
+  expected_behavior: string | null;
+  actual_behavior: string | null;
+  error_description: string | null;
+  created_at: string;
 }
 
 export type WSMessage =
@@ -304,7 +345,9 @@ export type WSMessage =
   | { type: "agent_status"; agents: AgentSnapshot }
   | { type: "scan_progress"; ts: string; level: ScanLogEntry["level"]; message: string }
   | { type: "pending_event_added"; event: PendingEvent }
+  | { type: "pending_event_updated"; event: PendingEvent }
   | { type: "pending_event_removed"; id: string }
   | { type: "pending_events_cleared" }
   | { type: "incidents_cleared"; incidents: Incident[]; deleted: number }
+  | { type: "incident_deleted"; id: string }
   | { type: "pong" };
