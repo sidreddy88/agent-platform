@@ -15,12 +15,13 @@ import { IncidentsTablePage } from "./components/IncidentsTablePage";
 import { EventApprovalPage } from "./components/EventApprovalPage";
 import { PRsPage } from "./components/PRsPage";
 import { StatsPage } from "./components/StatsPage";
+import { DatasetPage } from "./components/DatasetPage";
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "stats" | "logs";
+type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "stats" | "logs" | "dataset";
 
 interface CBInfo { name: string; state: string; failure_count: number; total_rejected: number }
 
@@ -38,6 +39,11 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [breakers, setBreakers] = useState<CBInfo[]>([]);
   const [resetting, setResetting] = useState<string | null>(null);
+  const [datasetVisited, setDatasetVisited] = useState(false);
+
+  useEffect(() => {
+    if (tab === "dataset") setDatasetVisited(true);
+  }, [tab]);
 
   useEffect(() => {
     function fetchBreakers() {
@@ -80,6 +86,7 @@ export default function App() {
             <button style={tabBtn(tab === "prs")}       onClick={() => setTab("prs")}>Agent PRs</button>
             <button style={tabBtn(tab === "stats")}     onClick={() => setTab("stats")}>Stats</button>
             <button style={tabBtn(tab === "logs")}      onClick={() => setTab("logs")}>Logs</button>
+            <button style={tabBtn(tab === "dataset")}   onClick={() => setTab("dataset")}>Dataset</button>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
@@ -141,6 +148,7 @@ export default function App() {
         </main>
       )}
       {tab === "stats" && <StatsPage />}
+      {datasetVisited && <DatasetPage hidden={tab !== "dataset"} />}
       {tab === "dashboard" && <main style={main}>
         {loading && !data && (
           <div style={centered}>

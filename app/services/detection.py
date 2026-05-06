@@ -482,11 +482,15 @@ class DetectionService:
 
         for event in all_events:
             try:
-                pe = pending_event_store.add(event)
+                pe, is_new = pending_event_store.add(event)
                 if pe is None:
                     continue
-                await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
-                logger.info("[%s] Pending approval: %s", event.severity, event.title)
+                msg_type = "pending_event_added" if is_new else "pending_event_updated"
+                await broadcast({"type": msg_type, "event": pending_event_store.serialize(pe)})
+                if is_new:
+                    logger.info("[%s] Pending approval: %s", event.severity, event.title)
+                else:
+                    logger.debug("[%s] Duplicate (%dx): %s", event.severity, pe.occurrences, event.title)
             except Exception:
                 logger.warning("Failed to queue for approval: %s", event.title)
 

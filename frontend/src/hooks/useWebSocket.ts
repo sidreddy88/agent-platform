@@ -73,12 +73,18 @@ export function useDashboardWS() {
         setPendingEvents((prev) =>
           prev.some((e) => e.id === msg.event.id) ? prev : [...prev, msg.event]
         );
+      } else if (msg.type === "pending_event_updated") {
+        setPendingEvents((prev) =>
+          prev.map((e) => (e.id === msg.event.id ? msg.event : e))
+        );
       } else if (msg.type === "pending_event_removed") {
         setPendingEvents((prev) => prev.filter((e) => e.id !== msg.id));
       } else if (msg.type === "pending_events_cleared") {
         setPendingEvents([]);
       } else if (msg.type === "incidents_cleared") {
         setIncidents(msg.incidents);
+      } else if (msg.type === "incident_deleted") {
+        setIncidents((prev) => prev.filter((i) => i.id !== msg.id));
       }
     };
 

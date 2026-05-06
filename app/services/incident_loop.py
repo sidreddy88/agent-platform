@@ -637,7 +637,12 @@ class IncidentLoop:
 
         fix = await self._run_fix(incident)
         if fix is None:
-            logger.error("[IncidentLoop] %s — fix generation failed, leaving in FIXING", incident.id)
+            reason = "FixGenerationAgent raised an exception or the GitHub circuit breaker is open."
+            incident.fix_attempted = reason
+            incident.fix_description = reason
+            incident.status = IncidentStatus.FIX_FAILED
+            incident_store.update(incident)
+            logger.error("[IncidentLoop] %s — fix generation failed, escalating to human", incident.id)
             session_logger.finish(incident.id, "fix_failed")
             return
 
@@ -666,6 +671,8 @@ class IncidentLoop:
 
         if not fix.pr_url and not fix.pr_number:
             incident.fix_attempted = fix.fix_description[:200]
+            incident.fix_description = fix.fix_description
+            incident.status = IncidentStatus.FIX_FAILED
             incident_store.update(incident)
             logger.error("[IncidentLoop] %s — fix generation failed: %s", incident.id, fix.fix_description)
             sess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=False, failure_reason=fix.fix_description[:200])
@@ -801,7 +808,12 @@ class IncidentLoop:
 
         fix = await self._run_fix(incident)
         if fix is None:
-            logger.error("[IncidentLoop] %s — fix generation failed after diagnosis approval", incident_id)
+            reason = "FixGenerationAgent raised an exception or the GitHub circuit breaker is open."
+            incident.fix_attempted = reason
+            incident.fix_description = reason
+            incident.status = IncidentStatus.FIX_FAILED
+            incident_store.update(incident)
+            logger.error("[IncidentLoop] %s — fix generation failed after diagnosis approval, escalating to human", incident_id)
             session_logger.finish(incident.id, "fix_failed")
             return
 
@@ -828,6 +840,8 @@ class IncidentLoop:
 
         if not fix.pr_url and not fix.pr_number:
             incident.fix_attempted = fix.fix_description[:200]
+            incident.fix_description = fix.fix_description
+            incident.status = IncidentStatus.FIX_FAILED
             incident_store.update(incident)
             logger.error("[IncidentLoop] %s — fix generation produced no PR after resume: %s", incident_id, fix.fix_description)
             _rsess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=False, failure_reason=fix.fix_description[:200])
@@ -982,7 +996,12 @@ class IncidentLoop:
 
         fix = await self._run_fix(incident)
         if fix is None:
-            logger.error("[IncidentLoop] %s — refix failed (fix_agent returned None)", incident_id)
+            reason = "Refix attempt failed — FixGenerationAgent raised an exception or the GitHub circuit breaker is open."
+            incident.fix_attempted = reason
+            incident.fix_description = reason
+            incident.status = IncidentStatus.FIX_FAILED
+            incident_store.update(incident)
+            logger.error("[IncidentLoop] %s — refix failed (fix_agent returned None), escalating to human", incident_id)
             session_logger.finish(incident.id, "fix_failed")
             return
 
@@ -1004,6 +1023,8 @@ class IncidentLoop:
 
         if not fix.pr_url and not fix.pr_number:
             incident.fix_attempted = fix.fix_description[:200]
+            incident.fix_description = fix.fix_description
+            incident.status = IncidentStatus.FIX_FAILED
             incident_store.update(incident)
             logger.error("[IncidentLoop] %s — refix produced no PR: %s", incident_id, fix.fix_description)
             _rsess.log_fix_outcome(pr_url=None, pr_number=None, blast_radius_violation=False, failure_reason=fix.fix_description[:200])

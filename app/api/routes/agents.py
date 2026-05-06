@@ -8,12 +8,67 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.api.websocket_dashboard import broadcast
-from app.models.events import ErrorEvent, EventSource, IncidentStatus
+from app.models.events import ErrorEvent, EventSource, IncidentState, IncidentStatus
 from app.services.agent_tracker import agent_tracker
 from app.services.incident_store import incident_store
 from app.services.pending_events import pending_event_store
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+def _output_summary_for_agent(agent_name: str, inc: IncidentState) -> list[dict]:
+    """Per-agent output snippets pulled from incident state. Used by the Flag UI."""
+    name = agent_name.lower()
+    items: list[dict] = []
+
+    def add(label: str, value):
+        if value is None or value == "" or value == []:
+            return
+        items.append({"label": label, "value": str(value) if not isinstance(value, str) else value})
+
+    if "triage" in name:
+        add("Decision", inc.triage_decision)
+        add("Reasoning", inc.triage_reasoning)
+        add("Blast radius", inc.blast_radius)
+        if inc.occurrences_24h is not None:
+            add("Occurrences (24h)", inc.occurrences_24h)
+    elif "diagnosis" in name:
+        add("Root cause", inc.diagnosis)
+        if inc.confidence is not None:
+            add("Confidence", f"{inc.confidence * 100:.0f}%")
+        if inc.diagnosis_affected_file:
+            target = inc.diagnosis_affected_file
+            if inc.diagnosis_affected_function:
+                target += f" :: {inc.diagnosis_affected_function}"
+            add("Target", target)
+        if inc.diagnosis_additional_fix:
+            extra = inc.diagnosis_additional_fix
+            if inc.diagnosis_additional_fix_file:
+                extra = f"{inc.diagnosis_additional_fix_file}: {extra}"
+            add("Additional fix", extra)
+        if inc.reproduction_confirmed is not None:
+            add("Reproduction confirmed", "yes" if inc.reproduction_confirmed else "no")
+    elif "fixgen" in name or ("fix" in name and "gen" in name):
+        add("Fix description", inc.fix_description or inc.fix_attempted)
+        add("File", inc.pending_fix_file)
+        add("Function", inc.pending_fix_function)
+        add("Self-critique", inc.pending_fix_critique)
+        if inc.pr_url:
+            add("PR", f"#{inc.pr_number} — {inc.pr_url}")
+        if inc.pr_files_changed:
+            add("Files changed", ", ".join(inc.pr_files_changed))
+    elif "codereview" in name or "review" in name:
+        add("Review posted", "yes (see PR on GitHub for full review)" if inc.review_posted else "no")
+        add("PR", inc.pr_url)
+    elif "merge" in name:
+        add("Decision", inc.merge_decision)
+        add("Reasoning", inc.merge_decision_reasoning)
+    elif "clarity" in name:
+        add("Summary", inc.clarity_summary)
+        if inc.clarity_pr_url:
+            add("Observability PR", f"#{inc.clarity_pr_number} — {inc.clarity_pr_url}")
+
+    return items
 
 
 @router.get("/status")
@@ -251,6 +306,25 @@ class RunNoteBody(BaseModel):
     mark_failed: bool = False
 
 
+@router.get("/runs/incident/{incident_id}")
+async def get_runs_for_incident(incident_id: str):
+    """Return all agent runs for a specific incident, newest first.
+
+    Each run is enriched with `output_summary` — the agent's findings recorded
+    on the incident state — so reviewers can see what each agent produced
+    when flagging which one went wrong.
+    """
+    runs = agent_tracker.get_runs_for_incident(incident_id)
+    incident = incident_store.get(incident_id)
+    if incident is not None:
+        for run in runs:
+            run["output_summary"] = _output_summary_for_agent(run["agent_name"], incident)
+    else:
+        for run in runs:
+            run["output_summary"] = []
+    return sorted(runs, key=lambda r: r.get("started_at", ""), reverse=True)
+
+
 @router.post("/runs/{run_id}/note")
 async def annotate_run(run_id: str, body: RunNoteBody):
     """
@@ -336,7 +410,7 @@ async def run_demo():
             detected_at=datetime.utcnow(),
         )
 
-    pe = pending_event_store.add(event)
+    pe, is_new = pending_event_store.add(event)
     if pe is None:
         return {
             "event_id": event.id,
@@ -345,7 +419,8 @@ async def run_demo():
             "source": origin,
             "message": "Event was previously dismissed — clear dismissed events or restart to re-queue it",
         }
-    await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
+    msg_type = "pending_event_added" if is_new else "pending_event_updated"
+    await broadcast({"type": msg_type, "event": pending_event_store.serialize(pe)})
 
     return {
         "event_id": event.id,

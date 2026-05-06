@@ -504,7 +504,7 @@ class AWSService:
             filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback"',
         )
 
-        _MAX_EVENTS = 200
+        _MAX_EVENTS = 300
         raw_events: list[dict] = []
         next_token: str | None = None
         while len(raw_events) < _MAX_EVENTS:
