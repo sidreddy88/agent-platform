@@ -21,6 +21,7 @@ const STATUS_STYLES: Record<IncidentStatus, string> = {
   rejected:                "background:#7f1d1d;color:#fca5a5;",
   verification_failed:     "background:#991b1b;color:#fca5a5;",
   awaiting_refix_approval: "background:#b45309;color:#fef3c7;",
+  fix_failed:              "background:#7f1d1d;color:#fecaca;",
 };
 
 interface Props {

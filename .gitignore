@@ -22,6 +22,9 @@ agent_platform.db-shm
 incidents.db
 incidents.db-wal
 incidents.db-shm
+dataset.db
+dataset.db-wal
+dataset.db-shm
 
 # Claude Code local config and memory
 .claude/

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { Incident, IncidentMetrics, ScanLogEntry } from "../types";
+import type { Incident, IncidentMetrics, ScanLogEntry, FailureAgentName, FailureCategory, AgentRun } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
 // ── Pipeline definition ───────────────────────────────────────────────────────
@@ -18,6 +18,7 @@ const STATUS_STEP: Record<string, number> = {
   diagnosing:               1,
   fixing:                   2,
   awaiting_fix_approval:    2,
+  fix_failed:               2,
   reviewing:                3,
   awaiting_approval:        4,
   resolved:                 5,
@@ -26,12 +27,17 @@ const STATUS_STEP: Record<string, number> = {
   duplicate:                1,
 };
 
-type StepState = "done" | "active" | "pending" | "skipped";
+type StepState = "done" | "active" | "pending" | "skipped" | "failed";
 
 function getStepState(inc: Incident, i: number): StepState {
   const { status } = inc;
   if (status === "noise" || status === "duplicate") return i === 0 ? "done" : "skipped";
   if (status === "resolved" || status === "rejected") return "done";
+  if (status === "fix_failed") {
+    if (i < 2) return "done";
+    if (i === 2) return "failed";
+    return "skipped";
+  }
   const cur = STATUS_STEP[status] ?? -1;
   if (i < cur) return "done";
   if (i === cur) return "active";
@@ -42,6 +48,7 @@ function getStepDetail(inc: Incident, i: number): string | null {
   const s = getStepState(inc, i);
   if (s === "skipped") return "—";
   if (s === "pending") return null;
+  if (s === "failed") return "Failed";
   switch (i) {
     case 0: return inc.triage_decision ?? null;
     case 1: return inc.confidence !== null ? `${Math.round(inc.confidence * 100)}%` : null;
@@ -149,7 +156,7 @@ export function IncidentsPage({
             </span>
           )}
           <button style={scanBtn(scanning)} onClick={handleScan} disabled={scanning}>
-            {scanning ? "Scanning..." : "Scan Last 14 Days"}
+            {scanning ? "Scanning..." : "Scan Last 3 Days"}
           </button>
           <button style={clearBtn(clearing)} onClick={handleClear} disabled={clearing}>
             {clearing ? "Clearing..." : "Clear Non-Resolved"}
@@ -230,6 +237,75 @@ function IncidentCard({ inc }: { inc: Incident }) {
   const [refixing, setRefixing] = useState(false);
   const [showRefixNotes, setShowRefixNotes] = useState(false);
   const [refixNotes, setRefixNotes] = useState("");
+  const [showFlagModal, setShowFlagModal] = useState(false);
+  const [flagRuns, setFlagRuns] = useState<AgentRun[]>([]);
+  const [flagRunId, setFlagRunId] = useState<string | null>(null);
+  const [flagAgent, setFlagAgent] = useState<FailureAgentName>("diagnosis");
+  const [flagCategory, setFlagCategory] = useState<FailureCategory>("wrong_diagnosis");
+  const [flagReason, setFlagReason] = useState("");
+  const [flagExpected, setFlagExpected] = useState("");
+  const [flagging, setFlagging] = useState(false);
+  const [flagDone, setFlagDone] = useState(false);
+  const [flagRunsLoading, setFlagRunsLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  async function handleDelete() {
+    if (!window.confirm("Delete this incident? Flagged failures in the dataset are kept.")) return;
+    setDeleting(true);
+    try {
+      await fetch(`/incidents/${inc.id}`, { method: "DELETE" });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  async function openFlagModal() {
+    setShowFlagModal(true);
+    setFlagRuns([]);
+    setFlagRunId(null);
+    setFlagRunsLoading(true);
+    try {
+      const res = await fetch(`/agents/runs/incident/${inc.id}`);
+      const runs: AgentRun[] = await res.json();
+      setFlagRuns(runs);
+    } catch { /* show modal anyway, user can still fill manually */ }
+    finally { setFlagRunsLoading(false); }
+  }
+
+  function selectRun(run: AgentRun) {
+    setFlagRunId(run.run_id);
+    const nameMap: Record<string, FailureAgentName> = {
+      triage: "triage", diagnosis: "diagnosis",
+      fix_generation: "fix_generation", code_review: "code_review",
+      merge_decision: "merge_decision", error_clarity: "error_clarity",
+    };
+    const agent = Object.keys(nameMap).find(k => run.agent_name.toLowerCase().includes(k));
+    if (agent) setFlagAgent(nameMap[agent]);
+    if (run.status === "failed") setFlagCategory("wrong_diagnosis");
+  }
+
+  async function handleFlag() {
+    if (!flagReason.trim()) return;
+    setFlagging(true);
+    try {
+      await fetch("http://localhost:8000/failures", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          incident_id: inc.id,
+          run_id: flagRunId,
+          agent_name: flagAgent,
+          failure_category: flagCategory,
+          failure_reason: flagReason.trim(),
+          expected_behavior: flagExpected.trim() || null,
+        }),
+      });
+      setFlagDone(true);
+      setTimeout(() => { setShowFlagModal(false); setFlagDone(false); setFlagReason(""); setFlagExpected(""); setFlagRunId(null); }, 1200);
+    } finally {
+      setFlagging(false);
+    }
+  }
   async function handleRestart() {
     setRestarting(true);
     setShowNotes(false);
@@ -311,6 +387,24 @@ function IncidentCard({ inc }: { inc: Incident }) {
               Observability PR #{inc.clarity_pr_number} ↗
             </a>
           )}
+        </div>
+      )}
+
+      {/* Fix generation failed — escalated to human */}
+      {inc.status === "fix_failed" && (
+        <div style={{
+          ...diagBox, borderColor: "#ef4444", background: "rgba(239,68,68,0.08)",
+          flexDirection: "column" as const, gap: 6, alignItems: "stretch" as const,
+        }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <span style={{ ...diagLabel, color: "#ef4444" }}>Fix Generation Failed</span>
+            <span style={{ fontSize: 10, color: "#fca5a5", fontWeight: 600 }}>
+              · assigned to human
+            </span>
+          </div>
+          <span style={{ ...diagText, color: "#fecaca" }}>
+            {inc.fix_description || inc.fix_attempted || "FixGenerationAgent could not produce a PR."}
+          </span>
         </div>
       )}
 
@@ -402,7 +496,178 @@ function IncidentCard({ inc }: { inc: Incident }) {
             ↺ Restart
           </button>
         )}
+        <button
+          onClick={() => showFlagModal ? setShowFlagModal(false) : openFlagModal()}
+          style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #ef444455",
+            background: showFlagModal ? "#ef44441a" : "transparent",
+            color: "#ef4444", fontSize: 11, cursor: "pointer", fontWeight: 600 }}
+          title="Flag a failure for the training dataset"
+        >
+          Flag
+        </button>
+        <button
+          onClick={handleDelete}
+          disabled={deleting}
+          style={{ padding: "4px 10px", borderRadius: 6,
+            border: "1px solid #475569",
+            background: "transparent",
+            color: deleting ? "#374151" : "#94a3b8",
+            fontSize: 11, fontWeight: 600,
+            cursor: deleting ? "not-allowed" : "pointer" }}
+          title="Delete incident (flagged failures in the dataset are preserved)"
+        >
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
       </div>
+
+      {/* Flag failure modal */}
+      {showFlagModal && (
+        <div style={{ margin: "8px 0 0", padding: 14, borderRadius: 8,
+          background: "rgba(239,68,68,0.05)", border: "1px solid #ef444433" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#ef4444", marginBottom: 10 }}>
+            Flag agent failure
+          </div>
+
+          {/* Runs list */}
+          {flagRunsLoading && (
+            <div style={{ fontSize: 11, color: "#475569", marginBottom: 10 }}>Loading runs…</div>
+          )}
+          {!flagRunsLoading && flagRuns.length > 0 && (
+            <div style={{ marginBottom: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ fontSize: 10, color: "#475569", fontWeight: 700, letterSpacing: "0.06em",
+                textTransform: "uppercase", marginBottom: 4 }}>Select the failing run</div>
+              {flagRuns.map(run => {
+                const selected = flagRunId === run.run_id;
+                const durationSec = run.duration_ms != null ? (run.duration_ms / 1000).toFixed(0) : null;
+                const findings = run.output_summary ?? [];
+                return (
+                  <div
+                    key={run.run_id}
+                    onClick={() => selectRun(run)}
+                    style={{
+                      display: "flex", flexDirection: "column", gap: 6,
+                      padding: "6px 10px", borderRadius: 6, cursor: "pointer",
+                      background: selected ? "rgba(239,68,68,0.12)" : "rgba(15,23,42,0.6)",
+                      border: `1px solid ${selected ? "#ef4444" : "#1e293b"}`,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4,
+                        background: run.status === "failed" ? "rgba(239,68,68,0.2)"
+                          : run.status === "completed" ? "rgba(34,197,94,0.15)"
+                          : "rgba(59,130,246,0.15)",
+                        color: run.status === "failed" ? "#f87171"
+                          : run.status === "completed" ? "#4ade80"
+                          : "#60a5fa",
+                      }}>{run.status}</span>
+                      <span style={{ fontSize: 12, color: "#cbd5e1", fontWeight: 500, flex: 1 }}>
+                        {run.agent_name}
+                      </span>
+                      {findings.length > 0 && (
+                        <span style={{ fontSize: 10, color: "#64748b" }}>
+                          {selected ? "▾" : "▸"} {findings.length} finding{findings.length === 1 ? "" : "s"}
+                        </span>
+                      )}
+                      {durationSec && (
+                        <span style={{ fontSize: 10, color: "#475569" }}>{durationSec}s</span>
+                      )}
+                      {run.error_message && (
+                        <span style={{ fontSize: 10, color: "#f87171", maxWidth: 200,
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={run.error_message}>
+                          {run.error_message}
+                        </span>
+                      )}
+                    </div>
+                    {selected && findings.length > 0 && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4,
+                        marginTop: 2, paddingTop: 6, borderTop: "1px solid rgba(239,68,68,0.25)" }}>
+                        {findings.map((f, idx) => (
+                          <div key={idx} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8",
+                              letterSpacing: "0.04em", textTransform: "uppercase",
+                              minWidth: 88, flexShrink: 0, paddingTop: 1 }}>
+                              {f.label}
+                            </span>
+                            <span style={{ fontSize: 11, color: "#e2e8f0", lineHeight: 1.45,
+                              whiteSpace: "pre-wrap", wordBreak: "break-word", flex: 1 }}>
+                              {f.value}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {selected && findings.length === 0 && !run.error_message && (
+                      <div style={{ fontSize: 10, color: "#64748b", fontStyle: "italic",
+                        marginTop: 2, paddingTop: 6, borderTop: "1px solid rgba(239,68,68,0.25)" }}>
+                        No output captured for this agent on this incident.
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <select value={flagAgent} onChange={e => setFlagAgent(e.target.value as FailureAgentName)}
+              style={flagSelect}>
+              {(["triage","diagnosis","fix_generation","code_review","merge_decision","error_clarity","other"] as FailureAgentName[]).map(a => (
+                <option key={a} value={a}>{a.replace(/_/g," ")}</option>
+              ))}
+            </select>
+            <select value={flagCategory} onChange={e => setFlagCategory(e.target.value as FailureCategory)}
+              style={flagSelect}>
+              {([
+                ["wrong_diagnosis","Wrong diagnosis"],
+                ["wrong_file","Wrong file targeted"],
+                ["wrong_fix","Wrong fix generated"],
+                ["hallucination","Hallucination"],
+                ["missed_root_cause","Missed root cause"],
+                ["code_not_found","Code not found"],
+                ["symptom_fix","Symptom fix (not root cause)"],
+                ["wrong_agent_decision","Wrong agent decision"],
+                ["other","Other"],
+              ] as [FailureCategory, string][]).map(([v, l]) => (
+                <option key={v} value={v}>{l}</option>
+              ))}
+            </select>
+          </div>
+          <textarea
+            value={flagReason}
+            onChange={e => setFlagReason(e.target.value)}
+            placeholder="What went wrong? (required)"
+            rows={2}
+            style={{ ...flagTextarea, marginBottom: 6 }}
+          />
+          <textarea
+            value={flagExpected}
+            onChange={e => setFlagExpected(e.target.value)}
+            placeholder="What should have happened? (optional)"
+            rows={2}
+            style={{ ...flagTextarea, marginBottom: 8 }}
+          />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={handleFlag}
+              disabled={flagging || !flagReason.trim()}
+              style={{ padding: "5px 14px", borderRadius: 6, border: "none", cursor: "pointer",
+                background: flagDone ? "#16a34a" : "#ef4444", color: "#fff",
+                fontSize: 12, fontWeight: 600, opacity: flagging || !flagReason.trim() ? 0.5 : 1 }}
+            >
+              {flagDone ? "Saved!" : flagging ? "Saving…" : "Save to dataset"}
+            </button>
+            <button
+              onClick={() => setShowFlagModal(false)}
+              style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid #334155",
+                background: "transparent", color: "#94a3b8", fontSize: 12, cursor: "pointer" }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -435,6 +700,7 @@ function Stepper({ inc }: { inc: Incident }) {
 function Circle({ state }: { state: StepState }) {
   const color = state === "done" ? "#22c55e"
     : state === "active" ? "#3b82f6"
+    : state === "failed" ? "#ef4444"
     : state === "skipped" ? "#1e293b"
     : "#2d3149";
 
@@ -443,12 +709,14 @@ function Circle({ state }: { state: StepState }) {
       width: 28, height: 28, borderRadius: "50%",
       background: state === "done" ? "rgba(34,197,94,0.12)"
         : state === "active" ? "rgba(59,130,246,0.12)"
+        : state === "failed" ? "rgba(239,68,68,0.15)"
         : "#161927",
       border: `2px solid ${color}`,
       display: "flex", alignItems: "center", justifyContent: "center",
     }}>
       {state === "done"   && <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 700 }}>✓</span>}
       {state === "active" && <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#3b82f6", boxShadow: "0 0 0 3px rgba(59,130,246,0.25)", display: "block" }} />}
+      {state === "failed"  && <span style={{ fontSize: 13, color: "#ef4444", fontWeight: 700, lineHeight: 1 }}>✕</span>}
       {state === "skipped" && <span style={{ fontSize: 9, color: "#334155" }}>—</span>}
     </div>
   );
@@ -575,6 +843,7 @@ const stepLabelStyle = (state: StepState): React.CSSProperties => ({
   textTransform: "uppercase" as const, textAlign: "center" as const,
   color: state === "done" ? "#22c55e"
     : state === "active" ? "#60a5fa"
+    : state === "failed" ? "#f87171"
     : state === "skipped" ? "#1e293b"
     : "#475569",
 });
@@ -648,6 +917,18 @@ const refixRejectBtn: React.CSSProperties = {
   color: "#f87171",
   borderRadius: 4, padding: "2px 10px", fontSize: 11, fontWeight: 700,
   cursor: "pointer",
+};
+
+const flagSelect: React.CSSProperties = {
+  padding: "4px 8px", borderRadius: 6, border: "1px solid #334155",
+  background: "#0f172a", color: "#cbd5e1", fontSize: 12, cursor: "pointer", flex: 1,
+};
+
+const flagTextarea: React.CSSProperties = {
+  width: "100%", boxSizing: "border-box", padding: "6px 8px",
+  fontSize: 12, borderRadius: 6, border: "1px solid #334155",
+  background: "#0f172a", color: "#cbd5e1",
+  resize: "vertical", fontFamily: "inherit",
 };
 
 const scanLogBox: React.CSSProperties = {

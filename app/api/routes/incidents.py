@@ -76,7 +76,7 @@ async def _scan_log(message: str, level: str = "info") -> None:
 @router.post("/scan")
 async def scan_last_24h() -> Dict[str, Any]:
     """
-    Scan ECS log groups for errors in the last 14 days and feed each into
+    Scan ECS log groups for errors in the last 3 days and feed each into
     the full triage → diagnosis → fix pipeline.
     """
     aws = AWSService()
@@ -84,19 +84,30 @@ async def scan_last_24h() -> Dict[str, Any]:
     log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []
 
     pending_event_store.reset_dismissed()
-    await _scan_log(f"Scan started — checking {len(log_groups)} log group(s) over last 14 days")
+    _SCAN_CAP = 200
+    await _scan_log(
+        f"Scan started — checking {len(log_groups)} log group(s) over last 3 days "
+        f"(cap: {_SCAN_CAP} events)"
+    )
 
     queued = []
     errors = []
+    capped = False
     for log_group in log_groups:
+        if len(queued) >= _SCAN_CAP:
+            capped = True
+            break
         service = log_group.rstrip("/").split("/")[-1]
         await _scan_log(f"Scanning {log_group} ...")
         try:
-            matches = aws.get_error_logs(log_group, minutes=20160)
+            matches = aws.get_error_logs(log_group, minutes=4320)
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
             seen: set[tuple[str, str, str]] = set()
             for log in matches:
+                if len(queued) >= _SCAN_CAP:
+                    capped = True
+                    break
                 msg = log["message"]
                 stream = log["stream"]
                 timestamp = str(log["timestamp"])
@@ -127,18 +138,30 @@ async def scan_last_24h() -> Dict[str, Any]:
                         "timestamp": log["timestamp"],
                     },
                 )
-                pe = pending_event_store.add(event)
+                pe, is_new = pending_event_store.add(event)
                 if pe is None:
                     continue
-                await broadcast({"type": "pending_event_added", "event": pending_event_store.serialize(pe)})
-                queued.append({"id": event.id, "title": event.title, "service": service})
-                await _scan_log(f"  → pending approval: [{error_type}] {msg[:80].strip()}", level="event")
+                msg_type = "pending_event_added" if is_new else "pending_event_updated"
+                await broadcast({"type": msg_type, "event": pending_event_store.serialize(pe)})
+                if is_new:
+                    queued.append({"id": pe.id, "title": event.title, "service": service})
+                    await _scan_log(f"  → pending approval: [{error_type}] {msg[:80].strip()}", level="event")
+                else:
+                    await _scan_log(
+                        f"  ↻ duplicate ({pe.occurrences}× seen): [{error_type}] {msg[:80].strip()}",
+                        level="info",
+                    )
 
         except Exception as exc:
             errors.append({"log_group": log_group, "error": str(exc)})
             await _scan_log(f"  Error scanning {log_group}: {exc}", level="error")
 
+    if capped:
+        await _scan_log(f"Reached {_SCAN_CAP}-event cap — stopping scan early", level="info")
+
     summary = f"Scan complete — {len(queued)} event(s) awaiting approval"
+    if capped:
+        summary += f" (capped at {_SCAN_CAP})"
     if not queued:
         summary = "Scan complete — no new errors detected"
     await _scan_log(summary, level="done")
@@ -421,11 +444,16 @@ async def unresolve_incident(incident_id: str) -> Dict[str, Any]:
 
 @router.delete("/{incident_id}")
 async def delete_incident(incident_id: str) -> Dict[str, Any]:
-    """Permanently delete a single incident from the store."""
+    """Permanently delete a single incident from the store.
+
+    Failure annotations in agent_failures keep their incident_id pointer but are
+    NOT removed — the dataset is append-only and survives incident deletion.
+    """
     incident = incident_store.get(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     incident_store.delete(incident_id)
+    await broadcast({"type": "incident_deleted", "id": incident_id})
     return {"status": "deleted", "incident_id": incident_id}
 
 

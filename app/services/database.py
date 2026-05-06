@@ -88,6 +88,26 @@ def init_db() -> None:
                 generated_at TEXT NOT NULL,
                 data         TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS agent_failures (
+                id                TEXT PRIMARY KEY,
+                incident_id       TEXT NOT NULL,
+                run_id            TEXT,
+                agent_name        TEXT NOT NULL,
+                failure_category  TEXT NOT NULL,
+                failure_reason    TEXT NOT NULL,
+                expected_behavior TEXT,
+                actual_behavior   TEXT,
+                error_description TEXT,
+                created_at        TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_failures_incident_id
+                ON agent_failures (incident_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_failures_agent_name
+                ON agent_failures (agent_name);
+            CREATE INDEX IF NOT EXISTS idx_agent_failures_created_at
+                ON agent_failures (created_at);
         """)
         logger.debug("[DB] Tables initialised at %s", DB_PATH)
 
