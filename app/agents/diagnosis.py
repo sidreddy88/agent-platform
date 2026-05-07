@@ -20,6 +20,7 @@ Confidence gate (CONFIDENCE_THRESHOLD = 0.70):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -106,6 +107,53 @@ _STOPWORDS = frozenset({
     "at", "to", "of", "with", "from", "by", "for", "about",
     "error", "type", "null", "undefined", "read", "property", "object",
 })
+
+# ---------------------------------------------------------------------------
+# Prose-symbol extraction (used by the grounding guard)
+# ---------------------------------------------------------------------------
+
+# Match any camelCase identifier — starts lowercase, has at least one capital
+# segment afterwards. Covers all forms the model uses when citing names in
+# prose: bare mentions ("callVisionAPI fails"), call sites ("foo()"), and
+# backtick-wrapped names. Bare-name matching means common variables like
+# `imageBuffer` or `userId` also match — that's fine: if they exist in the
+# repo they verify in one Code Search hit; if they're fabricated, the warning
+# is justified.
+_CAMEL_RE = re.compile(r"\b([a-z][A-Za-z0-9_]*[A-Z][A-Za-z0-9_]*)\b")
+
+# Builtins/methods that match the camelCase shape but should not be verified —
+# they almost always show up in some source file by coincidence (false-pass)
+# and burning lookups on them adds latency.
+_BUILTIN_CAMEL = frozenset({
+    "toString", "valueOf", "hasOwnProperty", "isPrototypeOf",
+    "propertyIsEnumerable", "toLocaleString",
+    "getTime", "getDate", "getMonth", "getFullYear", "getHours",
+    "getMinutes", "getSeconds", "getMilliseconds", "getUTCDate",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "toLowerCase", "toUpperCase", "parseInt", "parseFloat",
+    "forEach", "indexOf", "lastIndexOf", "isArray", "isFinite", "isNaN",
+    "innerHTML", "outerHTML", "appendChild", "removeChild",
+    "addEventListener", "removeEventListener",
+    "querySelector", "querySelectorAll", "getElementById",
+})
+
+# Maximum number of prose candidates we'll verify per diagnosis. Bounds API
+# usage; if a diagnosis names more than this many functions in prose, the model
+# is probably brainstorming and the whole thing should be reviewed anyway.
+_MAX_PROSE_CANDIDATES = 8
+
+
+def _extract_prose_symbols(text: str) -> list[str]:
+    """Pull candidate function-name tokens from prose for grounding verification."""
+    if not text:
+        return []
+    seen: dict[str, None] = {}
+    for m in _CAMEL_RE.finditer(text):
+        name = m.group(1)
+        if len(name) < 4 or name in _BUILTIN_CAMEL:
+            continue
+        seen.setdefault(name, None)
+    return list(seen)
 
 
 def _find_similar_incidents(symptoms: str) -> list[dict]:
@@ -365,6 +413,38 @@ class DiagnosisAgent(BaseAgent):
                 )
             return "\n".join(lines)
 
+        async def _verify_symbol_in_repo(symbol: str) -> str:
+            """Verify a function/symbol name actually exists in the target repo.
+
+            Uses GitHub Code Search (authoritative for the default branch). Returns
+            matching file paths + matched fragments, or NOT_FOUND. Use this BEFORE
+            naming a function in affected_function / additional_fix_function so you
+            never invent a symbol that doesn't exist.
+            """
+            name = (symbol or "").strip()
+            if not name:
+                return "NOT_FOUND: empty symbol."
+            # Code Search supports bare-token queries. The trailing '(' nudges toward
+            # call/definition sites and away from prose mentions.
+            queries = [f'"{name}("', f'"{name}"']
+            for q in queries:
+                try:
+                    hits = await github.search_code(owner, repo, q)
+                except Exception as exc:
+                    return f"VERIFY_ERROR: {exc}"
+                if hits:
+                    lines = [f"FOUND ({len(hits)} match(es)) for '{name}':"]
+                    for h in hits[:5]:
+                        frag = (h.get("fragment") or "").replace("\n", " ").strip()[:160]
+                        lines.append(f"  - {h['path']}  :: {frag}")
+                    return "\n".join(lines)
+            return (
+                f"NOT_FOUND: '{name}' does not appear in repo {owner}/{repo} on the default branch. "
+                f"DO NOT name this symbol in affected_function or additional_fix_function. "
+                f"Set the function field to null, lower confidence to ≤0.65, and surface candidate "
+                f"file paths in evidence instead."
+            )
+
         self.register_tool(
             "get_error_samples",
             _get_error_samples,
@@ -424,6 +504,125 @@ class DiagnosisAgent(BaseAgent):
                 "use operation names, error codes, and system components, not generic words like 'error' or 'null')}"
             ),
         )
+        self.register_tool(
+            "verify_symbol_in_repo",
+            _verify_symbol_in_repo,
+            (
+                "Verify a function/symbol name actually exists in the target repo (GitHub Code "
+                "Search on the default branch). Returns matching file paths or NOT_FOUND. "
+                "MANDATORY: call this on every function name BEFORE writing it into "
+                "affected_function or additional_fix_function. If NOT_FOUND, the symbol does not "
+                "exist — do not name it; null the field and lower confidence. "
+                "Input: {symbol: string (e.g. 'processAndStoreImage')}"
+            ),
+        )
+
+    async def _symbol_exists_in_repo(self, symbol: str) -> bool:
+        """Check whether `symbol` appears in the target repo on the default branch.
+
+        Authoritative grounding check: the LLM may invent function names that look
+        plausible but don't exist. We re-verify post-parse so a fabricated name can't
+        leak into the Fix Generation Agent.
+        """
+        name = (symbol or "").strip()
+        if not name:
+            return False
+        for q in (f'"{name}("', f'"{name}"'):
+            try:
+                hits = await self._github.search_code(self._owner, self._repo, q)
+            except Exception:
+                # Treat transient lookup errors as "unknown" — fall through to next query.
+                continue
+            if hits:
+                return True
+        return False
+
+    async def _enforce_grounding(self, result: DiagnosisResult) -> DiagnosisResult:
+        """Cap confidence and null out function names that don't exist in the repo.
+
+        Catches the case where the LLM violates the prompt's grounding rule and names
+        a fabricated function (e.g. processAndStoreImage that doesn't exist anywhere
+        in the codebase). Fabricated names would otherwise be handed to the Fix
+        Generation Agent, which would target a non-existent symbol.
+        """
+        ungrounded: list[str] = []
+
+        if result.affected_function:
+            if not await self._symbol_exists_in_repo(result.affected_function):
+                ungrounded.append(result.affected_function)
+                logger.warning(
+                    "DiagnosisAgent: affected_function '%s' not found in %s/%s — "
+                    "treating as ungrounded and escalating",
+                    result.affected_function, self._owner, self._repo,
+                )
+                result.affected_function = None
+                result.affected_file = None
+
+        if result.additional_fix_function:
+            if not await self._symbol_exists_in_repo(result.additional_fix_function):
+                ungrounded.append(result.additional_fix_function)
+                logger.warning(
+                    "DiagnosisAgent: additional_fix_function '%s' not found in %s/%s",
+                    result.additional_fix_function, self._owner, self._repo,
+                )
+                result.additional_fix_function = None
+                result.additional_fix_file = None
+
+        if ungrounded:
+            note = (
+                f"GROUNDING FAILURE: function name(s) {ungrounded} not found in "
+                f"{self._owner}/{self._repo} — diagnosis reasoning may be sound but the "
+                f"code target was not verified. Escalating for human review."
+            )
+            result.evidence = [*result.evidence, note]
+            result.confidence = min(result.confidence, 0.65)
+            result.escalate = result.confidence < CONFIDENCE_THRESHOLD
+
+        # ----- Prose scan -----------------------------------------------
+        # Structured fields can be nulled but the same fabricated names often
+        # leak into root_cause / fix_approach / additional_fix prose, where
+        # downstream agents still read them. Verify any function-shaped tokens
+        # there too.
+        prose = " ".join(filter(None, [
+            result.root_cause,
+            result.fix_approach,
+            result.additional_fix,
+        ]))
+        candidates = _extract_prose_symbols(prose)
+
+        # Skip names already resolved above (verified-good or already-flagged-bad).
+        already_seen: set[str] = set(ungrounded)
+        for n in (result.affected_function, result.additional_fix_function):
+            if n:
+                already_seen.add(n)
+        to_check = [n for n in candidates if n not in already_seen][:_MAX_PROSE_CANDIDATES]
+
+        if to_check:
+            existence = await asyncio.gather(
+                *(self._symbol_exists_in_repo(n) for n in to_check),
+                return_exceptions=False,
+            )
+            prose_unverified = [n for n, exists in zip(to_check, existence) if not exists]
+            if prose_unverified:
+                logger.warning(
+                    "DiagnosisAgent: prose names unverified symbol(s) %s in %s/%s",
+                    prose_unverified, self._owner, self._repo,
+                )
+                result.evidence = [
+                    *result.evidence,
+                    (
+                        f"PROSE GROUNDING WARNING: symbol(s) {prose_unverified} cited in "
+                        f"reasoning do not exist in {self._owner}/{self._repo}. The diagnosis "
+                        f"narrative may be hallucinated even where structured fields look clean."
+                    ),
+                ]
+                # Tighter cap than structured (0.65) because hallucinating function
+                # names mid-reasoning means the explanation itself is suspect, not
+                # just the target slot.
+                result.confidence = min(result.confidence, 0.55)
+                result.escalate = result.confidence < CONFIDENCE_THRESHOLD
+
+        return result
 
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
@@ -500,7 +699,33 @@ Complete each step before moving to the next.
 
    If a file is truncated, search for the specific function name via search_codebase.
 
-7. Answer with a JSON diagnosis.
+7. verify_symbol_in_repo — MANDATORY CODE-GROUNDING STEP (do not skip).
+   For EVERY function name you intend to put in affected_function or additional_fix_function,
+   call verify_symbol_in_repo with that exact name. This is not optional, even if the name
+   "obviously" should exist or "matches the naming convention".
+
+   Two valid outcomes:
+     a) FOUND  → the symbol is real; you may use it as affected_function and the file path
+                 reported by the tool as affected_file. Prefer that path over any guess.
+     b) NOT_FOUND → the symbol does not exist on the default branch. You MUST:
+                 - set affected_function (or additional_fix_function) to null,
+                 - cap confidence at 0.65,
+                 - in `evidence`, list candidate file paths you read (from steps 5–6) that
+                   most likely contain the real producer, plus the search terms a human
+                   should grep for (e.g. distinctive S3 key prefixes, MIME-type checks,
+                   library symbols from the stack trace),
+                 - in `fix_approach`, describe WHAT must change conceptually, not WHERE.
+   Naming a symbol you have not verified is a hallucination. Do not do it.
+
+   This applies to PROSE FIELDS too — root_cause, fix_approach, additional_fix.
+   Do not name a function in those narrative fields unless verify_symbol_in_repo
+   returned FOUND for it. The runtime re-checks every camelCase function name in
+   the prose; unverified names cap confidence further and escalate. If you don't
+   know the real symbol, describe the failing operation in plain English (e.g.
+   "the Vision API caller", "the function that uploads the derived image to S3")
+   and list candidate file paths in `evidence`.
+
+8. Answer with a JSON diagnosis.
 
 CRITICAL — NULL / UNDEFINED ERRORS:
 If the error is a TypeError (cannot read property, undefined, null) or NullPointerException:
@@ -524,8 +749,10 @@ STEP 3 — write root_cause and fix_approach based solely on what you read in th
   or try/catch at the crash site. Those hide the problem instead of fixing it.
 
 - affected_function and affected_file identify the PRIMARY root cause location (upstream, not crash site).
+- Both must be GROUNDED via verify_symbol_in_repo (step 7). If verification returned NOT_FOUND
+  for the function, set both affected_function AND affected_file to null rather than guessing.
 - If TWO changes are needed, put the upstream fix in affected_function/affected_file and
-  describe the secondary fix in additional_fix.
+  describe the secondary fix in additional_fix. additional_fix_function must also be grounded.
 
 Answer with ONLY a valid JSON object:
 {{
@@ -545,11 +772,14 @@ Answer with ONLY a valid JSON object:
 }}
 
 Confidence guide:
-  0.90+ → near certain, clear evidence in code + logs
+  0.90+ → near certain, clear evidence in code + logs, AND affected_function verified FOUND
   0.70-0.90 → probable, strong log evidence but limited code visibility
   0.50-0.70 → possible, pattern matches but incomplete evidence
   <0.50 → uncertain, escalate to human
-  If log_group was missing and steps 1–3 returned no data, cap confidence at 0.75."""
+  If log_group was missing and steps 1–3 returned no data, cap confidence at 0.75.
+  If any named function returned NOT_FOUND in step 7, cap confidence at 0.65 and set the
+  corresponding *_function/*_file fields to null."""
 
         result = await self.run(prompt)
-        return _parse_diagnosis_result(result.answer)
+        parsed = _parse_diagnosis_result(result.answer)
+        return await self._enforce_grounding(parsed)
