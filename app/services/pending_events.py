@@ -60,6 +60,9 @@ _UNCAUGHT_MARKERS = (
     "unhandledpromiserejection",
     "unhandled promise rejection",
     "unhandledrejection",
+    "triggeruncaughtexception",
+    "node:internal/process/promises",   # Node's promise-rejection preamble
+    "unhandled 'error' event",
     "fatal error",
     "[fatal]",
     "process exited",
@@ -67,6 +70,10 @@ _UNCAUGHT_MARKERS = (
     "core dumped",
     "panic:",
 )
+# Note: `node:internal/process/task_queues` is NOT a reliable uncaught marker —
+# the `processTicksAndRejections` frame appears in caught async errors too.
+# Only `node:internal/process/promises` (the rejection-handler internals) reliably
+# indicates an uncaught rejection.
 
 _CAUGHT_MARKERS = (
     "caught error",
@@ -83,6 +90,47 @@ _CAUGHT_MARKERS = (
 _PY_FRAME = re.compile(r'File "[^"]+", line \d+')
 _JS_FRAME = re.compile(r"\n\s+at\s+\S+")
 
+# Logger-envelope patterns. When present, the message was formatted by the
+# application's logger (winston / pino / console.error(obj)), which only
+# happens for handled errors. Uncaught rejections produce Node's own
+# preamble instead, never a logger-formatted line.
+#
+# Pattern 1: a line starting with a logger level token — `error:`, `WARN:`,
+# `[ERROR]`. Matches all-lowercase or all-uppercase only; does NOT match the
+# capitalized `Error:` prefix that JS's `Error.toString()` produces.
+_LOGGER_LEVEL_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:error|warn|warning|info|debug)|(?:ERROR|WARN|WARNING|INFO|DEBUG)|"
+    r"\[(?:ERROR|WARN|WARNING|INFO|DEBUG)\])\s*:?\s",
+    re.MULTILINE,
+)
+# Pattern 2: a structured `<Tag>-> <funcName>` decorator at the start of a
+# line — winston/pino style, `console.error('Tag->', fnName, payload)`. The
+# `Tag-> word` shape itself is the signal; whatever follows (`:`, `{`, plain
+# args) varies by logger style. Node never emits `Tag-> word`, so this is a
+# strong caught indicator on its own.
+_LOGGER_TAG_RE = re.compile(r"^\s*\w+->\s+\w+", re.MULTILINE)
+
+# Pattern 3: a custom function-name prefix before the Error class on the first
+# line, e.g. `applyModification Error: ...` or `processPosts Error: ...`.
+# Node's own output always begins with the Error class itself (`Error:`,
+# `TypeError:`, `RangeError:`); a leading identifier means user code formatted
+# the message via something like `console.error('<fn> Error:', err)`.
+_LOGGER_FN_PREFIX_RE = re.compile(
+    r"^\s*[A-Za-z_]\w+\s+(?:[A-Z]\w*Error|Error)\s*:\s",
+    re.MULTILINE,
+)
+
+
+def _detect_logger_envelope(message: str) -> str:
+    """Return short evidence string if the message looks like logger output, else ''."""
+    if _LOGGER_LEVEL_PREFIX_RE.search(message):
+        return "logger level prefix"
+    if _LOGGER_TAG_RE.search(message):
+        return "structured logger tag"
+    if _LOGGER_FN_PREFIX_RE.search(message):
+        return "function-name prefix on Error line"
+    return ""
+
 
 def classify_handling(message: str) -> tuple[str, str]:
     """Heuristic: did the application code catch this error or did it crash through?
@@ -90,25 +138,39 @@ def classify_handling(message: str) -> tuple[str, str]:
     Returns ``(label, evidence)`` where label is one of ``caught``, ``uncaught``,
     or ``unknown``. ``evidence`` is a short fragment of the message that drove
     the decision — useful to show in the UI tooltip.
+
+    Order matters: logger-envelope detection runs before stack-frame counting,
+    because Node prints a multi-frame stack for ``console.error(err)`` on a
+    caught Error just as it does for an actual uncaught rejection. Frame count
+    alone is therefore not enough to call ``uncaught``.
     """
     if not message:
         return "unknown", ""
     lower = message.lower()
+    envelope = _detect_logger_envelope(message)
 
+    # Strong uncaught markers — these only appear when the runtime itself
+    # printed the message (Node's preamble, Python's traceback header, etc.)
+    # so a hit is decisive.
     for marker in _UNCAUGHT_MARKERS:
         if marker in lower:
             return "uncaught", marker
 
-    py_frames = len(_PY_FRAME.findall(message))
-    js_frames = len(_JS_FRAME.findall(message))
-    if py_frames >= 2:
-        return "uncaught", f"{py_frames} python stack frames"
-    if js_frames >= 2:
-        return "uncaught", f"{js_frames} stack frames"
-
     for marker in _CAUGHT_MARKERS:
         if marker in lower:
             return "caught", marker
+
+    if envelope:
+        return "caught", envelope
+
+    py_frames = len(_PY_FRAME.findall(message))
+    js_frames = len(_JS_FRAME.findall(message))
+    if py_frames >= 2 or js_frames >= 2:
+        # Stack present but no envelope and no explicit marker — we genuinely
+        # can't tell. Don't escalate to "uncaught"; flagging caught errors as
+        # uncaught creates noise in the incident pipeline.
+        frames = py_frames or js_frames
+        return "unknown", f"{frames} stack frames, no logger envelope"
 
     if re.search(r"\b(ERROR|WARN|WARNING)\b\s*[:\]]", message) and py_frames == 0 and js_frames == 0:
         return "caught", "logged via error/warn level without stack trace"
