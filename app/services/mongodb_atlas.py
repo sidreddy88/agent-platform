@@ -38,6 +38,24 @@ class AtlasClusterMetrics:
     healthy: bool
 
 
+@dataclass
+class SlowQuery:
+    namespace: str          # "<db>.<collection>"
+    query_shape: str        # redacted shape Atlas reports
+    exec_count: int
+    avg_ms: float
+    total_ms: float
+    latest_at: str          # ISO timestamp of latest occurrence
+
+
+@dataclass
+class SuggestedIndex:
+    namespace: str
+    index_def: str          # human-readable index spec, e.g. "{ userId: 1, status: 1 }"
+    impact: list[str]       # query shapes this index would help
+    weight: float           # Atlas's score for the index (higher = more impact)
+
+
 class MongoDBAtlasService:
     def __init__(self) -> None:
         self._public_key: str = getattr(settings, "atlas_public_key", "")
@@ -176,6 +194,133 @@ class MongoDBAtlasService:
         except Exception as exc:
             logger.debug("Atlas: metric fetch failed (%s) for %s: %s", metric_names, process_id, exc)
             return None
+
+    # ------------------------------------------------------------------
+    # Performance Advisor — slow queries + suggested indexes
+    # ------------------------------------------------------------------
+
+    async def _primary_host_ids(self) -> list[str]:
+        """Return all process IDs (host:port) Atlas knows about, primaries first.
+
+        Performance Advisor data is collected per-process; we ask the primary
+        of each cluster (Atlas surfaces the same advisor data on all members,
+        but the primary is canonical).
+        """
+        if not self._configured:
+            return []
+        try:
+            data = await self._get(f"/groups/{self._project_id}/processes")
+        except Exception as exc:
+            logger.warning("Atlas: failed to list processes: %s", exc)
+            return []
+
+        processes = data.get("results", []) or []
+        # Order: primaries first, then secondaries, then any unclassified.
+        primaries = [p["id"] for p in processes if p.get("typeName") == "REPLICA_PRIMARY" and p.get("id")]
+        if primaries:
+            return primaries
+        # Fallback: any process. Performance Advisor still works on
+        # secondaries — the data is replica-set wide.
+        return [p["id"] for p in processes if p.get("id")]
+
+    async def get_slow_queries(self, host_id: str, hours: int = 24) -> list[SlowQuery]:
+        """Atlas slow-query log for a process. Empty list if not configured or call fails."""
+        if not self._configured or not host_id:
+            return []
+        try:
+            data = await self._get(
+                f"/groups/{self._project_id}/processes/{host_id}/performanceAdvisor/slowQueryLogs",
+                params={"duration": f"PT{int(hours)}H"},
+            )
+        except Exception as exc:
+            logger.warning("Atlas: slowQueryLogs failed for %s: %s", host_id, exc)
+            return []
+
+        out: list[SlowQuery] = []
+        for entry in data.get("slowQueries", []) or []:
+            stats = entry.get("metrics") or {}
+            out.append(SlowQuery(
+                namespace=entry.get("namespace", "unknown"),
+                query_shape=str(entry.get("line") or entry.get("queryShape", "")),
+                exec_count=int(stats.get("execCount", 0) or 0),
+                avg_ms=float(stats.get("execTimeMillis", 0) or 0),
+                total_ms=float(stats.get("totalTimeMillis", 0) or 0),
+                latest_at=str(entry.get("opTime", "")),
+            ))
+        return out
+
+    async def get_suggested_indexes(self, host_id: str, hours: int = 24) -> list[SuggestedIndex]:
+        """Atlas's suggested indexes for a process. Empty list on failure."""
+        if not self._configured or not host_id:
+            return []
+        try:
+            data = await self._get(
+                f"/groups/{self._project_id}/processes/{host_id}/performanceAdvisor/suggestedIndexes",
+                params={"duration": f"PT{int(hours)}H"},
+            )
+        except Exception as exc:
+            logger.warning("Atlas: suggestedIndexes failed for %s: %s", host_id, exc)
+            return []
+
+        out: list[SuggestedIndex] = []
+        for entry in data.get("suggestedIndexes", []) or []:
+            keys = entry.get("index") or []
+            # Atlas returns index keys as a list of {<field>: 1|-1} dicts;
+            # render as "{ field: 1, field2: -1 }" for display.
+            parts = []
+            for k in keys:
+                if isinstance(k, dict):
+                    for field, direction in k.items():
+                        parts.append(f"{field}: {direction}")
+            index_def = "{ " + ", ".join(parts) + " }" if parts else str(keys)
+
+            impact_shapes: list[str] = []
+            for imp in entry.get("impact") or []:
+                if isinstance(imp, dict):
+                    shape = imp.get("queryShape") or imp.get("shape") or ""
+                    if shape:
+                        impact_shapes.append(str(shape))
+
+            out.append(SuggestedIndex(
+                namespace=entry.get("namespace", "unknown"),
+                index_def=index_def,
+                impact=impact_shapes,
+                weight=float(entry.get("weight", 0) or 0),
+            ))
+        return out
+
+    async def get_performance_advisor(
+        self, hours: int = 24,
+    ) -> tuple[list[SlowQuery], list[SuggestedIndex]]:
+        """Fan out across all primary processes; aggregate slow queries + suggested indexes.
+
+        Dedupes by (namespace, query_shape) for slow queries and
+        (namespace, index_def) for suggested indexes — Atlas reports the
+        same patterns on every replica-set member.
+        """
+        host_ids = await self._primary_host_ids()
+        if not host_ids:
+            return [], []
+
+        seen_q: dict[tuple[str, str], SlowQuery] = {}
+        seen_i: dict[tuple[str, str], SuggestedIndex] = {}
+
+        for host_id in host_ids:
+            for q in await self.get_slow_queries(host_id, hours=hours):
+                key = (q.namespace, q.query_shape)
+                # Keep the row with the higher total_ms — that's the worst observation.
+                prev = seen_q.get(key)
+                if prev is None or q.total_ms > prev.total_ms:
+                    seen_q[key] = q
+            for ix in await self.get_suggested_indexes(host_id, hours=hours):
+                key = (ix.namespace, ix.index_def)
+                prev = seen_i.get(key)
+                if prev is None or ix.weight > prev.weight:
+                    seen_i[key] = ix
+
+        slow = sorted(seen_q.values(), key=lambda q: q.total_ms, reverse=True)
+        idx = sorted(seen_i.values(), key=lambda i: i.weight, reverse=True)
+        return slow, idx
 
 
 atlas_service = MongoDBAtlasService()
