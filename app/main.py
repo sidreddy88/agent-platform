@@ -17,6 +17,7 @@ from app.api.routes import injection as injection_routes
 from app.api.routes import metrics as metrics_routes
 from app.api.routes import monitors as monitors_routes
 from app.api.routes import orchestrator as orchestrator_routes
+from app.api.routes import performance as performance_routes
 from app.api.routes import sessions as sessions_routes
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.database import init_db
@@ -57,6 +58,7 @@ app.include_router(agents_routes.router)
 app.include_router(debug_routes.router)
 app.include_router(sessions_routes.router)
 app.include_router(failures_routes.router)
+app.include_router(performance_routes.router)
 
 
 async def _backfill_rag_index() -> None:
