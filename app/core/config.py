@@ -96,6 +96,21 @@ class Settings(BaseSettings):
     #               "error_type": "S3_NO_SUCH_KEY", "service": "target-app"}]
     cw_log_filters: str = ""
 
+    # SNS topic ARN that CloudWatch alarms publish to. When set:
+    #   - MonitorGenerationAgent wires this ARN into AlarmActions on every
+    #     alarm it provisions, so alarm transitions push to SNS.
+    #   - The /webhooks/cloudwatch-alarm endpoint expects messages from
+    #     this topic.
+    # Leave blank to keep alarms inert (UI-only, no push ingest).
+    cloudwatch_alarm_sns_topic_arn: str = ""
+
+    # Shared-secret token gating /webhooks/cloudwatch-alarm. The SNS HTTPS
+    # subscription must include this token in the URL (e.g. ?token=…) or
+    # in the X-Webhook-Token header. Leave blank to skip token auth (not
+    # recommended in production — proper SNS signature verification is
+    # the long-term answer).
+    cloudwatch_webhook_token: str = ""
+
     class Config:
         env_file = ".env"
 
