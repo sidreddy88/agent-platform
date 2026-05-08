@@ -229,3 +229,171 @@ async def test_prose_scan_extraction_patterns():
     assert "toString" not in names  # builtin filtered
     assert "lower" not in names      # no capital
     assert "ABC" not in names        # doesn't start lowercase
+
+
+# ---------------------------------------------------------------------------
+# Pre-fix-reasoning fields: blast_radius + contract_change
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_parser_extracts_blast_radius_and_contract_change():
+    """Schema-shaped JSON should populate the new fields."""
+    from app.agents.diagnosis import _parse_diagnosis_result
+
+    answer = """```json
+    {
+      "root_cause": "x",
+      "confidence": 0.85,
+      "fix_approach": "y",
+      "affected_function": "processOrder",
+      "affected_file": "src/orders.js",
+      "reproduction_confirmed": true,
+      "blast_radius": [
+        {"file": "src/api.js", "function": "submitOrder", "snippet": "await processOrder(payload)"},
+        {"file": "src/cron/retry.js", "function": "retryFailed", "snippet": "processOrder(...)"}
+      ],
+      "contract_change": "signature",
+      "contract_change_detail": "added retries param"
+    }
+    ```"""
+
+    result = _parse_diagnosis_result(answer)
+    assert result.affected_function == "processOrder"
+    assert len(result.blast_radius) == 2
+    assert result.blast_radius[0]["file"] == "src/api.js"
+    assert result.blast_radius[0]["function"] == "submitOrder"
+    assert result.contract_change == "signature"
+    assert result.contract_change_detail == "added retries param"
+
+
+@pytest.mark.asyncio
+async def test_parser_drops_invalid_blast_radius_entries():
+    """Entries missing `file` should be dropped silently rather than crashing."""
+    from app.agents.diagnosis import _parse_diagnosis_result
+
+    answer = """{
+      "root_cause": "x",
+      "confidence": 0.85,
+      "blast_radius": [
+        {"file": "src/a.js", "function": "callerA"},
+        {"function": "noFile"},
+        "not a dict"
+      ]
+    }"""
+
+    result = _parse_diagnosis_result(answer)
+    assert len(result.blast_radius) == 1
+    assert result.blast_radius[0]["file"] == "src/a.js"
+
+
+@pytest.mark.asyncio
+async def test_parser_normalises_unknown_contract_change():
+    """Unknown contract_change values must clamp to 'none' rather than leaking through."""
+    from app.agents.diagnosis import _parse_diagnosis_result
+
+    answer = """{
+      "root_cause": "x",
+      "confidence": 0.85,
+      "contract_change": "???"
+    }"""
+    result = _parse_diagnosis_result(answer)
+    assert result.contract_change == "none"
+
+
+@pytest.mark.asyncio
+async def test_grounding_warns_when_blast_radius_empty_for_helper():
+    """Empty blast_radius on a non-entry-point function adds an evidence note."""
+    async def found(owner, repo, query):
+        return [{"path": "src/x.js", "fragment": "function processOrder() {}"}]
+
+    agent = _make_agent(found)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="processOrder",
+        affected_file="src/orders.js",
+        blast_radius=[],   # no callers reported
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.confidence == 0.9   # not capped — this is observability, not correctness
+    assert any("BLAST RADIUS WARNING" in e for e in out.evidence)
+
+
+@pytest.mark.asyncio
+async def test_grounding_skips_blast_radius_warning_for_entry_points():
+    """Route handlers / cron jobs naturally have no callers — no warning."""
+    async def found(owner, repo, query):
+        return [{"path": "src/routes/api.js", "fragment": "function paymentHandler() {}"}]
+
+    agent = _make_agent(found)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="paymentHandler",
+        affected_file="src/routes/api.js",
+        blast_radius=[],
+    )
+
+    out = await agent._enforce_grounding(result)
+    assert all("BLAST RADIUS WARNING" not in e for e in out.evidence)
+
+
+@pytest.mark.asyncio
+async def test_grounding_skips_blast_radius_warning_when_evidence_explains():
+    """If the diagnosis evidence already says 'no callers — entry point', no warning."""
+    async def found(owner, repo, query):
+        return [{"path": "src/x.js", "fragment": "function processOrder() {}"}]
+
+    agent = _make_agent(found)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="processOrder",
+        affected_file="src/x.js",
+        blast_radius=[],
+        evidence=["affected_function is a route handler — no callers"],
+    )
+
+    out = await agent._enforce_grounding(result)
+    assert all("BLAST RADIUS WARNING" not in e for e in out.evidence)
+
+
+@pytest.mark.asyncio
+async def test_grounding_no_blast_radius_warning_when_callers_present():
+    async def found(owner, repo, query):
+        return [{"path": "src/x.js", "fragment": "processOrder()"}]
+
+    agent = _make_agent(found)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="processOrder",
+        affected_file="src/x.js",
+        blast_radius=[
+            {"file": "src/api.js", "function": "submit", "snippet": "processOrder()"},
+        ],
+    )
+
+    out = await agent._enforce_grounding(result)
+    assert all("BLAST RADIUS WARNING" not in e for e in out.evidence)
+
+
+@pytest.mark.asyncio
+async def test_entry_point_helper_name_hints():
+    """Spot-check the entry-point name detector."""
+    from app.agents.diagnosis import _looks_like_entry_point
+
+    # Names that suggest entry points:
+    assert _looks_like_entry_point("paymentHandler", [])
+    assert _looks_like_entry_point("getUserRoute", [])
+    assert _looks_like_entry_point("nightlyCron", [])
+    assert _looks_like_entry_point("queueWorker", [])
+
+    # Names that don't:
+    assert not _looks_like_entry_point("processOrder", [])
+    assert not _looks_like_entry_point("validateInput", [])
+
+    # Evidence override:
+    assert _looks_like_entry_point("processOrder", ["this is the express handler — no callers"])

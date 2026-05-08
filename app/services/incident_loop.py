@@ -562,6 +562,9 @@ class IncidentLoop:
         incident.diagnosis_additional_fix = diagnosis.additional_fix
         incident.diagnosis_additional_fix_file = diagnosis.additional_fix_file
         incident.diagnosis_additional_fix_function = diagnosis.additional_fix_function
+        incident.diagnosis_blast_radius = list(diagnosis.blast_radius or [])
+        incident.diagnosis_contract_change = diagnosis.contract_change
+        incident.diagnosis_contract_change_detail = diagnosis.contract_change_detail
         incident.diagnosis_completed_at = datetime.now(timezone.utc)
 
         if diagnosis.escalate:
@@ -756,6 +759,20 @@ class IncidentLoop:
 
         event = incident.error_event
         sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
+
+        # Fix-agent self-verdict surface. When the fix agent flags low confidence
+        # or escalate=true, the verdict reason is read back to the reviewer in
+        # the approval description so the human sees the agent's own doubts
+        # before merging.
+        fix_self_assessment = ""
+        if fix.escalate or (fix.confidence is not None and fix.confidence < 0.70):
+            reason = fix.escalate_reason or "no reason given"
+            fix_self_assessment = (
+                f"\n⚠ FIX AGENT FLAGGED ITSELF: confidence={fix.confidence}, "
+                f"escalate={fix.escalate}. Reason: {reason}. "
+                f"blast_radius_addressed={fix.blast_radius_addressed}."
+            )
+
         approval_req = await approval_service.request_approval(
             agent_name="FixGenerationAgent",
             action="merge_ai_fix_pr",
@@ -765,12 +782,18 @@ class IncidentLoop:
                 "pr_number": fix.pr_number,
                 "branch": fix.branch,
                 "confidence": f"{incident.confidence:.0%}",
+                "fix_confidence": fix.confidence,
+                "fix_escalate": fix.escalate,
+                "fix_escalate_reason": fix.escalate_reason,
+                "fix_blast_radius_addressed": fix.blast_radius_addressed,
             },
             risk_level=RiskLevel.HIGH,
             description=(
                 f"AI-generated fix for [{sev_str}] {event.title} "
-                f"(confidence {incident.confidence:.0%}, {incident.occurrences_24h} occurrences/24h). "
+                f"(diagnosis confidence {incident.confidence:.0%}, "
+                f"{incident.occurrences_24h} occurrences/24h). "
                 f"PR: {fix.pr_url}"
+                f"{fix_self_assessment}"
             ),
         )
         incident.approval_id = approval_req.id
@@ -885,6 +908,20 @@ class IncidentLoop:
 
         event = incident.error_event
         sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
+
+        # Fix-agent self-verdict surface. When the fix agent flags low confidence
+        # or escalate=true, the verdict reason is read back to the reviewer in
+        # the approval description so the human sees the agent's own doubts
+        # before merging.
+        fix_self_assessment = ""
+        if fix.escalate or (fix.confidence is not None and fix.confidence < 0.70):
+            reason = fix.escalate_reason or "no reason given"
+            fix_self_assessment = (
+                f"\n⚠ FIX AGENT FLAGGED ITSELF: confidence={fix.confidence}, "
+                f"escalate={fix.escalate}. Reason: {reason}. "
+                f"blast_radius_addressed={fix.blast_radius_addressed}."
+            )
+
         approval_req = await approval_service.request_approval(
             agent_name="FixGenerationAgent",
             action="merge_ai_fix_pr",
@@ -894,12 +931,18 @@ class IncidentLoop:
                 "pr_number": fix.pr_number,
                 "branch": fix.branch,
                 "confidence": f"{incident.confidence:.0%}",
+                "fix_confidence": fix.confidence,
+                "fix_escalate": fix.escalate,
+                "fix_escalate_reason": fix.escalate_reason,
+                "fix_blast_radius_addressed": fix.blast_radius_addressed,
             },
             risk_level=RiskLevel.HIGH,
             description=(
                 f"AI-generated fix for [{sev_str}] {event.title} "
-                f"(confidence {incident.confidence:.0%}, {incident.occurrences_24h} occurrences/24h). "
+                f"(diagnosis confidence {incident.confidence:.0%}, "
+                f"{incident.occurrences_24h} occurrences/24h). "
                 f"PR: {fix.pr_url}"
+                f"{fix_self_assessment}"
             ),
         )
 

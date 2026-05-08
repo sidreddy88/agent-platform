@@ -156,6 +156,28 @@ def _extract_prose_symbols(text: str) -> list[str]:
     return list(seen)
 
 
+# Names + evidence phrases that indicate a function has no internal callers
+# (the entry-point case where empty blast_radius is honest). Used by the
+# blast-radius coverage check in `_enforce_grounding`.
+_ENTRY_POINT_NAME_HINTS = (
+    "handler", "route", "endpoint", "controller", "cron", "job", "worker",
+    "task", "main", "lambda", "consumer", "listener",
+)
+_ENTRY_POINT_EVIDENCE_HINTS = (
+    "route handler", "no callers", "entry point", "top-level", "express handler",
+    "webhook handler", "cron job", "lambda handler", "fastapi route",
+)
+
+
+def _looks_like_entry_point(fn_name: str, evidence: list[str]) -> bool:
+    """Heuristic: does this function look like an external entry point?"""
+    name_lower = fn_name.lower()
+    if any(hint in name_lower for hint in _ENTRY_POINT_NAME_HINTS):
+        return True
+    blob = " ".join(evidence or []).lower()
+    return any(hint in blob for hint in _ENTRY_POINT_EVIDENCE_HINTS)
+
+
 def _find_similar_incidents(symptoms: str) -> list[dict]:
     words = {w for w in symptoms.lower().split() if w not in _STOPWORDS}
     scored = []
@@ -185,6 +207,14 @@ class DiagnosisResult:
     additional_fix_file: str | None = None     # secondary file path
     reproduction_confirmed: bool = False
     escalate: bool = False      # True when confidence < CONFIDENCE_THRESHOLD
+    # Pre-fix-reasoning fields. FixGenerationAgent reads these as constraints
+    # so its prompt can frame Tier 2 callers as "must not break" and surface
+    # contract changes loudly. Empty list / "none" are honest defaults when
+    # the diagnosis can't determine the answer — better than fabrication.
+    blast_radius: list[dict] = field(default_factory=list)
+    # ^ each entry: {"file": str, "function": str, "snippet": str}
+    contract_change: str = "none"  # "none" | "signature" | "return_type" | "side_effect"
+    contract_change_detail: str | None = None
     raw_llm: str = ""
 
 
@@ -235,6 +265,27 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
             if not isinstance(data, dict):
                 continue
             confidence = float(data.get("confidence", 0.5))
+
+            # Normalise blast_radius — accept the structured form from the
+            # prompt schema, drop entries that don't have a usable file path.
+            raw_br = data.get("blast_radius", []) or []
+            blast_radius: list[dict] = []
+            if isinstance(raw_br, list):
+                for entry in raw_br:
+                    if isinstance(entry, dict) and entry.get("file"):
+                        blast_radius.append({
+                            "file": str(entry["file"]),
+                            "function": str(entry.get("function", "") or ""),
+                            "snippet": str(entry.get("snippet", "") or "")[:400],
+                        })
+
+            contract_change = str(data.get("contract_change", "none") or "none").lower()
+            if contract_change not in ("none", "signature", "return_type", "side_effect"):
+                contract_change = "none"
+            contract_detail = data.get("contract_change_detail")
+            if contract_detail is not None and not isinstance(contract_detail, str):
+                contract_detail = str(contract_detail)
+
             return DiagnosisResult(
                 root_cause=data.get("root_cause", "Unknown"),
                 confidence=confidence,
@@ -247,6 +298,9 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
                 additional_fix_file=data.get("additional_fix_file"),
                 reproduction_confirmed=bool(data.get("reproduction_confirmed", False)),
                 escalate=confidence < CONFIDENCE_THRESHOLD,
+                blast_radius=blast_radius,
+                contract_change=contract_change,
+                contract_change_detail=contract_detail,
                 raw_llm=answer,
             )
         except (json.JSONDecodeError, ValueError, TypeError):
@@ -622,6 +676,28 @@ class DiagnosisAgent(BaseAgent):
                 result.confidence = min(result.confidence, 0.55)
                 result.escalate = result.confidence < CONFIDENCE_THRESHOLD
 
+        # ----- Blast radius coverage check ------------------------------
+        # Empty blast_radius is honest when the function is a top-level
+        # handler / route. But for a typical helper, missing callers means
+        # the model didn't actually do the search step — surface as an
+        # evidence note so reviewers know the constraint set is incomplete.
+        # Don't cap confidence: this is an observability nudge, not a
+        # correctness gate.
+        if (
+            result.affected_function
+            and not result.blast_radius
+            and not _looks_like_entry_point(result.affected_function, result.evidence)
+        ):
+            result.evidence = [
+                *result.evidence,
+                (
+                    f"BLAST RADIUS WARNING: no callers reported for "
+                    f"'{result.affected_function}'. Either it's an entry point "
+                    f"(route/handler/cron — note that in evidence) or the "
+                    f"diagnosis skipped the caller search."
+                ),
+            ]
+
         return result
 
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
@@ -754,6 +830,31 @@ STEP 3 — write root_cause and fix_approach based solely on what you read in th
 - If TWO changes are needed, put the upstream fix in affected_function/affected_file and
   describe the secondary fix in additional_fix. additional_fix_function must also be grounded.
 
+PRE-FIX REASONING — populate `blast_radius` and `contract_change`:
+
+After identifying affected_function, search the repo for callers of that
+function (use search_codebase with the function name). For each distinct
+caller you find, add an entry to `blast_radius`:
+
+  - `file`: path of the caller (must be a real file you observed)
+  - `function`: the calling function or "(top-level)" for module-scope calls
+  - `snippet`: ≤200-char excerpt showing how the caller uses the function
+
+Aim for 3–8 entries. If the function has no callers (it's a top-level
+handler / route / cron entry point), return an empty list and explain in
+evidence ("affected_function is a route handler — no callers"). Empty
+list is honest; fabricating callers is not.
+
+`contract_change` describes whether your proposed fix changes the
+function's external behaviour:
+  - "none": signature, return type, and side effects are unchanged
+  - "signature": parameter list / types change
+  - "return_type": return shape changes
+  - "side_effect": new I/O, new exceptions thrown, new mutations, etc.
+If non-"none", populate `contract_change_detail` with one short
+sentence describing what changes. The fix agent will surface this
+loudly so every caller is updated.
+
 Answer with ONLY a valid JSON object:
 {{
   "root_cause": "precise description of WHY the error occurs — name the upstream cause",
@@ -768,7 +869,12 @@ Answer with ONLY a valid JSON object:
   "additional_fix": "optional: describe any secondary change in a different function/file, or null",
   "additional_fix_function": "secondaryFunctionName or null",
   "additional_fix_file": "path/to/secondary/file.js or null",
-  "reproduction_confirmed": true
+  "reproduction_confirmed": true,
+  "blast_radius": [
+    {{"file": "path/to/caller.js", "function": "callerFunction", "snippet": "const x = primaryFunctionToFix(...)"}}
+  ],
+  "contract_change": "none",
+  "contract_change_detail": null
 }}
 
 Confidence guide:
