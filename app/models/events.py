@@ -78,6 +78,12 @@ class IncidentState(BaseModel):
     diagnosis_additional_fix: Optional[str] = None         # secondary fix description
     diagnosis_additional_fix_file: Optional[str] = None    # secondary fix file
     diagnosis_additional_fix_function: Optional[str] = None  # secondary fix function
+    # Pre-fix-reasoning fields (populated by DiagnosisAgent, consumed by FixGenerationAgent
+    # as Tier 2 constraints in the fix prompt).
+    diagnosis_blast_radius: List[Dict[str, Any]] = Field(default_factory=list)
+    # ^ each entry: {"file": str, "function": str, "snippet": str}
+    diagnosis_contract_change: Optional[str] = None  # "none" | "signature" | "return_type" | "side_effect"
+    diagnosis_contract_change_detail: Optional[str] = None
 
     # Fix
     fix_attempted: Optional[str] = None
