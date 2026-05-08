@@ -205,6 +205,15 @@ class MonitorGenerationAgent(BaseAgent):
             base_name = re.sub(r"[^a-zA-Z0-9-]", "_", file)[:30]
             svc = (service_name or base_name).strip("_")
 
+            # Wire the alarm to the configured SNS topic so transitions push
+            # to /webhooks/cloudwatch-alarm. Without an ARN, the alarm
+            # remains inert (CloudWatch UI only).
+            alarm_actions = (
+                [settings.cloudwatch_alarm_sns_topic_arn]
+                if settings.cloudwatch_alarm_sns_topic_arn
+                else []
+            )
+
             alarms = []
             for i in range(alarm_count):
                 suffix = f"_{i + 1}" if alarm_count > 1 else ""
@@ -217,7 +226,8 @@ class MonitorGenerationAgent(BaseAgent):
                     "EvaluationPeriods": 1,
                     "Threshold": 1,
                     "ComparisonOperator": "GreaterThanOrEqualToThreshold",
-                    "AlarmActions": [],
+                    "AlarmActions": alarm_actions,
+                    "OKActions": alarm_actions,
                     "Dimensions": [{"Name": "ServiceName", "Value": svc}],
                 })
             return json.dumps(alarms, indent=2)
