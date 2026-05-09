@@ -99,18 +99,18 @@ async def debug_rag_corpus():
     if count == 0:
         return {"count": 0, "documents": []}
 
-    raw = rag._incident_collection.get(include=["documents", "metadatas"])
+    items = rag._incident_collection.all_items()
     docs = [
         {
-            "incident_id": meta["incident_id"],
-            "status": meta["status"],
-            "error_type": meta["error_type"],
-            "service": meta["service"],
-            "pr_url": meta["pr_url"] or None,
-            "indexed_text": doc,
-            "indexed_text_length": len(doc),
+            "incident_id": item.metadata.get("incident_id", item.id),
+            "status": item.metadata.get("status", ""),
+            "error_type": item.metadata.get("error_type", ""),
+            "service": item.metadata.get("service", ""),
+            "pr_url": item.metadata.get("pr_url") or None,
+            "indexed_text": item.document,
+            "indexed_text_length": len(item.document),
         }
-        for doc, meta in zip(raw["documents"], raw["metadatas"])
+        for item in items
     ]
     return {
         "count": count,
@@ -132,11 +132,11 @@ async def debug_codebase_corpus():
     if count == 0:
         return {"count": 0, "files": []}
 
-    raw = rag._collection.get(include=["metadatas"])
     file_chunks: dict[str, int] = {}
-    for meta in raw["metadatas"]:
-        fp = meta["file_path"]
-        file_chunks[fp] = file_chunks.get(fp, 0) + 1
+    for meta in rag._collection.all_metadata():
+        fp = meta.get("file_path", "")
+        if fp:
+            file_chunks[fp] = file_chunks.get(fp, 0) + 1
 
     return {
         "total_chunks": count,

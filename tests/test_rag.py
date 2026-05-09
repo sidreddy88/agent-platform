@@ -23,6 +23,7 @@ from app.services.rag import (
     RAGService,
     _chunk_file,
 )
+from app.services.vector_store import VectorMatch
 
 CODEBASE_PATH = "/Users/Sidreddy/VoyageCode/SerpApiTestTool"
 
@@ -34,17 +35,33 @@ CODEBASE_PATH = "/Users/Sidreddy/VoyageCode/SerpApiTestTool"
 SAMPLE_CODE = "\n".join(f"line {i}" for i in range(1, 121))  # 120 lines
 
 
-def make_rag(collection_count: int = 10) -> RAGService:
-    """Return a RAGService with all external dependencies mocked."""
-    with patch("app.services.rag.AsyncOpenAI"), \
-         patch("app.services.rag.chromadb.PersistentClient") as mock_chroma:
+def _make_collection_mock(count_value: int = 10) -> MagicMock:
+    """Build a MagicMock that satisfies the VectorCollection protocol."""
+    col = MagicMock()
+    col.count = MagicMock(return_value=count_value)
+    col.upsert = MagicMock()
+    col.query = MagicMock(return_value=[])
+    col.get_by_filter = MagicMock(return_value=[])
+    col.all_metadata = MagicMock(return_value=[])
+    col.all_items = MagicMock(return_value=[])
+    col.clear = MagicMock()
+    return col
 
-        mock_col = MagicMock()
-        mock_col.count.return_value = collection_count
-        mock_chroma.return_value.get_or_create_collection.return_value = mock_col
+
+def make_rag(collection_count: int = 10) -> RAGService:
+    """Return a RAGService with all external dependencies mocked.
+
+    Patches `make_collection` so neither ChromaDB nor pgvector is touched —
+    the test owns a pure-MagicMock VectorCollection it can drive.
+    """
+    with patch("app.services.rag.AsyncOpenAI"), \
+         patch("app.services.rag.make_collection") as make_coll_mock:
+
+        codebase_col = _make_collection_mock(count_value=collection_count)
+        incident_col = _make_collection_mock(count_value=0)
+        make_coll_mock.side_effect = [codebase_col, incident_col]
 
         rag = RAGService(openai_api_key="sk-test")
-        rag._collection = mock_col
         rag._openai = MagicMock()
         rag._openai.embeddings = MagicMock()
         rag._openai.embeddings.create = AsyncMock(
@@ -128,14 +145,14 @@ class TestIndexDirectory:
         (tmp_path / "index.js").write_text("const y = 2;")
 
         rag = make_rag()
-        rag._collection.upsert = MagicMock()
 
         await rag.index_directory(str(tmp_path))
-        # Only index.js should have been upserted, not node_modules/lib.js
+        # Only index.js should have been upserted, not node_modules/lib.js.
+        # Each upsert call gets a list[VectorItem] as its single positional arg.
         for call in rag._collection.upsert.call_args_list:
-            metadatas = call.kwargs.get("metadatas") or call.args[3]
-            for meta in metadatas:
-                assert "node_modules" not in meta["file_path"]
+            items = call.args[0]
+            for item in items:
+                assert "node_modules" not in item.metadata["file_path"]
 
     @pytest.mark.asyncio
     async def test_uses_default_codebase_path_when_none_given(self):
@@ -168,17 +185,20 @@ class TestSearch:
     @pytest.mark.asyncio
     async def test_returns_code_chunks(self):
         rag = make_rag(collection_count=5)
-        rag._collection.query = MagicMock(return_value={
-            "documents": [["def foo(): pass"]],
-            "metadatas": [[{
-                "chunk_id": "abc123",
-                "file_path": "app/foo.py",
-                "language": "python",
-                "start_line": 1,
-                "end_line": 10,
-            }]],
-            "distances": [[0.1]],
-        })
+        rag._collection.query = MagicMock(return_value=[
+            VectorMatch(
+                id="abc123",
+                document="def foo(): pass",
+                metadata={
+                    "chunk_id": "abc123",
+                    "file_path": "app/foo.py",
+                    "language": "python",
+                    "start_line": 1,
+                    "end_line": 10,
+                },
+                score=0.9,
+            ),
+        ])
 
         results = await rag.search("foo function")
         assert len(results) == 1
@@ -194,15 +214,16 @@ class TestSearch:
     @pytest.mark.asyncio
     async def test_respects_n_results(self):
         rag = make_rag(collection_count=20)
-        rag._collection.query = MagicMock(return_value={
-            "documents": [[]],
-            "metadatas": [[]],
-            "distances": [[]],
-        })
+        rag._collection.query = MagicMock(return_value=[])
 
         await rag.search("query", n_results=3)
-        call_kwargs = rag._collection.query.call_args.kwargs
-        assert call_kwargs["n_results"] == 3
+        # query(embedding, n_results=3) — n_results is the second positional arg
+        # or the keyword. Accept either shape.
+        call = rag._collection.query.call_args
+        n_results = call.kwargs.get("n_results")
+        if n_results is None:
+            n_results = call.args[1]
+        assert n_results == 3
 
 
 # ---------------------------------------------------------------------------
@@ -213,15 +234,18 @@ class TestGetFile:
     @pytest.mark.asyncio
     async def test_returns_chunks_sorted_by_line(self):
         rag = make_rag()
-        rag._collection.get = MagicMock(return_value={
-            "documents": ["chunk B content", "chunk A content"],
-            "metadatas": [
-                {"chunk_id": "b", "file_path": "app/foo.py", "language": "python",
-                 "start_line": 51, "end_line": 100},
-                {"chunk_id": "a", "file_path": "app/foo.py", "language": "python",
-                 "start_line": 1, "end_line": 50},
-            ],
-        })
+        rag._collection.get_by_filter = MagicMock(return_value=[
+            VectorMatch(
+                id="b", document="chunk B content",
+                metadata={"chunk_id": "b", "file_path": "app/foo.py",
+                          "language": "python", "start_line": 51, "end_line": 100},
+            ),
+            VectorMatch(
+                id="a", document="chunk A content",
+                metadata={"chunk_id": "a", "file_path": "app/foo.py",
+                          "language": "python", "start_line": 1, "end_line": 50},
+            ),
+        ])
 
         chunks = await rag.get_file("app/foo.py")
         assert chunks[0].start_line == 1
@@ -230,11 +254,13 @@ class TestGetFile:
     @pytest.mark.asyncio
     async def test_queries_by_file_path(self):
         rag = make_rag()
-        rag._collection.get = MagicMock(return_value={"documents": [], "metadatas": []})
+        rag._collection.get_by_filter = MagicMock(return_value=[])
 
         await rag.get_file("app/services/github.py")
-        call_kwargs = rag._collection.get.call_args.kwargs
-        assert call_kwargs["where"] == {"file_path": "app/services/github.py"}
+        # get_by_filter is called with the filter dict as its single argument.
+        call = rag._collection.get_by_filter.call_args
+        where = call.args[0] if call.args else call.kwargs.get("where", {})
+        assert where == {"file_path": "app/services/github.py"}
 
 
 # ---------------------------------------------------------------------------
@@ -242,16 +268,11 @@ class TestGetFile:
 # ---------------------------------------------------------------------------
 
 class TestClear:
-    def test_clears_and_recreates_collection(self):
+    def test_clears_collection(self):
+        """clear() delegates to the collection's clear() — backend handles details."""
         rag = make_rag()
-        rag._chroma = MagicMock()
-        new_col = MagicMock()
-        rag._chroma.get_or_create_collection.return_value = new_col
-
         rag.clear()
-
-        rag._chroma.delete_collection.assert_called_once()
-        assert rag._collection is new_col
+        rag._collection.clear.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
