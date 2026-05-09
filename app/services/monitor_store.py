@@ -73,33 +73,31 @@ class MonitorStore:
     # ------------------------------------------------------------------
 
     def _persist_record(self, record: dict[str, Any]) -> None:
-        from app.services.database import get_db
+        from app.services.database import engine, tables
         try:
-            conn = get_db()
-            try:
-                conn.execute(
-                    "INSERT INTO monitor_records (repo, pr_number, generated_at, data) VALUES (?, ?, ?, ?)",
-                    (record["repo"], record["pr_number"], record["generated_at"], json.dumps(record)),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            with engine.begin() as conn:
+                conn.execute(tables.monitor_records.insert().values(
+                    repo=record["repo"],
+                    pr_number=record["pr_number"],
+                    generated_at=record["generated_at"],
+                    data=json.dumps(record),
+                ))
         except Exception as exc:
             logger.warning("[MonitorStore] DB write failed: %s", exc)
 
     def _load_from_db(self) -> None:
-        from app.services.database import get_db
+        from sqlalchemy import select
+        from app.services.database import engine, tables
         try:
-            conn = get_db()
-            try:
-                rows = list(conn.execute(
-                    "SELECT data FROM monitor_records ORDER BY id DESC LIMIT 100"
-                ))
-            finally:
-                conn.close()
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    select(tables.monitor_records.c.data)
+                    .order_by(tables.monitor_records.c.id.desc())
+                    .limit(100)
+                ).all()
             # Load in chronological order (oldest first) into the deque
             for row in reversed(rows):
-                self._records.append(json.loads(row["data"]))
+                self._records.append(json.loads(row.data))
             if rows:
                 logger.info("[MonitorStore] Loaded %d records from DB", len(rows))
         except Exception as exc:

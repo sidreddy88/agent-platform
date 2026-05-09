@@ -162,30 +162,29 @@ class AgentStatusTracker:
 
     def get_runs_for_incident(self, incident_id: str) -> list[dict[str, Any]]:
         """Return all completed/failed runs for an incident from DB, oldest first."""
-        from app.services.database import get_db
+        from sqlalchemy import select
+        from app.services.database import engine, tables
         try:
-            conn = get_db()
-            try:
-                rows = list(conn.execute(
-                    "SELECT * FROM agent_runs WHERE incident_id = ? ORDER BY started_at ASC",
-                    (incident_id,),
-                ))
-            finally:
-                conn.close()
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    select(tables.agent_runs)
+                    .where(tables.agent_runs.c.incident_id == incident_id)
+                    .order_by(tables.agent_runs.c.started_at.asc())
+                ).all()
             return [
                 {
-                    "run_id": row["run_id"],
-                    "agent_name": row["agent_name"],
-                    "incident_id": row["incident_id"],
-                    "status": row["status"],
-                    "started_at": row["started_at"],
-                    "completed_at": row["completed_at"],
-                    "duration_ms": row["duration_ms"],
-                    "error_message": row["error_message"],
-                    "tool_calls": row["tool_calls"] or 0,
-                    "input_tokens": row["input_tokens"] or 0,
-                    "output_tokens": row["output_tokens"] or 0,
-                    "cost_usd": row["cost_usd"] or 0.0,
+                    "run_id": row.run_id,
+                    "agent_name": row.agent_name,
+                    "incident_id": row.incident_id,
+                    "status": row.status,
+                    "started_at": row.started_at,
+                    "completed_at": row.completed_at,
+                    "duration_ms": row.duration_ms,
+                    "error_message": row.error_message,
+                    "tool_calls": row.tool_calls or 0,
+                    "input_tokens": row.input_tokens or 0,
+                    "output_tokens": row.output_tokens or 0,
+                    "cost_usd": row.cost_usd or 0.0,
                 }
                 for row in rows
             ]
@@ -207,65 +206,51 @@ class AgentStatusTracker:
     # ------------------------------------------------------------------
 
     def _persist_run(self, run: AgentRun) -> None:
-        from app.services.database import get_db
+        from app.services.database import tables, upsert
         try:
-            conn = get_db()
-            try:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO agent_runs
-                        (run_id, agent_name, incident_id, status, started_at,
-                         completed_at, duration_ms, error_message, tool_calls,
-                         input_tokens, output_tokens, cost_usd)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        run.run_id,
-                        run.agent_name,
-                        run.incident_id,
-                        run.status,
-                        run.started_at.isoformat(),
-                        run.completed_at.isoformat() if run.completed_at else None,
-                        run.duration_ms,
-                        run.error_message,
-                        run.tool_calls,
-                        run.input_tokens,
-                        run.output_tokens,
-                        run.cost_usd,
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            upsert(tables.agent_runs, {
+                "run_id": run.run_id,
+                "agent_name": run.agent_name,
+                "incident_id": run.incident_id,
+                "status": run.status,
+                "started_at": run.started_at.isoformat(),
+                "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                "duration_ms": run.duration_ms,
+                "error_message": run.error_message,
+                "tool_calls": run.tool_calls,
+                "input_tokens": run.input_tokens,
+                "output_tokens": run.output_tokens,
+                "cost_usd": run.cost_usd,
+            })
         except Exception as exc:
             logger.warning("[AgentTracker] DB write failed: %s", exc)
 
     def _load_from_db(self) -> None:
-        from app.services.database import get_db
+        from sqlalchemy import select
+        from app.services.database import engine, tables
         try:
-            conn = get_db()
-            try:
-                rows = list(conn.execute(
-                    "SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 500"
-                ))
-            finally:
-                conn.close()
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    select(tables.agent_runs)
+                    .order_by(tables.agent_runs.c.started_at.desc())
+                    .limit(500)
+                ).all()
 
             # Load in chronological order into the history deque
             for row in reversed(rows):
                 run = AgentRun(
-                    run_id=row["run_id"],
-                    agent_name=row["agent_name"],
-                    incident_id=row["incident_id"],
-                    status=row["status"],
-                    started_at=datetime.fromisoformat(row["started_at"]),
-                    completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
-                    duration_ms=row["duration_ms"],
-                    error_message=row["error_message"],
-                    tool_calls=row["tool_calls"] or 0,
-                    input_tokens=row["input_tokens"] or 0,
-                    output_tokens=row["output_tokens"] or 0,
-                    cost_usd=row["cost_usd"] or 0.0,
+                    run_id=row.run_id,
+                    agent_name=row.agent_name,
+                    incident_id=row.incident_id,
+                    status=row.status,
+                    started_at=datetime.fromisoformat(row.started_at),
+                    completed_at=datetime.fromisoformat(row.completed_at) if row.completed_at else None,
+                    duration_ms=row.duration_ms,
+                    error_message=row.error_message,
+                    tool_calls=row.tool_calls or 0,
+                    input_tokens=row.input_tokens or 0,
+                    output_tokens=row.output_tokens or 0,
+                    cost_usd=row.cost_usd or 0.0,
                 )
                 self._history.append(run)
                 if run.status == "failed":

@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from app.services.database import get_db
+# database import is now via SQLAlchemy `engine` + `tables` inside each handler
 from app.services.incident_store import incident_store
 
 router = APIRouter(prefix="/failures", tags=["failures"])
@@ -99,21 +99,14 @@ def _error_description_for(incident_id: str) -> str:
 
 @router.get("")
 def list_failures(agent: Optional[str] = None, limit: int = 200):
-    conn = get_db()
-    try:
-        if agent:
-            rows = conn.execute(
-                "SELECT * FROM agent_failures WHERE agent_name = ? ORDER BY created_at DESC LIMIT ?",
-                (agent, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM agent_failures ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    from sqlalchemy import select
+    from app.services.database import engine, tables
+    stmt = select(tables.agent_failures).order_by(tables.agent_failures.c.created_at.desc()).limit(limit)
+    if agent:
+        stmt = stmt.where(tables.agent_failures.c.agent_name == agent)
+    with engine.connect() as conn:
+        rows = conn.execute(stmt).all()
+    return [dict(r._mapping) for r in rows]
 
 
 @router.post("", status_code=201)
@@ -128,44 +121,31 @@ def create_failure(body: CreateFailureBody):
     error_desc = _error_description_for(body.incident_id)
     created_at = datetime.utcnow().isoformat()
 
-    conn = get_db()
-    try:
-        conn.execute(
-            """
-            INSERT INTO agent_failures
-                (id, incident_id, run_id, agent_name, failure_category,
-                 failure_reason, expected_behavior, actual_behavior,
-                 error_description, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                failure_id,
-                body.incident_id,
-                body.run_id,
-                body.agent_name,
-                body.failure_category,
-                body.failure_reason,
-                body.expected_behavior,
-                actual,
-                error_desc,
-                created_at,
-            ),
-        )
-        conn.commit()
-        return {"id": failure_id, "created_at": created_at}
-    finally:
-        conn.close()
+    from app.services.database import engine, tables
+    with engine.begin() as conn:
+        conn.execute(tables.agent_failures.insert().values(
+            id=failure_id,
+            incident_id=body.incident_id,
+            run_id=body.run_id,
+            agent_name=body.agent_name,
+            failure_category=body.failure_category,
+            failure_reason=body.failure_reason,
+            expected_behavior=body.expected_behavior,
+            actual_behavior=actual,
+            error_description=error_desc,
+            created_at=created_at,
+        ))
+    return {"id": failure_id, "created_at": created_at}
 
 
 @router.get("/export", response_class=PlainTextResponse)
 def export_failures():
     """Export all failures as JSONL — one JSON object per line."""
-    conn = get_db()
-    try:
+    from sqlalchemy import select
+    from app.services.database import engine, tables
+    with engine.connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM agent_failures ORDER BY created_at ASC"
-        ).fetchall()
-        lines = [json.dumps(dict(r)) for r in rows]
-        return "\n".join(lines)
-    finally:
-        conn.close()
+            select(tables.agent_failures).order_by(tables.agent_failures.c.created_at.asc())
+        ).all()
+    lines = [json.dumps(dict(r._mapping)) for r in rows]
+    return "\n".join(lines)

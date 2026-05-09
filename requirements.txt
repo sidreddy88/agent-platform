@@ -11,3 +11,7 @@ openai>=2.0.0
 litellm>=1.40.0
 httpx>=0.28.0
 langfuse>=4.0.0
+# Postgres support — the same code path also keeps working with the local
+# SQLite file when DATABASE_URL is unset.
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
