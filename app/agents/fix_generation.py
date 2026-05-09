@@ -52,6 +52,14 @@ class FixResult:
     blast_radius_violations: list[str] = field(default_factory=list)
     target_file: str | None = None
     target_function: str | None = None
+    # Self-assessed verdict from the fix agent. Mirrors the diagnosis
+    # confidence/escalate pattern so a shaky fix opens a human approval gate
+    # instead of a PR. confidence < 0.70 OR escalate=True triggers the
+    # human-in-the-loop escalation path in IncidentLoop.
+    confidence: float | None = None       # 0.0–1.0, None if the model didn't emit one
+    escalate: bool = False
+    escalate_reason: str | None = None
+    blast_radius_addressed: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -259,11 +267,16 @@ class FixGenerationAgent(BaseAgent):
                 logger.error("[FixGen] Failed to fetch file: %s", exc)
                 return _fail(f"Could not fetch {file_path}: {exc}", branch=branch_name)
 
-        # ── 2b. Fetch call chain — imports + callers ───────────────────
-        call_chain = await self._fetch_call_chain(file_path, function_name, content)
-        if call_chain:
-            steps.append(f"✓ Call chain: {len(call_chain.splitlines())} lines of context fetched")
-            logger.info("[FixGen] Call chain context fetched for %s", file_path)
+        # ── 2b. Fetch context — imports (Tier 3), callers + tests + types (Tier 2) ──
+        context_bundle = await self._fetch_call_chain(file_path, function_name, content)
+        n_items = sum(len(v) for v in context_bundle.values())
+        if n_items:
+            steps.append(
+                f"✓ Context fetched: {len(context_bundle['callers'])} caller(s), "
+                f"{len(context_bundle['tests'])} test(s), "
+                f"{len(context_bundle['imports'])} import(s)"
+            )
+            logger.info("[FixGen] Context bundle for %s: %d items", file_path, n_items)
 
         # ── 2c. For null/undefined errors, trace back to the source function ──
         # The current file may be the consumer of the undefined value, not the producer.
@@ -274,20 +287,19 @@ class FixGenerationAgent(BaseAgent):
                 src_path, src_fn, src_content = src
                 steps.append(f"✓ Source trace: undefined value produced by '{src_fn}' in {src_path} — retargeting")
                 logger.info("[FixGen] Retargeting fix to source: %s → %s", src_path, src_fn)
-                # Include original caller file as call chain context so the LLM
-                # understands how the return value is used downstream
-                caller_context = (
-                    f"\nCALLER CONTEXT (the function that uses the return value of '{src_fn}'):\n"
-                    f"--- {file_path} ---\n{content[:2000]}\n"
-                )
+                # Promote the original consumer file into Tier 2 callers — it's the
+                # function that uses the (now-broken) return value.
+                consumer_label = f"{file_path} :: {function_name} (uses return value of {src_fn})"
+                context_bundle["callers"].append((consumer_label, content[:2000]))
                 file_path = src_path
                 function_name = src_fn
                 content = src_content
-                call_chain = (call_chain or "") + caller_context
 
         # ── 3. Generate fix via LLM ────────────────────────────────────
         try:
-            old_function, new_function, patches = await self._generate_fix(content, function_name, incident, file_path, call_chain)
+            old_function, new_function, patches, fix_verdict = await self._generate_fix(
+                content, function_name, incident, file_path, context_bundle,
+            )
         except Exception as exc:
             steps.append(f"✗ LLM fix generation failed: {exc}")
             logger.error("[FixGen] LLM error: %s", exc)
@@ -339,11 +351,11 @@ class FixGenerationAgent(BaseAgent):
                     alt_content, _ = await self._github.get_file_contents(
                         self._owner, self._repo, alt_path, ref=PR_BASE
                     )
-                    alt_call_chain = await self._fetch_call_chain(
+                    alt_context_bundle = await self._fetch_call_chain(
                         alt_path, alt_fn or function_name, alt_content
                     )
-                    alt_old, alt_new, alt_patches = await self._generate_fix(
-                        alt_content, alt_fn or function_name, incident, alt_path, alt_call_chain,
+                    alt_old, alt_new, alt_patches, alt_verdict = await self._generate_fix(
+                        alt_content, alt_fn or function_name, incident, alt_path, alt_context_bundle,
                         test_failures=(
                             f"PREVIOUS FIX WAS REJECTED — critique said:\n{critique}\n\n"
                             f"Do NOT add null guards at the crash site. Fix the function that "
@@ -354,10 +366,11 @@ class FixGenerationAgent(BaseAgent):
                         file_path = alt_path
                         function_name = alt_fn or function_name
                         content = alt_content
-                        call_chain = alt_call_chain
+                        context_bundle = alt_context_bundle
                         old_function = alt_old
                         new_function = alt_new
                         patches = alt_patches
+                        fix_verdict = alt_verdict
                         critique = await self._critique_fix(old_function, new_function, incident, file_path)
                         steps.append(f"✓ Alt-frame critique: {critique[:120]}")
                     else:
@@ -402,10 +415,12 @@ class FixGenerationAgent(BaseAgent):
 
             steps.append(f"↻ Regenerating fix with test failure context (attempt {attempt + 1}/{_MAX_ATTEMPTS})")
             try:
-                old_function, new_function, patches = await self._generate_fix(
-                    content, function_name, incident, file_path, call_chain,
+                old_function, new_function, patches, retry_verdict = await self._generate_fix(
+                    content, function_name, incident, file_path, context_bundle,
                     test_failures=_test_failures,
                 )
+                if retry_verdict is not None:
+                    fix_verdict = retry_verdict
             except Exception as exc:
                 steps.append(f"✗ LLM retry failed: {exc}")
                 return _fail(f"LLM retry error: {exc}", branch=branch_name)
@@ -485,6 +500,21 @@ class FixGenerationAgent(BaseAgent):
             steps.append(f"✗ GitHub error: {exc}")
             return _fail(str(exc), issue_url, branch_name)
 
+        # Persist the fix-agent's self-assessed verdict. None defaults to
+        # confidence=0.75 (above the 0.70 gate) so the existing approval
+        # flow continues unchanged when the LLM doesn't emit a verdict.
+        fv = fix_verdict or {}
+        verdict_confidence: float | None
+        try:
+            verdict_confidence = float(fv["confidence"]) if "confidence" in fv else None
+        except (TypeError, ValueError):
+            verdict_confidence = None
+        verdict_escalate = bool(fv.get("escalate", False))
+        verdict_reason = fv.get("escalate_reason") if isinstance(fv.get("escalate_reason"), str) else None
+        verdict_blast_addressed = (
+            bool(fv["blast_radius_addressed"]) if "blast_radius_addressed" in fv else None
+        )
+
         return FixResult(
             issue_url=issue_url,
             pr_url=pr_url,
@@ -496,6 +526,10 @@ class FixGenerationAgent(BaseAgent):
             commit_sha=commit_sha,
             target_file=file_path,
             target_function=function_name,
+            confidence=verdict_confidence,
+            escalate=verdict_escalate,
+            escalate_reason=verdict_reason,
+            blast_radius_addressed=verdict_blast_addressed,
         ), steps
 
     # ------------------------------------------------------------------
@@ -1006,33 +1040,38 @@ class FixGenerationAgent(BaseAgent):
 
         return None
 
-    async def _fetch_call_chain(self, file_path: str, function_name: str, content: str) -> str:
-        """
-        Fetch context from files that are imported by the target file and files that call
-        the target function. Returns a formatted string to inject before the fix prompt.
+    async def _fetch_call_chain(
+        self,
+        file_path: str,
+        function_name: str,
+        content: str,
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Fetch related-file context for tiered prompt assembly.
 
-        Two sources:
-        1. Local imports parsed from the file — what the broken function depends on
-        2. Callers found via GitHub code search — what passes data into the broken function
-        """
-        sections: list[str] = []
+        Returns a dict with three keys, each a list of (path, content) pairs:
+          - "callers": files that reference the target function (Tier 2)
+          - "tests":   existing test files for the target file (Tier 2)
+          - "imports": local imports from the target file (Tier 3)
 
-        # ── 1. Parse local imports from the file ──────────────────────
-        import_paths = self._parse_local_imports(file_path, content)
-        fetched_imports = 0
-        for imp_path in import_paths[:4]:
+        TS/TSX files also pick up type-definition matches via a separate
+        search for `interface <fn>` / `type <fn>`.
+        """
+        callers: list[tuple[str, str]] = []
+        tests: list[tuple[str, str]] = []
+        imports: list[tuple[str, str]] = []
+
+        # ── Imports (Tier 3) ──────────────────────────────────────────
+        for imp_path in self._parse_local_imports(file_path, content)[:4]:
             try:
                 imp_content, _ = await self._github.get_file_contents(
                     self._owner, self._repo, imp_path, ref=PR_BASE
                 )
-                # Cap each imported file to 1200 chars — enough for config/setup context
-                sections.append(f"--- IMPORT: {imp_path} ---\n{imp_content[:1200]}")
-                fetched_imports += 1
+                imports.append((imp_path, imp_content[:1200]))
                 logger.debug("[FixGen] Call chain: fetched import %s", imp_path)
             except Exception:
                 pass
 
-        # ── 2. Find callers via code search ───────────────────────────
+        # ── Callers (Tier 2) ──────────────────────────────────────────
         try:
             caller_results = await self._github.search_code(
                 self._owner, self._repo, function_name
@@ -1046,14 +1085,77 @@ class FixGenerationAgent(BaseAgent):
                     caller_content, _ = await self._github.get_file_contents(
                         self._owner, self._repo, path, ref=PR_BASE
                     )
-                    sections.append(f"--- CALLER: {path} ---\n{caller_content[:1200]}")
+                    callers.append((path, caller_content[:1200]))
                     logger.debug("[FixGen] Call chain: fetched caller %s", path)
                 except Exception:
                     pass
         except Exception as exc:
             logger.debug("[FixGen] Call chain search failed: %s", exc)
 
-        return "\n\n".join(sections)
+        # ── Tests (Tier 2) ────────────────────────────────────────────
+        # Existing tests are constraints — the fix must not break them.
+        test_candidates, _ = self._test_file_candidates(file_path)
+        for test_path in test_candidates[:3]:
+            try:
+                test_content, _ = await self._github.get_file_contents(
+                    self._owner, self._repo, test_path, ref=PR_BASE
+                )
+                tests.append((test_path, test_content[:1500]))
+                logger.debug("[FixGen] Call chain: fetched test %s", test_path)
+                break  # one matching test file is plenty
+            except Exception:
+                continue
+
+        # ── Type definitions for TS / TSX (Tier 2) ─────────────────────
+        ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+        if ext in ("ts", "tsx"):
+            for query in (f"interface {function_name}", f"type {function_name}"):
+                try:
+                    type_results = await self._github.search_code(
+                        self._owner, self._repo, query
+                    )
+                    for result in type_results[:2]:
+                        path = result.get("path", "")
+                        if not path or path == file_path or "node_modules" in path:
+                            continue
+                        if any(p == path for p, _ in callers):
+                            continue
+                        fragment = (result.get("fragment") or "")[:600]
+                        if fragment:
+                            callers.append((f"{path} (type)", fragment))
+                except Exception:
+                    pass
+
+        return {"callers": callers, "tests": tests, "imports": imports}
+
+    def _format_tier_block(
+        self,
+        label: str,
+        items: list[tuple[str, str]],
+        per_item_cap: int = 1200,
+    ) -> str:
+        """Render a list of (path, content) pairs as a single labelled block."""
+        if not items:
+            return ""
+        lines: list[str] = []
+        for path, body in items:
+            lines.append(f"--- {label}: {path} ---\n{(body or '')[:per_item_cap]}")
+        return "\n\n".join(lines)
+
+    def _format_blast_radius(self, blast_radius: list[dict]) -> str:
+        """Render diagnosis_blast_radius into a Tier 2 block."""
+        if not blast_radius:
+            return ""
+        lines: list[str] = []
+        for entry in blast_radius:
+            file = entry.get("file", "")
+            fn = entry.get("function", "") or "(top-level)"
+            snippet = (entry.get("snippet", "") or "").strip()
+            if not file:
+                continue
+            head = f"--- CALLER (from diagnosis): {file} :: {fn} ---"
+            lines.append(f"{head}\n{snippet}" if snippet else head)
+        return "\n\n".join(lines)
 
     def _parse_local_imports(self, file_path: str, content: str) -> list[str]:
         """
@@ -1171,6 +1273,44 @@ class FixGenerationAgent(BaseAgent):
                 "required": ["old_snippet", "new_snippet"],
             },
         },
+        {
+            "name": "final_verdict",
+            "description": (
+                "OPTIONAL last call — emit your self-assessed verdict on the fix you just made. "
+                "Call this AFTER apply_edit + any patch_line calls, RIGHT BEFORE end_turn. "
+                "If you skip it, the runtime defaults to confidence=0.75, escalate=false. "
+                "Use confidence < 0.70 OR escalate=true when you're unsure: a shaky fix opens "
+                "a human approval gate instead of a PR. Be honest — escalation is correct, "
+                "guessing is not."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "confidence": {
+                        "type": "number",
+                        "description": "0.0 – 1.0. < 0.70 routes to human approval.",
+                    },
+                    "escalate": {
+                        "type": "boolean",
+                        "description": "True if a human should review before the PR opens.",
+                    },
+                    "escalate_reason": {
+                        "type": "string",
+                        "description": (
+                            "Required if escalate=true. Examples: "
+                            "'didn't read all Tier 2 callers', "
+                            "'unsure about contract change impact', "
+                            "'fix may not handle all input shapes'."
+                        ),
+                    },
+                    "blast_radius_addressed": {
+                        "type": "boolean",
+                        "description": "True if every Tier 2 caller still works with this fix.",
+                    },
+                },
+                "required": ["confidence"],
+            },
+        },
     ]
 
     def _apply_all_edits(
@@ -1189,16 +1329,30 @@ class FixGenerationAgent(BaseAgent):
 
     async def _generate_fix(
         self, content: str, function_name: str, incident: IncidentState,
-        file_path: str = "", call_chain: str = "", test_failures: str = ""
-    ) -> tuple[str, str, list[tuple[str, str]]]:
+        file_path: str = "",
+        context_bundle: dict[str, list[tuple[str, str]]] | None = None,
+        test_failures: str = "",
+    ) -> tuple[str, str, list[tuple[str, str]], dict | None]:
         """
         Agentic fix generation using Claude tool_use — mirrors how Claude Code works.
 
         The LLM receives the target file and tools to read any other files it needs.
         It calls apply_edit for the primary function fix, then patch_line for adjacent
-        issues (wrong model IDs, missing error handling, stale values, etc.).
-        Returns (old_function, new_function, patches) or ("", "", []) on failure.
+        issues (wrong model IDs, missing error handling, stale values, etc.). Optionally
+        the LLM emits a `final_verdict` tool call with self-assessed confidence/escalate.
+        Returns (old_function, new_function, patches, verdict) — verdict is None when the
+        LLM didn't emit one. On failure: ("", "", [], verdict_or_None).
+
+        Context is structured into three labelled tiers:
+          - Tier 1: the file containing the broken function (most important).
+          - Tier 2: callers / tests / type defs the fix MUST NOT BREAK
+                    (constraints, not just information).
+          - Tier 3: imports + harness docs (background).
+        Diagnosis-supplied blast_radius takes priority over caller search
+        results when populated.
         """
+        bundle = context_bundle or {"callers": [], "tests": [], "imports": []}
+
         human_notes_section = (
             f"\nHUMAN FEEDBACK (from previous attempt — MUST follow):\n{incident.human_notes}\n"
             if incident.human_notes else ""
@@ -1207,9 +1361,37 @@ class FixGenerationAgent(BaseAgent):
             f"\nTEST FAILURES from previous attempt — new fix must not break these:\n{test_failures}\n"
             if test_failures else ""
         )
-        call_chain_hint = (
-            f"\nRELATED FILES (imports / callers — use read_file to explore them):\n{call_chain[:1000]}\n"
-            if call_chain else ""
+
+        # Contract-change banner: surface at the top so it can't be missed.
+        contract_change = (incident.diagnosis_contract_change or "none").lower()
+        contract_warning = ""
+        if contract_change != "none":
+            detail = incident.diagnosis_contract_change_detail or ""
+            contract_warning = (
+                f"\n⚠ CONTRACT CHANGE: this fix changes the function's "
+                f"{contract_change.replace('_', ' ')}"
+                + (f" — {detail}" if detail else "")
+                + ". Every Tier 2 caller must be updated.\n"
+            )
+
+        # Tier 2: prefer diagnosis blast_radius (curated), fall back to callers
+        # found via code search. Tests + type defs are always added.
+        tier2_blast = self._format_blast_radius(incident.diagnosis_blast_radius or [])
+        tier2_callers_fallback = self._format_tier_block("CALLER", bundle.get("callers", []))
+        tier2_callers = tier2_blast or tier2_callers_fallback
+        tier2_tests = self._format_tier_block("TEST", bundle.get("tests", []), per_item_cap=1500)
+        tier2_blocks = "\n\n".join(b for b in (tier2_callers, tier2_tests) if b)
+
+        tier2_section = (
+            "\n## TIER 2 — Callers, tests, and type contracts your fix MUST NOT BREAK\n"
+            f"{tier2_blocks}\n" if tier2_blocks else ""
+        )
+
+        # Tier 3: imports — context for understanding only, not constraints.
+        tier3_blocks = self._format_tier_block("IMPORT", bundle.get("imports", []))
+        tier3_section = (
+            "\n## TIER 3 — Background context (read for understanding, not as a constraint)\n"
+            f"{tier3_blocks}\n" if tier3_blocks else ""
         )
         additional_fix_section = ""
         if incident.diagnosis_additional_fix:
@@ -1251,9 +1433,12 @@ class FixGenerationAgent(BaseAgent):
             f"ERROR: {incident.error_event.description or incident.error_event.title}\n"
             f"ROOT CAUSE: {incident.diagnosis}\n"
             f"TARGET FUNCTION: {function_name} in {file_path}\n"
-            f"{human_notes_section}{test_failures_section}{call_chain_hint}{additional_fix_section}"
+            f"{contract_warning}{human_notes_section}{test_failures_section}{additional_fix_section}"
+            f"\n## TIER 1 — Code you are changing (most important)\n"
             f"FILE: {file_path}\n{content}\n"
             f"{function_ref}"
+            f"{tier2_section}"
+            f"{tier3_section}"
             f"ROOT CAUSE RULES (violation = wrong fix):\n"
             f"1. Fix the cause, not the symptom. No null guards / optional chaining / try-catch at crash sites.\n"
             f"2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value — "
@@ -1288,6 +1473,7 @@ class FixGenerationAgent(BaseAgent):
         messages: list[dict] = [{"role": "user", "content": initial_prompt}]
         edit_result: dict | None = None
         patch_calls: list[dict] = []
+        verdict: dict | None = None
         _SKIP = ("node_modules", "dist/", "build/", ".min.js")
         import json as _json
 
@@ -1298,7 +1484,7 @@ class FixGenerationAgent(BaseAgent):
                 )
             except Exception as exc:
                 logger.error("[FixGen] Agentic LLM call failed (iteration %d): %s", iteration, exc)
-                return "", "", []
+                return "", "", [], None
 
             if stop_reason == "end_turn" or not tool_calls:
                 if not edit_result:
@@ -1352,18 +1538,27 @@ class FixGenerationAgent(BaseAgent):
                     except Exception as exc:
                         result = f"Search failed: {exc}"
                     logger.debug("[FixGen] Agentic search_code: %s", query)
+                elif name == "final_verdict":
+                    verdict = tc["input"]
+                    logger.info(
+                        "[FixGen] Agentic verdict: confidence=%s escalate=%s reason=%s",
+                        verdict.get("confidence"),
+                        verdict.get("escalate"),
+                        verdict.get("escalate_reason"),
+                    )
+                    result = "✓ verdict recorded — call end_turn now."
                 else:
                     result = f"Unknown tool: {name}"
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
         if not edit_result:
             logger.error("[FixGen] Agentic fix: no apply_edit call after %d iterations", iteration + 1)
-            return "", "", []
+            return "", "", [], verdict
 
         new_text = edit_result.get("new_text", "")
         if not new_text:
             logger.error("[FixGen] Agentic apply_edit: empty new_text")
-            return "", "", []
+            return "", "", [], verdict
 
         # Prefer pre-extracted old_text; fall back to LLM-supplied old_text
         if extracted_old:
@@ -1372,13 +1567,13 @@ class FixGenerationAgent(BaseAgent):
             llm_old = edit_result.get("old_text", "").strip()
             if not llm_old:
                 logger.error("[FixGen] Agentic apply_edit: no old_text for %s (not pre-extracted and not provided)", function_name)
-                return "", "", []
+                return "", "", [], verdict
             old_text = llm_old
             logger.info("[FixGen] Agentic apply_edit: using LLM-supplied old_text for %s", function_name)
 
         if old_text not in content and old_text.strip() not in content:
             logger.error("[FixGen] Agentic apply_edit: old_text not found in %s", file_path)
-            return "", "", []
+            return "", "", [], verdict
 
         patches = [
             (tc["input"]["old_snippet"], tc["input"]["new_snippet"])
@@ -1389,7 +1584,7 @@ class FixGenerationAgent(BaseAgent):
             "[FixGen] Agentic fix: %d chars → %d chars in %s, patch_line calls=%d",
             len(old_text), len(new_text), file_path, len(patches),
         )
-        return old_text, new_text.strip(), patches
+        return old_text, new_text.strip(), patches, verdict
 
     def _extract_test_failures(self, output: str) -> str:
         """Extract the meaningful lines from jest test output for LLM context."""
@@ -1410,8 +1605,19 @@ class FixGenerationAgent(BaseAgent):
         self, old_code: str, new_code: str, incident: IncidentState, file_path: str = ""
     ) -> str:
         """
-        Self-critique pass (Haiku) with RAG context. Asks: does the fix address the
-        root cause or just suppress the symptom? Returns a short plain-text assessment.
+        Self-critique pass (Haiku) — four explicit checks instead of one.
+
+        The original critique focused on symptom-vs-root-cause. That signal is
+        retained (load-bearing — it catches null-guard regressions). On top of
+        it we ask:
+          1. Does the fix break any Tier 2 caller (from diagnosis blast_radius)?
+          2. Did you handle the edge cases mentioned in the diagnosis?
+          3. Is there a simpler fix that achieves the same result?
+          4. Does any other file need updating that you didn't touch?
+
+        Returns a short plain-text assessment ending in a verdict line:
+        `LOOKS CORRECT` / `NEEDS REVIEW` / `LIKELY WRONG`. The agentic retry
+        loop reads `LIKELY WRONG` to fire an alternate-frame retry.
         """
         rag_section = ""
         if self._rag is not None and file_path:
@@ -1430,13 +1636,32 @@ class FixGenerationAgent(BaseAgent):
             except Exception as exc:
                 logger.debug("[FixGen] Critique RAG skipped: %s", exc)
 
+        # Surface diagnosis blast_radius callers as Tier 2 constraints in the
+        # critique prompt so check #1 can actually be evaluated.
+        blast_section = ""
+        if incident.diagnosis_blast_radius:
+            blast_section = "\nTIER 2 CALLERS (must not break):\n" + self._format_blast_radius(
+                incident.diagnosis_blast_radius
+            )
+
+        contract_section = ""
+        cc = (incident.diagnosis_contract_change or "none").lower()
+        if cc != "none":
+            detail = incident.diagnosis_contract_change_detail or ""
+            contract_section = (
+                f"\nCONTRACT CHANGE: this fix changes the function's "
+                f"{cc.replace('_', ' ')}"
+                + (f" — {detail}" if detail else "")
+                + ". Every Tier 2 caller above must already work with the new contract or also be updated."
+            )
+
         prompt = (
-            f"A production fix was generated. Assess whether it correctly addresses the root cause.\n\n"
+            f"A production fix was generated. Critique it as a skeptical senior reviewer.\n\n"
             f"ROOT CAUSE: {incident.diagnosis}\n"
             f"ERROR: {incident.error_event.description or incident.error_event.title}\n\n"
             f"OLD CODE:\n{old_code[:800]}\n\n"
             f"NEW CODE:\n{new_code[:800]}\n"
-            f"{rag_section}\n\n"
+            f"{blast_section}{contract_section}{rag_section}\n\n"
             f"SYMPTOM-FIX CHECKLIST — flag immediately if the new code:\n"
             f"- Adds a null check, optional chaining (?.), nullish coalescing (??), or try/catch\n"
             f"  at or near the crash line without fixing the function that produces the null value\n"
@@ -1445,12 +1670,17 @@ class FixGenerationAgent(BaseAgent):
             f"- Converts an invalid value instead of preventing it from being invalid in the first place\n"
             f"- Fixes only the happy-path return of a producer function but leaves error/early-exit\n"
             f"  return paths still missing the expected field — all return paths must be complete\n\n"
-            f"Answer in 2-3 sentences:\n"
-            f"1. Does the fix address the root cause, or does it just suppress/convert the error?\n"
-            f"   If related context above shows the real fix should be upstream (e.g. API call config,\n"
-            f"   input validation at source), flag it as a symptom fix.\n"
-            f"2. What edge cases or risks does the fix introduce?\n"
-            f"3. Verdict: LOOKS CORRECT / NEEDS REVIEW / LIKELY WRONG"
+            f"FOUR EXPLICIT CHECKS — answer each in one sentence:\n"
+            f"1. Does the fix BREAK any Tier 2 caller listed above? "
+            f"(Walk the callers; check each still works with the new function shape.)\n"
+            f"2. Did the fix handle every edge case implied by the root cause / diagnosis?\n"
+            f"3. Is there a SIMPLER fix that achieves the same result?\n"
+            f"4. Does any other file need updating that this fix didn't touch? "
+            f"(Especially callers if the contract changed.)\n\n"
+            f"Then answer:\n"
+            f"5. Does the fix address the root cause, or does it just suppress/convert the error? "
+            f"Apply the symptom-fix checklist above.\n\n"
+            f"FINAL LINE — must be exactly one of: LOOKS CORRECT / NEEDS REVIEW / LIKELY WRONG"
         )
         try:
             return await self._llm_haiku.complete(
