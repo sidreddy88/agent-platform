@@ -1,0 +1,153 @@
+# ECS Fargate cluster + service for the agent platform.
+#
+# Cluster is dedicated (separate from any existing AllInterviews cluster
+# you run today) for blast-radius isolation: the agent platform's
+# bursty LLM calls and chaos-test-shaped behaviour can't take down a
+# production workload sharing the same cluster.
+
+resource "aws_ecs_cluster" "agent_platform" {
+  name = local.name
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+}
+
+resource "aws_ecs_cluster_capacity_providers" "fargate" {
+  cluster_name       = aws_ecs_cluster.agent_platform.name
+  capacity_providers = ["FARGATE"]
+
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = 1
+    base              = 1
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Task definition
+# ---------------------------------------------------------------------------
+
+locals {
+  # Environment variables that aren't secrets — injected directly.
+  task_env = [
+    { name = "PORT",                  value = tostring(var.container_port) },
+    { name = "AWS_REGION",            value = var.region },
+    { name = "ENVIRONMENT",           value = var.environment },
+    { name = "PYTHONUNBUFFERED",      value = "1" },
+    { name = "HARNESS_DOCS_PATH",     value = "targets/allinterviews" },
+  ]
+
+  # Every SSM parameter the container should pull at start. The ECS
+  # agent reads these *via the task execution role* and exposes them
+  # as env vars to the container.
+  task_secrets = concat(
+    [
+      {
+        name      = "DATABASE_URL"
+        valueFrom = aws_ssm_parameter.database_url.arn
+      },
+    ],
+    [
+      for k in local.secret_keys : {
+        name      = k
+        valueFrom = aws_ssm_parameter.secret[k].arn
+      }
+    ],
+  )
+}
+
+resource "aws_ecs_task_definition" "agent_platform" {
+  family                   = local.name
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory_mb
+  execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.task_runtime.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "agent-platform"
+      image     = "${aws_ecr_repository.agent_platform.repository_url}:${var.image_tag}"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = var.container_port
+          protocol      = "tcp"
+        },
+      ]
+
+      environment = local.task_env
+      secrets     = local.task_secrets
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.agent_platform.name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+
+      # Container-level health check supplements the ALB target group's
+      # check; ECS marks the task unhealthy and replaces it if this
+      # consistently fails. Same /health endpoint as the ALB uses.
+      healthCheck = {
+        command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:${var.container_port}/health || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30
+      }
+    },
+  ])
+}
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+
+resource "aws_ecs_service" "agent_platform" {
+  name            = local.name
+  cluster         = aws_ecs_cluster.agent_platform.id
+  task_definition = aws_ecs_task_definition.agent_platform.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  # ECS deployment circuit breaker: if a new task fails health checks
+  # repeatedly, ECS rolls back to the previous task definition
+  # automatically rather than leaving the service stuck.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.ecs_task.id]
+    assign_public_ip = true   # required for Fargate without NAT
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.agent_platform.arn
+    container_name   = "agent-platform"
+    container_port   = var.container_port
+  }
+
+  health_check_grace_period_seconds = 60
+
+  # CI/CD updates the task definition's `image` field — but the service
+  # tracks the latest task def revision, so we don't want Terraform to
+  # roll back to whatever's in `var.image_tag` on every apply.
+  lifecycle {
+    ignore_changes = [task_definition, desired_count]
+  }
+
+  depends_on = [aws_lb_listener.https]
+}
