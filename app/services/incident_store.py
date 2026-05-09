@@ -13,7 +13,8 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from app.models.events import ErrorEvent, IncidentState, IncidentStatus
-from app.services.database import get_db
+# NOTE: legacy get_db() reference removed — call sites use the SQLAlchemy
+# `engine` + `tables` API (or the `upsert` helper) directly.
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +121,14 @@ class IncidentStore:
 
     def delete(self, incident_id: str) -> None:
         self._incidents.pop(incident_id, None)
-        conn = get_db()
+        from app.services.database import engine, tables
         try:
-            conn.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
-            conn.commit()
+            with engine.begin() as conn:
+                conn.execute(
+                    tables.incidents.delete().where(tables.incidents.c.id == incident_id)
+                )
         except Exception as exc:
             logger.warning("[IncidentStore] DB delete failed: %s", exc)
-        finally:
-            conn.close()
 
     def clear(self) -> int:
         """Delete all non-resolved incidents. Resolved incidents are preserved. Returns count deleted."""
@@ -139,18 +140,15 @@ class IncidentStore:
             return 0
         for incident in to_delete:
             del self._incidents[incident.id]
-        conn = get_db()
+        from app.services.database import engine, tables
         try:
-            placeholders = ",".join("?" * len(to_delete))
-            conn.execute(
-                f"DELETE FROM incidents WHERE id IN ({placeholders})",
-                [i.id for i in to_delete],
-            )
-            conn.commit()
+            ids = [i.id for i in to_delete]
+            with engine.begin() as conn:
+                conn.execute(
+                    tables.incidents.delete().where(tables.incidents.c.id.in_(ids))
+                )
         except Exception as exc:
             logger.warning("[IncidentStore] DB clear failed: %s", exc)
-        finally:
-            conn.close()
         return len(to_delete)
 
     # ------------------------------------------------------------------
@@ -162,17 +160,11 @@ class IncidentStore:
 
     def set_pr_for_resource(self, resource_id: str, pr_url: str) -> None:
         self._monitor_pr_map[resource_id] = pr_url
-        conn = get_db()
+        from app.services.database import tables, upsert
         try:
-            conn.execute(
-                "INSERT OR REPLACE INTO monitor_pr_map (resource_id, pr_url) VALUES (?, ?)",
-                (resource_id, pr_url),
-            )
-            conn.commit()
+            upsert(tables.monitor_pr_map, {"resource_id": resource_id, "pr_url": pr_url})
         except Exception as exc:
             logger.warning("[IncidentStore] DB write (monitor_pr_map) failed: %s", exc)
-        finally:
-            conn.close()
 
     # ------------------------------------------------------------------
     # Metrics
@@ -199,22 +191,16 @@ class IncidentStore:
     # ------------------------------------------------------------------
 
     def _upsert_incident(self, incident: IncidentState) -> None:
-        conn = get_db()
+        from app.services.database import tables, upsert
         try:
-            conn.execute(
-                "INSERT OR REPLACE INTO incidents (id, status, detected_at, data) VALUES (?, ?, ?, ?)",
-                (
-                    incident.id,
-                    incident.status.value,
-                    incident.detected_at.isoformat(),
-                    incident.model_dump_json(),
-                ),
-            )
-            conn.commit()
+            upsert(tables.incidents, {
+                "id": incident.id,
+                "status": incident.status.value,
+                "detected_at": incident.detected_at.isoformat(),
+                "data": incident.model_dump_json(),
+            })
         except Exception as exc:
             logger.warning("[IncidentStore] DB upsert failed: %s", exc)
-        finally:
-            conn.close()
 
     def _load(self) -> None:
         self._load_from_db()
@@ -222,19 +208,19 @@ class IncidentStore:
             self._migrate_from_json()
 
     def _load_from_db(self) -> None:
-        conn = get_db()
+        from sqlalchemy import select
+        from app.services.database import engine, tables
         try:
-            for row in conn.execute("SELECT data FROM incidents"):
-                incident = IncidentState.model_validate_json(row["data"])
-                self._incidents[incident.id] = incident
-            for row in conn.execute("SELECT resource_id, pr_url FROM monitor_pr_map"):
-                self._monitor_pr_map[row["resource_id"]] = row["pr_url"]
+            with engine.connect() as conn:
+                for row in conn.execute(select(tables.incidents.c.data)).all():
+                    incident = IncidentState.model_validate_json(row.data)
+                    self._incidents[incident.id] = incident
+                for row in conn.execute(select(tables.monitor_pr_map)).all():
+                    self._monitor_pr_map[row.resource_id] = row.pr_url
             if self._incidents:
                 logger.info("[IncidentStore] Loaded %d incidents from DB", len(self._incidents))
         except Exception as exc:
             logger.warning("[IncidentStore] DB load failed: %s", exc)
-        finally:
-            conn.close()
 
     def _migrate_from_json(self) -> None:
         if not os.path.exists(_LEGACY_JSON):

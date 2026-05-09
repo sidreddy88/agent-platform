@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     # the long-term answer).
     cloudwatch_webhook_token: str = ""
 
+    # SQLAlchemy connection URL.
+    #   sqlite:///agent_platform.db    (default — local dev, no setup)
+    #   postgresql+psycopg://user:pw@host:5432/agent_platform   (RDS in prod)
+    # Empty / unset falls back to the local SQLite file for backwards
+    # compatibility with existing call sites and stored data.
+    database_url: str = ""
+
     class Config:
         env_file = ".env"
 

@@ -71,17 +71,14 @@ class ApprovalDecision(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _upsert_approval(req: ApprovalRequest) -> None:
-    from app.services.database import get_db
+    from app.services.database import tables, upsert
     try:
-        conn = get_db()
-        try:
-            conn.execute(
-                "INSERT OR REPLACE INTO approvals (id, status, created_at, data) VALUES (?, ?, ?, ?)",
-                (req.id, req.status.value, req.created_at.isoformat(), req.model_dump_json()),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        upsert(tables.approvals, {
+            "id": req.id,
+            "status": req.status.value,
+            "created_at": req.created_at.isoformat(),
+            "data": req.model_dump_json(),
+        })
     except Exception as exc:
         logger.warning("[Approvals] DB write failed: %s", exc)
 
@@ -97,15 +94,13 @@ _MEDIUM_REQUIRES_APPROVAL = False
 
 
 def _load_from_db() -> None:
-    from app.services.database import get_db
+    from sqlalchemy import select
+    from app.services.database import engine, tables
     try:
-        conn = get_db()
-        try:
-            rows = list(conn.execute("SELECT data FROM approvals"))
-        finally:
-            conn.close()
+        with engine.connect() as conn:
+            rows = conn.execute(select(tables.approvals.c.data)).all()
         for row in rows:
-            req = ApprovalRequest.model_validate_json(row["data"])
+            req = ApprovalRequest.model_validate_json(row.data)
             _store[req.id] = req
         if _store:
             logger.info("[Approvals] Loaded %d requests from DB", len(_store))
