@@ -1,8 +1,11 @@
 """
-RAG service — indexes a codebase into ChromaDB and supports semantic search.
+RAG service — indexes a codebase and supports semantic search over
+both code chunks and past incidents.
 
-Embeddings: OpenAI text-embedding-3-small
-Vector store: ChromaDB (persistent, local)
+Embeddings: OpenAI text-embedding-3-small (1536-d).
+Vector store: backend-agnostic via app.services.vector_store. The factory
+picks ChromaDB locally (sqlite dev) or pgvector against the same RDS
+Postgres database in production. RAGService doesn't see the difference.
 
 Usage:
     rag = RAGService()
@@ -17,10 +20,10 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import chromadb
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.services.vector_store import VectorItem, make_collection
 
 logger = logging.getLogger(__name__)
 
@@ -115,12 +118,11 @@ def _chunk_file(file_path: str, content: str, language: str) -> list[CodeChunk]:
 # ---------------------------------------------------------------------------
 
 class RAGService:
-    """
-    Indexes code files into ChromaDB with OpenAI embeddings.
+    """Indexes code files and past incidents with OpenAI embeddings.
 
-    The ChromaDB collection persists on disk at CHROMA_PATH so re-indexing
-    is incremental — already-indexed chunks (same chunk_id) are upserted,
-    not duplicated.
+    The vector store is backend-agnostic via app.services.vector_store.make_collection
+    — ChromaDB locally, pgvector in production. Re-indexing the same `chunk_id`
+    is an upsert in both backends, so calling index_directory() twice is safe.
     """
 
     def __init__(
@@ -134,15 +136,8 @@ class RAGService:
             raise ValueError("OpenAI API key required (set OPENAI_API_KEY in .env)")
 
         self._openai = AsyncOpenAI(api_key=api_key)
-        self._chroma = chromadb.PersistentClient(path=chroma_path)
-        self._collection = self._chroma.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
-        self._incident_collection = self._chroma.get_or_create_collection(
-            name="incidents",
-            metadata={"hnsw:space": "cosine"},
-        )
+        self._collection = make_collection(collection_name, chroma_path=chroma_path)
+        self._incident_collection = make_collection("incidents", chroma_path=chroma_path)
 
     # ------------------------------------------------------------------
     # Public API
@@ -189,74 +184,50 @@ class RAGService:
         return total
 
     async def search(self, query: str, n_results: int = 5) -> list[CodeChunk]:
-        """
-        Semantic search over indexed chunks.
-
-        Returns up to `n_results` chunks ordered by relevance (best first).
-        """
+        """Semantic search over indexed chunks. Best first, up to n_results."""
         if self._collection.count() == 0:
             return []
 
         embedding = await self._embed([query])
-        results = self._collection.query(
-            query_embeddings=embedding,
-            n_results=min(n_results, self._collection.count()),
-            include=["documents", "metadatas", "distances"],
-        )
+        matches = self._collection.query(embedding[0], n_results=n_results)
 
         chunks: list[CodeChunk] = []
-        for doc, meta, dist in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
-        ):
+        for m in matches:
+            meta = m.metadata
             chunks.append(CodeChunk(
-                chunk_id=meta["chunk_id"],
-                file_path=meta["file_path"],
-                language=meta["language"],
-                start_line=meta["start_line"],
-                end_line=meta["end_line"],
-                content=doc,
-                score=round(1 - dist, 4),  # cosine similarity (higher = better)
+                chunk_id=meta.get("chunk_id", m.id),
+                file_path=meta.get("file_path", ""),
+                language=meta.get("language", ""),
+                start_line=int(meta.get("start_line", 0)),
+                end_line=int(meta.get("end_line", 0)),
+                content=m.document,
+                score=m.score,
             ))
-
         return chunks
 
     async def get_file(self, path: str) -> list[CodeChunk]:
-        """
-        Return all indexed chunks for a specific file, ordered by start line.
-
-        `path` should match the relative path stored during indexing.
-        """
-        results = self._collection.get(
-            where={"file_path": path},
-            include=["documents", "metadatas"],
-        )
-
+        """Return all indexed chunks for a specific file, ordered by start line."""
+        matches = self._collection.get_by_filter({"file_path": path})
         chunks = [
             CodeChunk(
-                chunk_id=meta["chunk_id"],
-                file_path=meta["file_path"],
-                language=meta["language"],
-                start_line=meta["start_line"],
-                end_line=meta["end_line"],
-                content=doc,
+                chunk_id=m.metadata.get("chunk_id", m.id),
+                file_path=m.metadata.get("file_path", ""),
+                language=m.metadata.get("language", ""),
+                start_line=int(m.metadata.get("start_line", 0)),
+                end_line=int(m.metadata.get("end_line", 0)),
+                content=m.document,
             )
-            for doc, meta in zip(results["documents"], results["metadatas"])
+            for m in matches
         ]
-
         return sorted(chunks, key=lambda c: c.start_line)
 
     def indexed_files(self) -> list[str]:
         """Return a deduplicated list of all indexed file paths."""
-        if self._collection.count() == 0:
-            return []
-        results = self._collection.get(include=["metadatas"])
         seen: set[str] = set()
         paths: list[str] = []
-        for meta in results["metadatas"]:
-            fp = meta["file_path"]
-            if fp not in seen:
+        for meta in self._collection.all_metadata():
+            fp = meta.get("file_path")
+            if fp and fp not in seen:
                 seen.add(fp)
                 paths.append(fp)
         return sorted(paths)
@@ -280,62 +251,48 @@ class RAGService:
 
         try:
             embedding = await self._embed([text])
-            self._incident_collection.upsert(
-                ids=[incident.id],
-                documents=[text],
-                embeddings=embedding,
-                metadatas=[{
+            self._incident_collection.upsert([VectorItem(
+                id=incident.id,
+                document=text,
+                metadata={
                     "incident_id": incident.id,
                     "status": incident.status.value,
                     "error_type": incident.error_event.error_type or "",
                     "service": incident.error_event.service or "",
                     "pr_url": incident.pr_url or "",
-                }],
-            )
+                },
+                embedding=embedding[0],
+            )])
         except Exception as exc:
             logger.warning("[RAG] Failed to index incident %s: %s", incident.id, exc)
 
     async def search_incidents(self, query: str, n_results: int = 3, min_score: float = 0.80) -> list[dict]:
         """Semantic search over indexed incidents. Returns matches above min_score, best first."""
-        count = self._incident_collection.count()
-        if count == 0:
+        if self._incident_collection.count() == 0:
             return []
         try:
             embedding = await self._embed([query])
-            results = self._incident_collection.query(
-                query_embeddings=embedding,
-                n_results=min(n_results, count),
-                include=["documents", "metadatas", "distances"],
-            )
-            matches = []
-            for doc, meta, dist in zip(
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
-            ):
-                score = round(1 - dist, 4)
-                if score >= min_score:
-                    matches.append({
-                        "incident_id": meta["incident_id"],
-                        "status": meta["status"],
-                        "error_type": meta["error_type"],
-                        "service": meta["service"],
-                        "pr_url": meta["pr_url"],
-                        "text": doc,
-                        "score": score,
-                    })
-            return matches
+            results = self._incident_collection.query(embedding[0], n_results=n_results)
+            return [
+                {
+                    "incident_id": m.metadata.get("incident_id", m.id),
+                    "status": m.metadata.get("status", ""),
+                    "error_type": m.metadata.get("error_type", ""),
+                    "service": m.metadata.get("service", ""),
+                    "pr_url": m.metadata.get("pr_url", ""),
+                    "text": m.document,
+                    "score": m.score,
+                }
+                for m in results
+                if m.score >= min_score
+            ]
         except Exception as exc:
             logger.warning("[RAG] Incident search failed: %s", exc)
             return []
 
     def clear(self) -> None:
-        """Delete all indexed chunks (wipes the collection)."""
-        self._chroma.delete_collection(COLLECTION_NAME)
-        self._collection = self._chroma.get_or_create_collection(
-            name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
+        """Delete all indexed chunks (wipes the codebase collection)."""
+        self._collection.clear()
 
     # ------------------------------------------------------------------
     # Internals
@@ -370,21 +327,21 @@ class RAGService:
         texts = [c.content for c in chunks]
         embeddings = await self._embed(texts)
 
-        self._collection.upsert(
-            ids=[c.chunk_id for c in chunks],
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=[
-                {
+        self._collection.upsert([
+            VectorItem(
+                id=c.chunk_id,
+                document=c.content,
+                metadata={
                     "chunk_id": c.chunk_id,
                     "file_path": c.file_path,
                     "language": c.language,
                     "start_line": c.start_line,
                     "end_line": c.end_line,
-                }
-                for c in chunks
-            ],
-        )
+                },
+                embedding=emb,
+            )
+            for c, emb in zip(chunks, embeddings)
+        ])
 
         return len(chunks)
 
