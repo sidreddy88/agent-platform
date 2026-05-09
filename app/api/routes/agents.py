@@ -332,20 +332,20 @@ async def annotate_run(run_id: str, body: RunNoteBody):
     Works on any run — completed or already failed.
     Persists to the agent_runs table so it survives restarts.
     """
-    from app.services.database import get_db
-    conn = get_db()
-    try:
-        row = conn.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
+    from sqlalchemy import select
+    from app.services.database import engine, tables
+    with engine.begin() as conn:
+        row = conn.execute(
+            select(tables.agent_runs).where(tables.agent_runs.c.run_id == run_id)
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Run not found")
-        new_status = "failed" if body.mark_failed else row["status"]
+        new_status = "failed" if body.mark_failed else row.status
         conn.execute(
-            "UPDATE agent_runs SET error_message = ?, status = ? WHERE run_id = ?",
-            (body.note.strip(), new_status, run_id),
+            tables.agent_runs.update()
+            .where(tables.agent_runs.c.run_id == run_id)
+            .values(error_message=body.note.strip(), status=new_status)
         )
-        conn.commit()
-    finally:
-        conn.close()
 
     # Keep in-memory history in sync
     for run in agent_tracker._history:
