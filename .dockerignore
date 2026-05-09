@@ -1,0 +1,50 @@
+# Keep the build context small. Anything not on this allow-by-omission list
+# is excluded; mirror the COPY statements in Dockerfile when changing.
+
+# Local development artefacts
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.coverage
+.chromadb
+
+# Data / logs / snapshots — must NOT leak into the image
+agent_platform.db
+agent_platform.db-*
+incidents.db
+incidents/
+logs/
+summaries/
+.preference_pairs.jsonl
+
+# Editor / OS junk
+.git
+.gitignore
+.github
+.idea
+.vscode
+.DS_Store
+*.swp
+
+# Build output (regenerated inside the image)
+frontend/node_modules
+frontend/dist
+node_modules
+
+# Tests + dev-only docs (image doesn't need them)
+tests
+plans
+memory
+docs
+*.md
+!CONSTRAINTS.md
+!AGENTS.md
+
+# Secrets — defensive; SSM Parameter Store is the prod source
+.env
+.env.*
+*.pem
+*.key

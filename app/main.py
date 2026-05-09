@@ -1,8 +1,10 @@
 import asyncio
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api import websocket
 from app.api.routes import agents as agents_routes
@@ -59,6 +61,24 @@ app.include_router(debug_routes.router)
 app.include_router(sessions_routes.router)
 app.include_router(failures_routes.router)
 app.include_router(performance_routes.router)
+
+
+# Frontend dashboard — bundled into the Docker image at frontend/dist by the
+# multi-stage build. Mounted LAST so all API routers above take precedence.
+# Local dev still uses `npm run dev` (vite on :4000 proxying to :8000) and
+# this directory is absent — the mount is a no-op when missing.
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount(
+        "/",
+        StaticFiles(directory=str(_FRONTEND_DIST), html=True),
+        name="dashboard",
+    )
+else:
+    logging.getLogger(__name__).info(
+        "[Startup] %s not found — frontend bundle not served (running in dev mode?)",
+        _FRONTEND_DIST,
+    )
 
 
 async def _backfill_rag_index() -> None:
