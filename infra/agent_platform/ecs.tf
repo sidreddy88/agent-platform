@@ -67,6 +67,15 @@ resource "aws_ecs_task_definition" "agent_platform" {
   execution_role_arn       = aws_iam_role.task_execution.arn
   task_role_arn            = aws_iam_role.task_runtime.arn
 
+  # ARM64 Fargate — ~20% cheaper than X86_64 and matches Apple Silicon
+  # Macs (no need for `docker buildx --platform linux/amd64` cross-builds
+  # during dev). The pushed image must also be ARM64; the local build on
+  # an M-series Mac produces that natively.
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+
   container_definitions = jsonencode([
     {
       name      = "agent-platform"
@@ -116,6 +125,11 @@ resource "aws_ecs_service" "agent_platform" {
   task_definition = aws_ecs_task_definition.agent_platform.arn
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
+
+  # ECS Exec lets us `aws ecs execute-command` into the running container
+  # for ad-hoc operations (one-time data migration, debugging). Pairs
+  # with the ssmmessages:* permissions on the task runtime role.
+  enable_execute_command = true
 
   # ECS deployment circuit breaker: if a new task fails health checks
   # repeatedly, ECS rolls back to the previous task definition
