@@ -48,6 +48,7 @@ COPY app ./app
 COPY mcp_server ./mcp_server
 COPY scripts ./scripts
 COPY targets ./targets
+COPY config ./config
 COPY pyproject.toml ./
 
 # Compiled dashboard from Stage 1 (served at "/" by FastAPI's StaticFiles).

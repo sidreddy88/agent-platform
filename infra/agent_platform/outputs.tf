@@ -1,5 +1,5 @@
 output "alb_dns_name" {
-  description = "ALB DNS hostname. Add a Cloudflare CNAME `app` → this value (proxied)."
+  description = "ALB DNS hostname. Add a Cloudflare CNAME `app` -> this value (proxied)."
   value       = aws_lb.main.dns_name
 }
 

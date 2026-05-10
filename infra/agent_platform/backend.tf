@@ -10,7 +10,7 @@
 
 terraform {
   backend "s3" {
-    bucket         = "agent-platform-tfstate-PLACEHOLDER"   # set by bootstrap
+    bucket         = "agent-platform-tfstate-542337758768"
     key            = "agent-platform/prod/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "agent-platform-tflock"

@@ -122,6 +122,22 @@ data "aws_iam_policy_document" "task_runtime" {
     ]
     resources = ["*"]
   }
+
+  # ECS Exec — required for `aws ecs execute-command` to open an
+  # interactive shell into the running container. The SSM agent inside
+  # the task uses these to set up the bidirectional channel back to
+  # AWS Systems Manager.
+  statement {
+    sid    = "EcsExecSsmMessaging"
+    effect = "Allow"
+    actions = [
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_policy" "task_runtime" {
