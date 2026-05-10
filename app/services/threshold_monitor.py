@@ -184,8 +184,10 @@ class ThresholdMonitor:
     # ------------------------------------------------------------------
 
     async def run_once(self) -> None:
+        # _check_do disabled — focus shifted to triage/diagnosis agents,
+        # minimising external pings. Re-enable by un-commenting below.
         await asyncio.gather(
-            self._check_do(),
+            # self._check_do(),    # disabled
             self._check_alb(),
             self._check_ecs(),
             return_exceptions=True,

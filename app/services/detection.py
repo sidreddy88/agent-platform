@@ -463,14 +463,17 @@ class DetectionService:
     # ------------------------------------------------------------------ #
     async def poll_once(self, window_minutes: int | None = None) -> List[ErrorEvent]:
         """Run all pillars concurrently, enqueue results."""
+        # Disabled to minimise external pings — focus is on triage/diagnosis agents
+        # ingesting events via the CloudWatch SNS webhook (see PR #85). Re-enable any
+        # pillar by un-commenting it below; the underlying methods are still defined.
         results = await asyncio.gather(
             self._detect_ecs(),
             self._detect_ecs_task_clusters(),
             self._detect_ec2(),
-            self._detect_digitalocean(),
-            self._detect_cloudflare(),
-            self._detect_ecs_log_errors(window_minutes=window_minutes),
-            self._detect_cloudwatch_log_filters(window_minutes=window_minutes),
+            # self._detect_digitalocean(),     # disabled
+            # self._detect_cloudflare(),       # disabled
+            # self._detect_ecs_log_errors(window_minutes=window_minutes),       # disabled — log pulling
+            # self._detect_cloudwatch_log_filters(window_minutes=window_minutes), # disabled — log pulling
             return_exceptions=True,
         )
         all_events: List[ErrorEvent] = []
