@@ -69,3 +69,8 @@ output "app_url" {
   description = "Public app URL once Cloudflare DNS is wired and the cert is validated."
   value       = "https://${var.hostname}"
 }
+
+output "cloudwatch_alarm_sns_topic_arn" {
+  description = "SNS topic CloudWatch alarms should publish to (AlarmActions). MonitorGenerationAgent picks this up via CLOUDWATCH_ALARM_SNS_TOPIC_ARN env var."
+  value       = aws_sns_topic.alarms.arn
+}
