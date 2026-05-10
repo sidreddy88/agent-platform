@@ -148,7 +148,7 @@ aws ecs update-service \
   --force-new-deployment
 ```
 
-This becomes a GitHub Actions workflow in **PR 6**.
+After this first manual push, deploys are automated by GitHub Actions (see `.github/workflows/deploy.yml`). The OIDC role + trust policy are provisioned by `github_oidc.tf` in this module — applied in the same `terraform apply` above.
 
 ---
 
@@ -201,6 +201,23 @@ python scripts/migrate_to_postgres.py --target "${DB_URL}"
 
 ---
 
+## CI/CD (GitHub Actions OIDC)
+
+`github_oidc.tf` provisions an `aws_iam_openid_connect_provider` plus a deploy role that the workflow assumes via short-lived OIDC tokens — no AWS keys stored as repo secrets.
+
+Trust is keyed on `repo:sidreddy88/agent-platform:ref:refs/heads/main`. To allow other branches/repos, edit the `github_repo` / `github_branch` variables and re-apply.
+
+After the first `terraform apply` that includes `github_oidc.tf`, the workflow at `.github/workflows/deploy.yml` will assume the role automatically on every push to `main`. Confirm it lined up:
+
+```bash
+terraform output github_deploy_role_arn
+# arn:aws:iam::542337758768:role/agent-platform-prod-github-deploy
+```
+
+If the ARN ever changes (e.g. you renamed the project), update the `ROLE_ARN` env in `deploy.yml` to match.
+
+---
+
 ## Day-2 operations
 
 ### View container logs
@@ -208,7 +225,11 @@ python scripts/migrate_to_postgres.py --target "${DB_URL}"
 aws logs tail "$(terraform output -raw log_group_name)" --follow
 ```
 
-### Roll out a new image (until PR 6 lands)
+### Roll out a new image
+
+**Automatic** — `git push origin main` triggers `.github/workflows/deploy.yml`, which builds the ARM64 image, pushes to ECR with both `:initial` and `:<sha>` tags, calls `update-service --force-new-deployment`, and waits for `services-stable` plus a `/health` probe.
+
+**Manual** (e.g. when bypassing CI):
 ```bash
 docker build -t "$(terraform output -raw ecr_repository_url):$(git rev-parse --short HEAD)" -f ../../Dockerfile ../..
 docker push    "$(terraform output -raw ecr_repository_url):$(git rev-parse --short HEAD)"
@@ -217,6 +238,8 @@ aws ecs update-service \
   --service "$(terraform output -raw ecs_service_name)" \
   --force-new-deployment
 ```
+
+You can also trigger the workflow without a commit via the GitHub UI (Actions → Deploy to ECS → Run workflow) or `gh workflow run deploy.yml`.
 
 ### Rotate the RDS password
 ```bash
@@ -251,4 +274,3 @@ Final RDS snapshot is taken automatically before deletion.
 - **Migrating PR #85's `infra/cloudwatch_sns_subscription.tf`** into this module — leaving standalone for now.
 - **Splitting frontend to S3 + CloudFront** — bundled into the container is the simpler path (see PR 5 plan for the full reasoning).
 - **Multi-AZ RDS / read replicas** — flip `multi_az = true` in `rds.tf` later if needed.
-- **CI/CD pipeline** — that's PR 6.
