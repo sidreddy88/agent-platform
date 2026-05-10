@@ -57,6 +57,9 @@ resource "aws_db_instance" "main" {
   lifecycle {
     # `final_snapshot_identifier` uses timestamp() which changes every
     # apply — ignore so we don't see a phantom diff.
-    ignore_changes = [final_snapshot_identifier]
+    # `password` is operationally rotated (see "Rotate the RDS password"
+    # in README) and lives in SSM as the source of truth — Terraform
+    # should never try to modify it after the initial create.
+    ignore_changes = [final_snapshot_identifier, password]
   }
 }
