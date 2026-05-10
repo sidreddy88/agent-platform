@@ -1,0 +1,8 @@
+# Local Terraform state — this module uses local state because it lives
+# in a different AWS account than the main agent-platform module. Don't
+# commit the state file (contains sensitive resource details).
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+terraform.tfvars
