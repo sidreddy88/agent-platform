@@ -76,9 +76,18 @@ async def _scan_log(message: str, level: str = "info") -> None:
 @router.post("/scan")
 async def scan_last_24h() -> Dict[str, Any]:
     """
-    Scan ECS log groups for errors in the last 3 days and feed each into
-    the full triage → diagnosis → fix pipeline.
+    DISABLED — log-pulling-from-CloudWatch ingest is turned off to
+    minimise external pings. Incidents now arrive via the CloudWatch
+    SNS webhook (see /webhooks/cloudwatch-alarm). Re-enable by removing
+    the early-return below.
     """
+    await _scan_log(
+        "Scan disabled — ingest now via /webhooks/cloudwatch-alarm only.",
+        level="info",
+    )
+    return {"events_found": 0, "events": [], "disabled": True}
+
+    # ---- original implementation kept below for easy re-enable ----
     aws = AWSService()
     raw: str = getattr(settings, "ecs_log_groups", "")
     log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []

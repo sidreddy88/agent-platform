@@ -230,19 +230,21 @@ async def get_dashboard() -> Dict[str, Any]:
         except Exception as exc:
             return {"error": str(exc), "runs": [], "latest_healthy": None}
 
-    ecs, ecs_tasks, ec2, do_data, cf_data, alb, mongodb, github = await asyncio.gather(
-        _ecs_pillar(), _ecs_task_pillar(), _ec2_pillar(), _do_pillar(), _cf_pillar(), _alb_pillar(),
-        _mongodb_pillar(), _github_pillar(),
+    # Disabled — focus shifted to triage/diagnosis agents; minimise external pings.
+    # Re-enable by adding _do_pillar(), _cf_pillar(), _mongodb_pillar() back into the
+    # gather() call below and uncommenting the corresponding response keys.
+    ecs, ecs_tasks, ec2, alb, github = await asyncio.gather(
+        _ecs_pillar(), _ecs_task_pillar(), _ec2_pillar(), _alb_pillar(), _github_pillar(),
     )
 
     return {
         "ecs": ecs,
         "ecs_task_clusters": ecs_tasks,
         "ec2": ec2,
-        "digital_ocean": do_data,
-        "cloudflare": cf_data,
+        # "digital_ocean": do_data,    # disabled — see comment above
+        # "cloudflare": cf_data,       # disabled
         "alb": alb,
-        "mongodb": mongodb,
+        # "mongodb": mongodb,          # disabled
         "github": github,
         "queue": event_queue.stats,
         "incidents": incident_store.metrics(),
