@@ -39,6 +39,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# In dev, vite proxies `/api/*` to the backend and rewrites away the `/api`
+# prefix. In production, the same compiled frontend bundle calls
+# `/api/dashboard`, `/api/agents/...`, etc. — but FastAPI registers those
+# routes without a prefix. Strip `/api` here so the production bundle
+# works without changing the frontend code.
+@app.middleware("http")
+async def _strip_api_prefix(request, call_next):
+    path = request.scope["path"]
+    if path.startswith("/api/") or path == "/api":
+        new_path = path[4:] or "/"
+        request.scope["path"] = new_path
+        if "raw_path" in request.scope:
+            request.scope["raw_path"] = new_path.encode()
+    return await call_next(request)
+
 # Routes
 app.include_router(health.router)
 app.include_router(websocket.router)
