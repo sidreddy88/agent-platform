@@ -29,7 +29,7 @@ resource "aws_security_group" "alb" {
   }
 
   egress {
-    description = "ALB → ECS tasks"
+    description = "ALB to ECS tasks"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"

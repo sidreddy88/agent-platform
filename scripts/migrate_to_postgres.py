@@ -54,6 +54,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SQLITE_PATH = REPO_ROOT / "agent_platform.db"
 CHROMA_PATH = REPO_ROOT / ".chromadb"
 
+# Make `from app...` imports work whether the script is invoked as
+# `python scripts/migrate_to_postgres.py` from any cwd or from a packaged
+# image where /app is the root. Without this, an invocation that doesn't
+# pass `PYTHONPATH=/app` fails on the dynamic `from app.core import config`
+# lines below.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 # Tables migrated in dependency order (none depend on each other today,
 # but keep this list as the canonical migration order).
 SQL_TABLES = [
