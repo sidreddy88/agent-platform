@@ -6,9 +6,11 @@ import { ECSPillar } from "./components/ECSPillar";
 import { ECSTaskPillar } from "./components/ECSTaskPillar";
 import { EC2Pillar } from "./components/EC2Pillar";
 import { ALBPillar } from "./components/ALBPillar";
-import { DOPillar } from "./components/DOPillar";
-import { CloudfarePillar } from "./components/CloudfarePillar";
-import { MongoDBPillar } from "./components/MongoDBPillar";
+// Disabled — focus shifted to triage/diagnosis agents; minimise external pings.
+// Re-enable by uncommenting the imports + the corresponding pillar JSX below.
+// import { DOPillar } from "./components/DOPillar";
+// import { CloudfarePillar } from "./components/CloudfarePillar";
+// import { MongoDBPillar } from "./components/MongoDBPillar";
 import { GitHubPillar } from "./components/GitHubPillar";
 import { IncidentsPage } from "./components/IncidentsPage";
 import { IncidentsTablePage } from "./components/IncidentsTablePage";
@@ -16,13 +18,14 @@ import { EventApprovalPage } from "./components/EventApprovalPage";
 import { PRsPage } from "./components/PRsPage";
 import { StatsPage } from "./components/StatsPage";
 import { DatasetPage } from "./components/DatasetPage";
-import { PerformancePage } from "./components/PerformancePage";
+// import { PerformancePage } from "./components/PerformancePage";  // disabled — Atlas-backed
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "stats" | "performance" | "logs" | "dataset";
+type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "stats" | "logs" | "dataset";
+// "performance" tab removed (Atlas-backed) — re-add to the union to re-enable.
 
 interface CBInfo { name: string; state: string; failure_count: number; total_rejected: number }
 
@@ -86,7 +89,7 @@ export default function App() {
             <button style={tabBtn(tab === "table")}     onClick={() => setTab("table")}>Table</button>
             <button style={tabBtn(tab === "prs")}       onClick={() => setTab("prs")}>Agent PRs</button>
             <button style={tabBtn(tab === "stats")}     onClick={() => setTab("stats")}>Stats</button>
-            <button style={tabBtn(tab === "performance")} onClick={() => setTab("performance")}>Performance</button>
+            {/* <button style={tabBtn(tab === "performance")} onClick={() => setTab("performance")}>Performance</button> */}
             <button style={tabBtn(tab === "logs")}      onClick={() => setTab("logs")}>Logs</button>
             <button style={tabBtn(tab === "dataset")}   onClick={() => setTab("dataset")}>Dataset</button>
           </div>
@@ -150,7 +153,7 @@ export default function App() {
         </main>
       )}
       {tab === "stats" && <StatsPage />}
-      {tab === "performance" && <PerformancePage />}
+      {/* {tab === "performance" && <PerformancePage />} */}
       {datasetVisited && <DatasetPage hidden={tab !== "dataset"} />}
       {tab === "dashboard" && <main style={main}>
         {loading && !data && (
@@ -180,6 +183,8 @@ export default function App() {
               <ECSTaskPillar clusters={data.ecs_task_clusters ?? []} />
               <EC2Pillar data={data.ec2} />
               <ALBPillar albs={data.alb ?? []} />
+              {/* DO / Cloudflare / MongoDB pillars disabled — see import comment above */}
+              {/*
               <div style={{ gridColumn: "span 2" }}>
                 <DOPillar data={data.digital_ocean} />
               </div>
@@ -189,6 +194,7 @@ export default function App() {
               <div style={{ gridColumn: "span 2" }}>
                 <MongoDBPillar data={data.mongodb} />
               </div>
+              */}
               <div style={{ gridColumn: "span 2" }}>
                 <GitHubPillar data={data.github} />
               </div>
