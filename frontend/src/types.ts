@@ -304,6 +304,7 @@ export interface PendingEvent {
   occurrences?: number;
   handling?: "caught" | "uncaught" | "unknown";
   handling_evidence?: string;
+  category?: "error" | "non_error";
 }
 
 export type FailureCategory =
