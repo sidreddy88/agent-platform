@@ -75,19 +75,7 @@ async def _scan_log(message: str, level: str = "info") -> None:
 
 @router.post("/scan")
 async def scan_last_24h() -> Dict[str, Any]:
-    """
-    DISABLED — log-pulling-from-CloudWatch ingest is turned off to
-    minimise external pings. Incidents now arrive via the CloudWatch
-    SNS webhook (see /webhooks/cloudwatch-alarm). Re-enable by removing
-    the early-return below.
-    """
-    await _scan_log(
-        "Scan disabled — ingest now via /webhooks/cloudwatch-alarm only.",
-        level="info",
-    )
-    return {"events_found": 0, "events": [], "disabled": True}
-
-    # ---- original implementation kept below for easy re-enable ----
+    """On-demand scan of configured ECS log groups over the last 24 hours."""
     aws = AWSService()
     raw: str = getattr(settings, "ecs_log_groups", "")
     log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []
@@ -95,7 +83,7 @@ async def scan_last_24h() -> Dict[str, Any]:
     pending_event_store.reset_dismissed()
     _SCAN_CAP = 200
     await _scan_log(
-        f"Scan started — checking {len(log_groups)} log group(s) over last 3 days "
+        f"Scan started — checking {len(log_groups)} log group(s) over last 24 hours "
         f"(cap: {_SCAN_CAP} events)"
     )
 
@@ -109,7 +97,7 @@ async def scan_last_24h() -> Dict[str, Any]:
         service = log_group.rstrip("/").split("/")[-1]
         await _scan_log(f"Scanning {log_group} ...")
         try:
-            matches = aws.get_error_logs(log_group, minutes=4320)
+            matches = aws.get_error_logs(log_group, minutes=1440)
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
             seen: set[tuple[str, str, str]] = set()
