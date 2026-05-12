@@ -237,6 +237,8 @@ function IncidentCard({ inc }: { inc: Incident }) {
   const [refixing, setRefixing] = useState(false);
   const [showRefixNotes, setShowRefixNotes] = useState(false);
   const [refixNotes, setRefixNotes] = useState("");
+  const [approving, setApproving] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
   const [showFlagModal, setShowFlagModal] = useState(false);
   const [flagRuns, setFlagRuns] = useState<AgentRun[]>([]);
   const [flagRunId, setFlagRunId] = useState<string | null>(null);
@@ -336,6 +338,32 @@ function IncidentCard({ inc }: { inc: Incident }) {
   }
   async function handleRejectRefix() {
     await fetch(`/incidents/${inc.id}/reject-refix`, { method: "POST" });
+  }
+  async function handleApproveEscalation() {
+    if (!inc.approval_id) return;
+    setApproving(true);
+    try {
+      await fetch(`/approvals/${inc.approval_id}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approver: "dashboard" }),
+      });
+    } finally {
+      setApproving(false);
+    }
+  }
+  async function handleRejectEscalation() {
+    if (!inc.approval_id) return;
+    setRejecting(true);
+    try {
+      await fetch(`/approvals/${inc.approval_id}/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approver: "dashboard", reason: "" }),
+      });
+    } finally {
+      setRejecting(false);
+    }
   }
 
   return (
@@ -454,7 +482,16 @@ function IncidentCard({ inc }: { inc: Incident }) {
         {inc.mttr_seconds !== null && (
           <span style={metaPill}>MTTR {mttr(inc.mttr_seconds)}</span>
         )}
-        {inc.status === "awaiting_refix_approval" ? (
+        {inc.status === "awaiting_approval" && inc.approval_id && !inc.human_decision ? (
+          <>
+            <button style={refixApproveBtn(approving)} onClick={handleApproveEscalation} disabled={approving || rejecting}>
+              {approving ? "Approving..." : "✓ Approve — proceed to fix"}
+            </button>
+            <button style={refixRejectBtn} onClick={handleRejectEscalation} disabled={approving || rejecting}>
+              {rejecting ? "Rejecting..." : "✕ Reject"}
+            </button>
+          </>
+        ) : inc.status === "awaiting_refix_approval" ? (
           <>
             {showRefixNotes && (
               <textarea

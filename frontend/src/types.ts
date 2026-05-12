@@ -208,6 +208,7 @@ export interface Incident {
   confidence: number | null;
   pr_url: string | null;
   pr_number: number | null;
+  approval_id: string | null;
   human_decision: string | null;
   human_notes: string | null;
   pending_fix_file: string | null;
