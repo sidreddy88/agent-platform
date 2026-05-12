@@ -248,13 +248,20 @@ def _extract_json_object(text: str) -> str | None:
 def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
     # Extraction strategies in priority order:
     # 1. JSON fenced code block  (```json ... ```)
-    # 2. Balanced brace extraction — handles {} nested inside string values
+    # 2. Unclosed fence  (```json {...   — LLM hit max_tokens or dropped the
+    #    closing fence). Without this, a truncation drops us straight to the
+    #    placeholder fallback.
+    # 3. Balanced brace extraction — handles {} nested inside string values
     candidates: list[str] = []
     code_block = re.search(r"```(?:json)?\s*(.*?)\s*```", answer, re.DOTALL)
     if code_block:
         block = code_block.group(1).strip()
         if block.startswith("{"):
             candidates.append(block)
+    else:
+        unclosed = re.search(r"```(?:json)?\s*(\{.*)", answer, re.DOTALL)
+        if unclosed:
+            candidates.append(unclosed.group(1).strip())
     outer = _extract_json_object(answer)
     if outer:
         candidates.append(outer)
@@ -306,13 +313,20 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
         except (json.JSONDecodeError, ValueError, TypeError):
             continue
 
-    logger.warning("DiagnosisAgent returned non-JSON answer — using low-confidence fallback. Raw: %.200s", answer)
+    # 200-char truncation made past failures unactionable. 4000 covers the
+    # full LLM response in practice (max_tokens is 4096).
+    logger.warning("DiagnosisAgent returned non-JSON answer — using low-confidence fallback. Raw: %.4000s", answer)
     return DiagnosisResult(
         root_cause="Could not parse diagnosis — manual review required",
         confidence=0.0,
         escalate=True,
         raw_llm=answer,
     )
+
+
+# Sentinel for the parse-failure fallback — callers test against this to
+# decide whether to retry or accept the result.
+_PARSE_FAILURE_ROOT_CAUSE = "Could not parse diagnosis — manual review required"
 
 
 # ---------------------------------------------------------------------------
@@ -888,4 +902,17 @@ Confidence guide:
 
         result = await self.run(prompt)
         parsed = _parse_diagnosis_result(result.answer)
+        if parsed.root_cause == _PARSE_FAILURE_ROOT_CAUSE:
+            # One retry with an explicit reminder. Most parse failures are
+            # one-shot drift (extra prose, dropped closing fence on a
+            # truncated reply); a stricter prompt usually clears it.
+            retry_prompt = (
+                prompt
+                + "\n\nIMPORTANT: Your previous response could not be parsed."
+                  " Return ONLY a single valid JSON object matching the schema above."
+                  " No markdown fences, no commentary, no trailing text."
+            )
+            logger.info("DiagnosisAgent retrying after parse failure")
+            result = await self.run(retry_prompt)
+            parsed = _parse_diagnosis_result(result.answer)
         return await self._enforce_grounding(parsed)
