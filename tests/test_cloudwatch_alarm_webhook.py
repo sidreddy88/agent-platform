@@ -1,7 +1,15 @@
 """
-Tests for POST /webhooks/cloudwatch-alarm — push-based ingest from
-CloudWatch alarms via SNS. Drives system MTTD from "human attention lag"
-to single-digit minutes without polling production.
+Tests for POST /webhooks/cloudwatch-alarm.
+
+The webhook is currently a no-op for Notification payloads — ingestion
+is handled by DetectionService polling CloudWatch Logs every 5 min
+(see app/services/detection.py). The SNS subscription stays wired so
+push-based ingest can be re-enabled by restoring the original handler
+body (see git history for the _alarm_payload_to_event call site).
+
+These tests cover the entrypoint plumbing (auth, type validation, SNS
+SubscriptionConfirmation handshake, ack_noop response) but no longer
+assert event creation from alarm payloads.
 """
 from __future__ import annotations
 
@@ -68,37 +76,29 @@ def _alarm_notification(alarm_name: str = "auto-svc-errors", state: str = "ALARM
     }
 
 
-def test_notification_creates_pending_event(client):
+def test_notification_returns_ack_noop(client):
+    """ALARM notifications now return ack_noop without creating events —
+    DetectionService log polling owns ingestion."""
+    from app.services.pending_events import pending_event_store
+
     resp = client.post("/webhooks/cloudwatch-alarm", json=_alarm_notification())
     assert resp.status_code == 200, resp.text
-
-    data = resp.json()
-    assert data["status"] == "queued"
-    assert data["is_new"] is True
-    assert data["occurrences"] == 1
-    assert "event_id" in data
+    assert resp.json() == {"status": "ack_noop"}
+    assert pending_event_store.list_all() == []
 
 
-def test_notification_dedups_repeat_alarm(client):
-    payload = _alarm_notification()
-    first = client.post("/webhooks/cloudwatch-alarm", json=payload)
-    second = client.post("/webhooks/cloudwatch-alarm", json=payload)
+def test_all_notification_states_noop_uniformly(client):
+    """ALARM, OK, INSUFFICIENT_DATA all return the same ack_noop response."""
+    from app.services.pending_events import pending_event_store
 
-    assert first.json()["is_new"] is True
-    assert second.json()["is_new"] is False
-    assert second.json()["occurrences"] == 2
-
-
-def test_non_alarm_transitions_are_ignored(client):
-    """OK and INSUFFICIENT_DATA shouldn't open new incidents."""
-    for state in ("OK", "INSUFFICIENT_DATA"):
+    for state in ("ALARM", "OK", "INSUFFICIENT_DATA"):
         resp = client.post(
             "/webhooks/cloudwatch-alarm",
             json=_alarm_notification(state=state),
         )
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ignored_non_alarm"
-        assert resp.json()["state"] == state
+        assert resp.json() == {"status": "ack_noop"}
+    assert pending_event_store.list_all() == []
 
 
 def test_alarm_payload_to_event_extracts_dimensions():
@@ -249,9 +249,9 @@ def test_unsupported_sns_type_returns_400(client):
     assert resp.status_code == 400
 
 
-def test_notification_with_freeform_message_still_ingests(client):
-    """A Notification whose Message isn't valid JSON should still produce
-    an event with sensible fallback fields."""
+def test_notification_with_freeform_message_returns_ack_noop(client):
+    """A Notification with non-JSON Message is parsed without error and
+    still no-ops cleanly."""
     payload = {
         "Type": "Notification",
         "Subject": "Custom alert: payment failure",
@@ -259,6 +259,5 @@ def test_notification_with_freeform_message_still_ingests(client):
         "TopicArn": "arn:aws:sns:us-east-1:123:topic",
     }
     resp = client.post("/webhooks/cloudwatch-alarm", json=payload)
-    # Free-text path: no NewStateValue means we treat as ALARM and ingest.
     assert resp.status_code == 200
-    assert resp.json()["status"] == "queued"
+    assert resp.json() == {"status": "ack_noop"}
