@@ -40,6 +40,12 @@ locals {
     # SNS topic the MonitorGenerationAgent wires into AlarmActions when
     # creating new CloudWatch alarms. Not a secret — just an ARN.
     { name = "CLOUDWATCH_ALARM_SNS_TOPIC_ARN", value = aws_sns_topic.alarms.arn },
+    # DetectionService scans this log group every 5 min for TargetApp
+    # error lines and surfaces them in the dashboard for fix-agent triage.
+    # ECS_LOG_GROUPS_REGION lets the boto3 client target a different region
+    # than agent-platform's own infrastructure (us-east-1).
+    { name = "ECS_LOG_GROUPS",        value = "/ecs/TaskTargetApp" },
+    { name = "ECS_LOG_GROUPS_REGION", value = "us-east-2" },
   ]
 
   # Every SSM parameter the container should pull at start. The ECS

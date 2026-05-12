@@ -302,37 +302,10 @@ async def cloudwatch_alarm_webhook(
         # Strict: refuse types we don't handle so misconfigured POSTs surface.
         raise HTTPException(status_code=400, detail=f"Unsupported SNS Type: {msg_type!r}")
 
-    inner = msg.get("Message", "")
-    try:
-        alarm = json.loads(inner) if isinstance(inner, str) else inner
-    except (json.JSONDecodeError, TypeError):
-        # Free-text Message — fall back to using the SNS Subject + Message verbatim.
-        alarm = {"AlarmName": msg.get("Subject", "sns_notification"), "NewStateReason": str(inner)}
-    if not isinstance(alarm, dict):
-        alarm = {"AlarmName": msg.get("Subject", "sns_notification"), "NewStateReason": str(inner)}
-
-    # Only ingest ALARM transitions. OK and INSUFFICIENT_DATA are
-    # state-recovery / data-gap signals; they shouldn't open new incidents.
-    new_state = alarm.get("NewStateValue", "")
-    if new_state and new_state != "ALARM":
-        logger.info(
-            "[SNS] Skipping non-ALARM transition (state=%s) for %s",
-            new_state, alarm.get("AlarmName", ""),
-        )
-        return {"status": "ignored_non_alarm", "state": new_state}
-
-    event = _alarm_payload_to_event(alarm)
-    pe, is_new = pending_event_store.add(event)
-    if pe is None:
-        return {"status": "dismissed_signature"}
-
-    ws_type = "pending_event_added" if is_new else "pending_event_updated"
-    await broadcast({"type": ws_type, "event": pending_event_store.serialize(pe)})
-
-    return {
-        "status": "queued",
-        "event_id": pe.id,
-        "is_new": is_new,
-        "occurrences": pe.occurrences,
-        "handling": pe.handling,
-    }
+    # Ingestion is handled by DetectionService log polling (5-min cadence).
+    # The alarm payload only carries metadata (name, state, reason), not the
+    # matching log lines — collapsing every transition into one generic card
+    # was low-signal for fix-agents. The SNS subscription stays wired so
+    # push-based ingest can be re-enabled by restoring the original body
+    # (see git history for _alarm_payload_to_event call site).
+    return {"status": "ack_noop"}

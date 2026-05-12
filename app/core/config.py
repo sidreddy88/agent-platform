@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # CloudWatch log groups to monitor for errors — comma-separated
     ecs_log_groups: str = ""
 
+    # Region for ecs_log_groups when it differs from aws_region — e.g. when
+    # the agent-platform runs in us-east-1 but the monitored log group lives
+    # in us-east-2. Empty string falls back to aws_region.
+    ecs_log_groups_region: str = ""
+
     # Threshold monitoring
     threshold_check_interval_seconds: int = 86400  # how often to run checks (default 24 hours)
     threshold_cooldown_minutes: int = 30           # min gap between repeat alerts for same issue
@@ -88,8 +93,10 @@ class Settings(BaseSettings):
     # Monitor generation — set to true to actually provision CloudWatch alarms on PR merge
     create_monitors: bool = False
 
-    # Detection poll interval in seconds
-    detection_poll_interval_seconds: int = 60
+    # Detection poll interval in seconds. 5 min cadence: rate-limit-safe on
+    # CloudWatch Logs (0.003 TPS vs 5 TPS limit) and matches the typical
+    # frequency at which an TargetApp error class repeats.
+    detection_poll_interval_seconds: int = 300
 
     # CloudWatch log filter patterns for application-level error detection.
     # JSON array: [{"log_group": "/ecs/...", "pattern": "NoSuchKey",

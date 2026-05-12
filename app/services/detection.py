@@ -324,11 +324,12 @@ class DetectionService:
 
         minutes = window_minutes if window_minutes is not None else max(self._poll_interval // 60, 5)
         log_groups = [g.strip() for g in raw.split(",") if g.strip()]
+        region = getattr(settings, "ecs_log_groups_region", "") or None
 
         for log_group in log_groups:
             service = log_group.rstrip("/").split("/")[-1]
             try:
-                matches = self._aws.get_error_logs(log_group, minutes=minutes, limit=50)
+                matches = self._aws.get_error_logs(log_group, minutes=minutes, limit=50, region=region)
                 if not matches:
                     continue
 
@@ -463,17 +464,21 @@ class DetectionService:
     # ------------------------------------------------------------------ #
     async def poll_once(self, window_minutes: int | None = None) -> List[ErrorEvent]:
         """Run all pillars concurrently, enqueue results."""
-        # Disabled to minimise external pings — focus is on triage/diagnosis agents
-        # ingesting events via the CloudWatch SNS webhook (see PR #85). Re-enable any
-        # pillar by un-commenting it below; the underlying methods are still defined.
+        # ECS log pulling is re-enabled (5-min cadence) to feed fix-agents with
+        # per-line error events from monitored services. The SNS webhook path
+        # produced only generic "alarm fired" cards; polling gives per-line
+        # fidelity (real error text, distinct signatures) which is what
+        # triage/diagnosis agents need. CloudWatch Logs filter_log_events at
+        # this cadence is well within rate limits (0.003 TPS vs 5 TPS).
+        # DigitalOcean / Cloudflare pillars stay disabled — separate concern.
         results = await asyncio.gather(
             self._detect_ecs(),
             self._detect_ecs_task_clusters(),
             self._detect_ec2(),
             # self._detect_digitalocean(),     # disabled
             # self._detect_cloudflare(),       # disabled
-            # self._detect_ecs_log_errors(window_minutes=window_minutes),       # disabled — log pulling
-            # self._detect_cloudwatch_log_filters(window_minutes=window_minutes), # disabled — log pulling
+            self._detect_ecs_log_errors(window_minutes=window_minutes),
+            self._detect_cloudwatch_log_filters(window_minutes=window_minutes),
             return_exceptions=True,
         )
         all_events: List[ErrorEvent] = []

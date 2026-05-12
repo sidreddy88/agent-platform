@@ -119,7 +119,10 @@ class AWSService:
         if settings.aws_secret_access_key:
             self._session_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
 
-    def _client(self, service: str):
+    def _client(self, service: str, region: str | None = None):
+        if region and region != self._region:
+            kwargs = {**self._session_kwargs, "region_name": region}
+            return boto3.client(service, **kwargs)
         return boto3.client(service, **self._session_kwargs)
 
     # ------------------------------------------------------------------
@@ -482,15 +485,27 @@ class AWSService:
             })
         return sorted(events, key=lambda e: e["timestamp"], reverse=True)
 
-    def get_error_logs(self, log_group: str, minutes: int = 60) -> list[dict]:
+    def get_error_logs(
+        self,
+        log_group: str,
+        minutes: int = 60,
+        *,
+        limit: int | None = None,
+        region: str | None = None,
+    ) -> list[dict]:
         """Fetch error-level log events from a CloudWatch log group.
 
-        Paginates through all results via nextToken so no cap is applied.
+        Paginates through results via nextToken up to `limit` (or 300 if unset).
         For each matching error line, fetches the next 20 lines from the same
         log stream within a 5-second window to capture Node.js / Python stack
         traces that appear on the lines immediately following the error.
+
+        `region` overrides the session-wide AWS region for this call only —
+        useful when the log group lives in a different region than the
+        agent-platform's own infrastructure (e.g. TargetApp in us-east-2
+        while agent-platform runs in us-east-1).
         """
-        logs = self._client("logs")
+        logs = self._client("logs", region=region)
         from datetime import timedelta
 
         now = datetime.now(timezone.utc)
@@ -504,7 +519,7 @@ class AWSService:
             filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback" ?"DeprecationWarning" ?"Failed to "',
         )
 
-        _MAX_EVENTS = 300
+        _MAX_EVENTS = limit if limit is not None else 300
         raw_events: list[dict] = []
         next_token: str | None = None
         while len(raw_events) < _MAX_EVENTS:
