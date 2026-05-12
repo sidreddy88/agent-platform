@@ -37,6 +37,11 @@ class ErrorEvent(BaseModel):
     description: str
     service: str
     resource_id: Optional[str] = None
+    # Routing tag for the dashboard's Errors / Non-errors sub-tabs.
+    # Thrown application errors stay "error"; deprecation warnings and
+    # network-timeout classes (which don't usually indicate a code bug)
+    # land as "non_error".
+    category: str = "error"
     metadata: Dict[str, Any] = Field(default_factory=dict)
     detected_at: datetime = Field(default_factory=datetime.utcnow)
 
