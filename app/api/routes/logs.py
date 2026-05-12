@@ -17,11 +17,12 @@ async def get_ecs_logs(minutes: int = Query(default=60, ge=5, le=1440)) -> Dict[
     aws = AWSService()
     raw: str = getattr(settings, "ecs_log_groups", "")
     log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []
+    region = getattr(settings, "ecs_log_groups_region", "") or None
 
     results = []
     for group in log_groups:
         try:
-            events = aws.get_error_logs(group, minutes=minutes)
+            events = aws.get_error_logs(group, minutes=minutes, region=region)
             results.append({
                 "log_group": group,
                 "error_count": len(events),
