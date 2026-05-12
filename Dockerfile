@@ -30,9 +30,21 @@ RUN npm run build
 FROM python:3.13-slim AS runtime
 
 # Build-time tooling for native deps (chromadb / numpy / pgvector clients).
-# Removed at the end of the install layer to keep the image small.
+# `build-essential gcc` are stripped after pip install via the purge below
+# to keep the image small.
+# `git` + `nodejs` + `npm` stay in the runtime image — SandboxService
+# clones the AllInterviews repo and runs its Jest suite via direct npm
+# (Docker-in-Fargate isn't viable, so the npm fallback path is the one
+# actually used in prod). Node 18 matches targets/allinterviews/Dockerfile.test.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential gcc curl \
+    && apt-get install -y --no-install-recommends build-essential gcc curl git ca-certificates gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_18.x nodistro main" \
+       > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
