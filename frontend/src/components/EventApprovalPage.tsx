@@ -11,6 +11,7 @@ export function EventApprovalPage({ events }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [dismissing, setDismissing] = useState<Set<string>>(new Set());
+  const [tab, setTab] = useState<"errors" | "non_errors">("errors");
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded((prev) => {
@@ -53,7 +54,12 @@ export function EventApprovalPage({ events }: Props) {
     }
   }
 
-  const visible = events.filter((e) => !dismissed.has(e.id));
+  const undismissed = events.filter((e) => !dismissed.has(e.id));
+  const errorCount = undismissed.filter((e) => (e.category ?? "error") === "error").length;
+  const nonErrorCount = undismissed.filter((e) => (e.category ?? "error") === "non_error").length;
+  const visible = undismissed.filter(
+    (e) => (e.category ?? "error") === (tab === "errors" ? "error" : "non_error")
+  );
 
   return (
     <div style={container}>
@@ -72,9 +78,25 @@ export function EventApprovalPage({ events }: Props) {
         )}
       </div>
 
+      {/* Sub-tabs */}
+      <div style={tabRow}>
+        <button style={tabBtn(tab === "errors")} onClick={() => setTab("errors")}>
+          Errors
+          <span style={tabCountBadge(tab === "errors")}>{errorCount}</span>
+        </button>
+        <button style={tabBtn(tab === "non_errors")} onClick={() => setTab("non_errors")}>
+          Non-errors
+          <span style={tabCountBadge(tab === "non_errors")}>{nonErrorCount}</span>
+        </button>
+      </div>
+
       {visible.length === 0 ? (
         <div style={empty}>
-          <p style={emptyText}>No pending errors. Run a scan to detect new issues.</p>
+          <p style={emptyText}>
+            {tab === "errors"
+              ? "No pending errors. Run a scan to detect new issues."
+              : "No non-error signals. Deprecation warnings and connection timeouts will appear here."}
+          </p>
         </div>
       ) : (
         <div style={list}>
@@ -179,6 +201,31 @@ const approveAllBtn = (loading: boolean): React.CSSProperties => ({
   color: loading ? "#4b5563" : "#22c55e",
   borderRadius: 6, padding: "6px 16px", fontSize: 13, fontWeight: 700,
   cursor: loading ? "not-allowed" : "pointer",
+});
+
+const tabRow: React.CSSProperties = {
+  display: "flex", gap: 4, borderBottom: "1px solid #2d3149",
+};
+
+const tabBtn = (active: boolean): React.CSSProperties => ({
+  background: "transparent",
+  border: "none",
+  borderBottom: `2px solid ${active ? "#22c55e" : "transparent"}`,
+  color: active ? "#e2e8f0" : "#64748b",
+  padding: "8px 16px",
+  fontSize: 13,
+  fontWeight: active ? 700 : 500,
+  cursor: "pointer",
+  display: "flex", alignItems: "center", gap: 8,
+  marginBottom: -1,
+});
+
+const tabCountBadge = (active: boolean): React.CSSProperties => ({
+  fontSize: 11, fontWeight: 600,
+  color: active ? "#22c55e" : "#64748b",
+  background: active ? "rgba(34,197,94,0.1)" : "rgba(100,116,139,0.1)",
+  border: `1px solid ${active ? "rgba(34,197,94,0.3)" : "#2d3149"}`,
+  borderRadius: 4, padding: "1px 6px",
 });
 
 const empty: React.CSSProperties = {

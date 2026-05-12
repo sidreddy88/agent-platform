@@ -360,6 +360,16 @@ class DetectionService:
                             "ECS_ERROR",
                         ).upper()
 
+                    # Categorise for the dashboard's Errors / Non-errors split.
+                    # Deprecation warnings (compat hygiene) and connection-class
+                    # timeouts (transient network blips, not code bugs) route to
+                    # Non-errors so the Errors tab stays focused on real bugs.
+                    category = (
+                        "non_error"
+                        if any(m in error_type for m in ("WARNING", "DEPRECATION", "TIMEOUT", "CONNECTION"))
+                        else "error"
+                    )
+
                     stream_parts = log["stream"].rsplit("/", 1)
                     task_id = stream_parts[-1] if len(stream_parts) > 1 else log["stream"]
 
@@ -372,6 +382,7 @@ class DetectionService:
                         description=msg[:300],
                         service=service,
                         resource_id=log_group,
+                        category=category,
                         metadata={
                             "log_group": log_group,
                             "task_id": task_id,
@@ -421,6 +432,10 @@ class DetectionService:
 
             error_type = f.get("error_type", pattern.upper().replace(" ", "_"))
             service = f.get("service", log_group)
+            # Optional per-filter routing tag. Lets you add e.g. an "ECONNRESET"
+            # pattern that lands in Non-errors without code change. Defaults to
+            # "error" so existing configs are unaffected.
+            category = f.get("category", "error")
 
             try:
                 matches = self._aws.search_log_events(
@@ -446,6 +461,7 @@ class DetectionService:
                     description=latest["message"][:300],
                     service=service,
                     resource_id=log_group,
+                    category=category,
                     metadata={
                         "log_group": log_group,
                         "pattern": pattern,

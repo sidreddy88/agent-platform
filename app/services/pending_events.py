@@ -22,6 +22,7 @@ class PendingEvent:
     occurrences: int = 1      # how many raw matches collapsed into this entry
     handling: str = "unknown"  # "caught" | "uncaught" | "unknown"
     handling_evidence: str = ""  # short snippet that drove the classification
+    category: str = "error"   # "error" | "non_error" — routes the dashboard tabs
     _event: Any = field(default=None, repr=False)
 
 
@@ -227,6 +228,7 @@ class PendingEventStore:
             occurrences=1,
             handling=handling,
             handling_evidence=evidence,
+            category=getattr(event, "category", "error") or "error",
             _event=event,
         )
         self._events[pe.id] = pe
@@ -281,6 +283,7 @@ class PendingEventStore:
             "occurrences": pe.occurrences,
             "handling": pe.handling,
             "handling_evidence": pe.handling_evidence,
+            "category": pe.category,
         }
 
 
