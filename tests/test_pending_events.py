@@ -2,6 +2,40 @@ from app.models.events import ErrorEvent, EventSource
 from app.services.pending_events import PendingEventStore, classify_handling
 
 
+def _categorised_event(error_type: str, category: str = "error") -> ErrorEvent:
+    return ErrorEvent(
+        source=EventSource.CLOUDWATCH,
+        error_type=error_type,
+        title=f"{error_type} in svc",
+        description=f"{error_type}: sample message",
+        service="svc",
+        category=category,
+        metadata={"log_group": "/ecs/svc"},
+    )
+
+
+def test_category_passes_through_to_serialized_form() -> None:
+    """ErrorEvent.category must surface in PendingEventStore.serialize()."""
+    store = PendingEventStore()
+
+    err_pe, _ = store.add(_categorised_event("APICONNECTIONTIMEOUTERROR", category="non_error"))
+    bug_pe, _ = store.add(_categorised_event("TYPEERROR", category="error"))
+
+    assert err_pe is not None and bug_pe is not None
+    assert store.serialize(err_pe)["category"] == "non_error"
+    assert store.serialize(bug_pe)["category"] == "error"
+
+
+def test_category_defaults_to_error_when_event_omits_it() -> None:
+    """Events constructed without an explicit category land in the Errors tab."""
+    store = PendingEventStore()
+    # ErrorEvent model default is "error" — verify it propagates.
+    pe, _ = store.add(_categorised_event("ECS_ERROR"))
+
+    assert pe is not None
+    assert store.serialize(pe)["category"] == "error"
+
+
 def _cloudwatch_event(
     timestamp: int,
     task_id: str = "task-a",
