@@ -277,6 +277,7 @@ class RAGService:
                     "error_type": m.metadata.get("error_type", ""),
                     "service": m.metadata.get("service", ""),
                     "pr_url": m.metadata.get("pr_url", ""),
+                    "fix_description": m.metadata.get("fix_description", ""),
                     "text": m.document,
                     "score": m.score,
                 }
