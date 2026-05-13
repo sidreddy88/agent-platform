@@ -241,8 +241,7 @@ class RAGService:
         if not incident.diagnosis:
             return
         text = (
-            f"{incident.error_event.title} | {incident.error_event.error_type} | "
-            f"{incident.error_event.service} | {incident.error_event.description[:200]} | "
+            f"{incident.error_event.error_type}: {incident.error_event.description[:300]} | "
             f"Root cause: {incident.diagnosis}"
         )
         if incident.fix_description:
