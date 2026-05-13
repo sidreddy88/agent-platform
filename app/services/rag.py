@@ -345,6 +345,54 @@ class RAGService:
             logger.warning("[RAG] Hybrid search failed: %s", exc)
             return []
 
+    async def rerank_incidents(
+        self,
+        query: str,
+        n_results: int = 3,
+        candidate_pool: int = 20,
+    ) -> list[dict]:
+        """Two-stage retrieval: vector for recall, cross-encoder for precision.
+
+        Stage 1: fetch `candidate_pool` results from vector search at min_score=0.0
+        Stage 2: cross-encoder scores every (query, doc) pair jointly, re-sorts,
+                 returns top n_results.
+
+        Cross-encoder scores are logits (not cosine similarities). Positive means
+        relevant, negative means not. The spread is much wider than vector scores,
+        making the relevance signal cleaner.
+
+        Requires: pip install sentence-transformers
+        Model:    cross-encoder/ms-marco-MiniLM-L-6-v2 (~90MB, cached after first use)
+        """
+        if self._incident_collection.count() == 0:
+            return []
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError:
+            logger.warning("[RAG] sentence-transformers not installed — falling back to vector search")
+            return await self.search_incidents(query, n_results=n_results, min_score=0.0)
+
+        try:
+            candidates = await self.search_incidents(query, n_results=candidate_pool, min_score=0.0)
+            if not candidates:
+                return []
+
+            if not hasattr(self, "_cross_encoder"):
+                self._cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            ce = self._cross_encoder
+            pairs = [(query, r["text"]) for r in candidates]
+            ce_scores = ce.predict(pairs)
+
+            for r, ce_score in zip(candidates, ce_scores):
+                r["ce_score"] = round(float(ce_score), 4)
+                r["vector_score"] = r.pop("score")   # rename for clarity
+
+            reranked = sorted(candidates, key=lambda x: x["ce_score"], reverse=True)
+            return reranked[:n_results]
+        except Exception as exc:
+            logger.warning("[RAG] Cross-encoder rerank failed: %s", exc)
+            return await self.search_incidents(query, n_results=n_results, min_score=0.0)
+
     def clear(self) -> None:
         """Delete all indexed chunks (wipes the codebase collection)."""
         self._collection.clear()
