@@ -458,8 +458,9 @@ class IncidentLoop:
         if prior_context is None and _rag_similar:
             lines = ["Semantically similar past incidents (RAG, score ≥ 0.90):"]
             for s in _rag_similar:
+                fix_line = f" | Fix: {s['fix_description']}" if s.get("fix_description") else ""
                 lines.append(
-                    f"  [{s['score']:.2f}] {s['text'][:200]}\n"
+                    f"  [{s['score']:.2f}] {s['text'][:200]}{fix_line}\n"
                     f"    PR: {s['pr_url'] or 'none'} | Outcome: {s['status']}"
                 )
             prior_context = "\n".join(lines)
