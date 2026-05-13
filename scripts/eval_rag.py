@@ -32,41 +32,74 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # Test cases — edit these to match real incident IDs in your corpus
 # ---------------------------------------------------------------------------
 
+S3_ID       = "7b834ea9-34e3-40b3-93f0-3f2c6052db6a"  # canonical S3 NoSuchKey incident
+SYNTAX_ID   = "c3c393e8-7187-4b21-a5f9-6b4e72f23c42"  # JSON parse SyntaxError
+TYPEERR_ID  = "b90ed493-a21c-41fb-bb19-c95b9a11f15f"  # TypeError publish_decision
+
 TEST_CASES: list[dict] = [
-    # ── Image processing ─────────────────────────────────────────────────
+    # ── S3 NoSuchKey — exact wording ─────────────────────────────────────
     {
-        "query": "sharp cannot process image unsupported format",
-        "should_match": None,   # set to a real incident_id once you have one
-        "should_not_match": [],
-        "notes": "Checks HEIC/unsupported image format cluster",
+        "query": "S3 NoSuchKey error on missing file",
+        "should_match": S3_ID,
+        "should_not_match": [SYNTAX_ID, TYPEERR_ID],
+        "notes": "Close to indexed text — should be easy recall",
     },
+    # ── S3 NoSuchKey — paraphrased ───────────────────────────────────────
     {
-        "query": "image buffer corrupt header bad seek",
+        "query": "file not found when copying object in S3 bucket",
+        "should_match": S3_ID,
+        "should_not_match": [SYNTAX_ID, TYPEERR_ID],
+        "notes": "Different wording, same concept — tests semantic recall",
+    },
+    # ── S3 NoSuchKey — root cause angle ──────────────────────────────────
+    {
+        "query": "S3 delete operation key no longer exists no existence check",
+        "should_match": S3_ID,
+        "should_not_match": [SYNTAX_ID, TYPEERR_ID],
+        "notes": "Query matches root cause text, not error description",
+    },
+    # ── JSON SyntaxError — exact wording ─────────────────────────────────
+    {
+        "query": "SyntaxError unexpected token JSON parse failed openai response",
+        "should_match": SYNTAX_ID,
+        "should_not_match": [S3_ID],   # TYPEERR shares prankChecker tokens — ok in top-3
+        "notes": "Close to indexed text",
+    },
+    # ── JSON SyntaxError — paraphrased ───────────────────────────────────
+    {
+        "query": "openai returning markdown fenced JSON instead of plain JSON classifyFields",
+        "should_match": SYNTAX_ID,
+        "should_not_match": [S3_ID],   # TYPEERR shares prankChecker tokens — ok in top-3
+        "notes": "Root cause angle — response_format missing",
+    },
+    # ── TypeError — exact wording ────────────────────────────────────────
+    {
+        "query": "Cannot read properties of undefined reading publish_decision",
+        "should_match": TYPEERR_ID,
+        "should_not_match": [S3_ID],   # SYNTAX shares prankChecker tokens — ok in top-3
+        "notes": "Exact error message fragment",
+    },
+    # ── TypeError — paraphrased ──────────────────────────────────────────
+    {
+        "query": "classification field missing on llm response prankChecker",
+        "should_match": TYPEERR_ID,
+        "should_not_match": [S3_ID],   # SYNTAX shares prankChecker tokens — ok in top-3
+        "notes": "Root cause angle — incomplete object returned",
+    },
+    # ── Cross-type: should NOT confuse S3 with JSON error ────────────────
+    {
+        "query": "JSON parse error in prankCheckerOpenAI",
+        "should_match": SYNTAX_ID,
+        "should_not_match": [S3_ID],
+        "notes": "Precision check — S3 incident must not outrank SYNTAX",
+    },
+    # ── Noise — should match nothing strongly ────────────────────────────
+    {
+        "query": "deployment pipeline green all tests passing no issues",
         "should_match": None,
         "should_not_match": [],
-        "notes": "Variant wording of same image bug — should cluster with above",
-    },
-    # ── OOM / memory ─────────────────────────────────────────────────────
-    {
-        "query": "worker process killed exit code 137 out of memory",
-        "should_match": None,
-        "should_not_match": [],
-        "notes": "OOMKilled pattern",
-    },
-    # ── Database ─────────────────────────────────────────────────────────
-    {
-        "query": "too many connections database connection pool exhausted",
-        "should_match": None,
-        "should_not_match": [],
-        "notes": "DB connection leak",
-    },
-    # ── Noise should not match real incidents ─────────────────────────────
-    {
-        "query": "minor spelling and grammar errors",
-        "should_match": None,
-        "should_not_match": [],   # add real incident ids once populated
-        "notes": "Noise signal — expect very low scores",
-        "expect_top_below": 0.70,
+        "expect_top_below": 0.50,
+        "notes": "Unrelated content — top score should be noise-level",
     },
 ]
 
@@ -156,7 +189,7 @@ async def run(threshold: float, verbose: bool) -> int:
         if verbose and results:
             for r in results[:3]:
                 marker = "→" if r["incident_id"] == should_match else " "
-                print(f"       {marker} [{r['score']:.3f}] {r['indexed_text'][:80]}")
+                print(f"       {marker} [{r['score']:.3f}] {r['text'][:80]}")
 
     print(f"\n  {GREEN}{passed} passed{RESET}  {RED}{failed} failed{RESET}  {GREY}{skipped} skipped (no ground truth){RESET}")
     return 0 if failed == 0 else 1
