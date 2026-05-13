@@ -244,9 +244,6 @@ class RAGService:
             f"{incident.error_event.error_type}: {incident.error_event.description[:300]} | "
             f"Root cause: {incident.diagnosis}"
         )
-        if incident.fix_description:
-            text += f" | Fix: {incident.fix_description}"
-        text += f" | Outcome: {incident.status.value}"
 
         try:
             embedding = await self._embed([text])
@@ -259,6 +256,7 @@ class RAGService:
                     "error_type": incident.error_event.error_type or "",
                     "service": incident.error_event.service or "",
                     "pr_url": incident.pr_url or "",
+                    "fix_description": (incident.fix_description or "")[:200],
                 },
                 embedding=embedding[0],
             )])
