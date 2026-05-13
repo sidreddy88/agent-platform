@@ -336,12 +336,23 @@ class DetectionService:
                 seen: set[str] = set()
                 for log in matches:
                     msg = log["message"]
-                    # Skip structured application output — content moderation results,
-                    # LLM classification responses, and similar non-error payloads that
-                    # contain the word "error" only inside review text or JSON values.
+                    # Skip structured application output that incidentally contains
+                    # "error" or "Failed to" inside review text, JSON values, or
+                    # user-generated content (AllInterviews dumps full interview
+                    # answers in HTML form to its logs — those triggered the
+                    # `Error`/`Failed to ` filter via prose like "trial and error"
+                    # or "failed to recognize"). Markers cover three classes:
+                    #   1. Moderation pipeline payloads
+                    #   2. WordPress-rendered HTML interview content
+                    #   3. AllInterviews-specific structured fields
                     if any(marker in msg for marker in (
+                        # 1. Moderation / classification payloads
                         "publish_decision", "human_reviewer_note", "LLM check completed",
                         "risk_score", "suspicious_signals",
+                        # 2. WordPress / HTML interview content
+                        "<p><strong>", "<br/>", "<br />", "rendered:", "excerpt:",
+                        # 3. AllInterviews-specific content fields
+                        "panelAnswer", "previewPanelAnswer", "postInfo {",
                     )):
                         continue
                     normalized = re.sub(r'\b\d+\b', 'N', msg[:120]).strip()
