@@ -17,6 +17,7 @@ Usage:
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,6 +115,65 @@ def _chunk_file(file_path: str, content: str, language: str) -> list[CodeChunk]:
     return chunks
 
 
+_JS_FUNC_RE = re.compile(r'^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(')
+
+def _chunk_js_by_function(file_path: str, content: str, language: str) -> list[CodeChunk]:
+    """
+    Extract function-boundary chunks from JS/TS source.
+
+    Each top-level `(async) function name(` declaration becomes one chunk spanning
+    its declaration line to its closing brace. Short functions get their own chunk
+    with no surrounding noise, which eliminates the dilution problem that fixed
+    line-count windows produce.
+
+    Falls back to an empty list for files with no top-level function declarations
+    (caller should then fall back to _chunk_file).
+
+    Known limitation: brace characters inside string literals are counted. This is
+    rare in the AllInterviews backend and doesn't affect correctness in practice.
+    """
+    lines = content.splitlines()
+    chunks: list[CodeChunk] = []
+
+    i = 0
+    while i < len(lines):
+        m = _JS_FUNC_RE.match(lines[i])
+        if m:
+            name = m.group(1)
+            start = i
+            depth = 0
+            found_open = False
+            for j in range(i, len(lines)):
+                for ch in lines[j]:
+                    if ch == '{':
+                        depth += 1
+                        found_open = True
+                    elif ch == '}':
+                        depth -= 1
+                if found_open and depth <= 0:
+                    chunk_content = "\n".join(lines[start:j + 1])
+                    if chunk_content.strip():
+                        chunk_id = hashlib.sha256(
+                            f"fn:{file_path}:{start}".encode()
+                        ).hexdigest()[:16]
+                        chunks.append(CodeChunk(
+                            chunk_id=chunk_id,
+                            file_path=file_path,
+                            language=language,
+                            start_line=start + 1,
+                            end_line=j + 1,
+                            content=chunk_content,
+                        ))
+                    i = j + 1
+                    break
+            else:
+                i += 1
+        else:
+            i += 1
+
+    return chunks
+
+
 # ---------------------------------------------------------------------------
 # RAGService
 # ---------------------------------------------------------------------------
@@ -205,6 +265,58 @@ class RAGService:
                 score=m.score,
             ))
         return chunks
+
+    async def hybrid_search(
+        self,
+        query: str,
+        n_results: int = 5,
+        alpha: float = 0.7,
+    ) -> list[CodeChunk]:
+        """Hybrid lexical+semantic search over indexed code chunks.
+
+        Combines vector cosine similarity (weighted alpha) with a lexical match
+        bonus (weighted 1-alpha). Particularly effective for code search because:
+        - Vector captures semantic meaning (natural language descriptions of behaviour)
+        - Lexical rewards exact token presence (function names, error codes, API names)
+
+        hybrid_score = alpha × vector_score + (1-alpha) × lexical_score
+        lexical_score = fraction of query tokens found in the document text
+        alpha=0.7 keeps semantic as the primary signal; lexical is a tiebreaker.
+
+        Fetches max(n_results×4, 20) candidates so lexical can rescue low-scoring
+        but exact-match chunks, then re-ranks and returns top n_results.
+        """
+        if self._collection.count() == 0:
+            return []
+
+        embedding = await self._embed([query])
+        candidates = self._collection.query(
+            embedding[0], n_results=max(n_results * 4, 20)
+        )
+
+        query_tokens = set(query.lower().split())
+        scored: list[tuple[float, CodeChunk]] = []
+
+        for m in candidates:
+            vector_score = m.score
+            doc_lower = m.document.lower()
+            matched = sum(1 for t in query_tokens if t in doc_lower)
+            lexical_score = matched / len(query_tokens) if query_tokens else 0.0
+            hybrid = alpha * vector_score + (1 - alpha) * lexical_score
+
+            meta = m.metadata
+            scored.append((hybrid, CodeChunk(
+                chunk_id=meta.get("chunk_id", m.id),
+                file_path=meta.get("file_path", ""),
+                language=meta.get("language", ""),
+                start_line=int(meta.get("start_line", 0)),
+                end_line=int(meta.get("end_line", 0)),
+                content=m.document,
+                score=round(hybrid, 4),
+            )))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [chunk for _, chunk in scored[:n_results]]
 
     async def get_file(self, path: str) -> list[CodeChunk]:
         """Return all indexed chunks for a specific file, ordered by start line."""
@@ -423,7 +535,16 @@ class RAGService:
 
         language = SUPPORTED_EXTENSIONS[file_path.suffix]
         relative = str(file_path.relative_to(rel_root))
-        chunks = _chunk_file(relative, content, language)
+
+        # Use function-boundary chunking for JS/TS — avoids diluting short
+        # functions with surrounding unrelated code. Falls back to line-based
+        # if no top-level function declarations are found (e.g. config files).
+        if language in ("javascript", "typescript"):
+            chunks = _chunk_js_by_function(relative, content, language)
+            if not chunks:
+                chunks = _chunk_file(relative, content, language)
+        else:
+            chunks = _chunk_file(relative, content, language)
 
         if not chunks:
             return 0
