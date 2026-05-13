@@ -17,6 +17,7 @@ Usage:
 import asyncio
 import hashlib
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -449,15 +450,21 @@ class RAGService:
         return len(chunks)
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
-        """Fetch embeddings from OpenAI, handling rate limits with one retry."""
-        try:
-            response = await self._openai.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=texts,
-            )
-        except Exception as exc:
-            # Surface a clear error rather than a cryptic OpenAI SDK exception
-            raise RuntimeError(f"Embedding request failed: {exc}") from exc
-
-        # API returns embeddings in the same order as input
-        return [item.embedding for item in response.data]
+        """Fetch embeddings from OpenAI with exponential backoff on 429 rate limits."""
+        for attempt in range(4):
+            try:
+                response = await self._openai.embeddings.create(
+                    model=EMBEDDING_MODEL,
+                    input=texts,
+                )
+                return [item.embedding for item in response.data]
+            except Exception as exc:
+                msg = str(exc)
+                is_rate_limit = "429" in msg or "rate_limit" in msg.lower()
+                if is_rate_limit and attempt < 3:
+                    wait = 2 ** attempt * 5  # 5s, 10s, 20s
+                    logger.warning("[RAG] Rate limit hit, retrying in %ds (attempt %d/4)", wait, attempt + 1)
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(f"Embedding request failed: {exc}") from exc
+        raise RuntimeError("Embedding request failed after 4 attempts")
