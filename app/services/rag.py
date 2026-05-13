@@ -287,6 +287,64 @@ class RAGService:
             logger.warning("[RAG] Incident search failed: %s", exc)
             return []
 
+    async def hybrid_search_incidents(
+        self,
+        query: str,
+        n_results: int = 3,
+        min_score: float = 0.50,
+        alpha: float = 0.7,
+    ) -> list[dict]:
+        """Hybrid lexical + semantic incident search.
+
+        Combines vector similarity (weighted α) with a lexical match bonus
+        (weighted 1-α). Useful when the query contains exact identifiers
+        (function names, error codes) that vector retrieval underweights.
+
+        hybrid_score = α × vector_score + (1-α) × lexical_score
+        where lexical_score = fraction of query tokens found in the document.
+        alpha=0.7 means semantic is primary; lexical is a tiebreaker.
+        """
+        if self._incident_collection.count() == 0:
+            return []
+        try:
+            # Fetch a wider candidate set at min_score=0.0 so lexical can rescue
+            # low-scoring but exact-match documents
+            embedding = await self._embed([query])
+            candidates = self._incident_collection.query(embedding[0], n_results=max(n_results * 4, 20))
+
+            query_tokens = set(query.lower().split())
+
+            scored = []
+            for m in candidates:
+                vector_score = m.score
+                doc_lower = m.document.lower()
+                matched = sum(1 for t in query_tokens if t in doc_lower)
+                lexical_score = matched / len(query_tokens) if query_tokens else 0.0
+                hybrid = alpha * vector_score + (1 - alpha) * lexical_score
+                scored.append((hybrid, vector_score, lexical_score, m))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            return [
+                {
+                    "incident_id": m.metadata.get("incident_id", m.id),
+                    "status":      m.metadata.get("status", ""),
+                    "error_type":  m.metadata.get("error_type", ""),
+                    "service":     m.metadata.get("service", ""),
+                    "pr_url":      m.metadata.get("pr_url", ""),
+                    "fix_description": m.metadata.get("fix_description", ""),
+                    "text":        m.document,
+                    "score":       round(hybrid, 4),
+                    "vector_score":   round(vector_score, 4),
+                    "lexical_score":  round(lexical_score, 4),
+                }
+                for hybrid, vector_score, lexical_score, m in scored
+                if hybrid >= min_score
+            ][:n_results]
+        except Exception as exc:
+            logger.warning("[RAG] Hybrid search failed: %s", exc)
+            return []
+
     def clear(self) -> None:
         """Delete all indexed chunks (wipes the codebase collection)."""
         self._collection.clear()
