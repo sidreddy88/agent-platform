@@ -99,6 +99,43 @@ class AWSError(Exception):
         self.service = service
 
 
+# Patterns that mark a line as a continuation of an error: Node-style stack
+# frames ("at functionName (/path:line:col)"), Python tracebacks ("File ...,
+# line N"), Java/Kotlin stack frames ("at fq.name(File.java:N)"), and common
+# error-continuation prefixes ("Caused by:", "    ... N more", "at /path:N").
+_STACK_FRAME_PATTERNS = (
+    re.compile(r"^\s*at\s"),                          # Node, Java
+    re.compile(r'^\s*File\s+".+",\s*line\s+\d+'),     # Python traceback
+    re.compile(r"^\s*Caused by:"),                    # Java chained exception
+    re.compile(r"^\s*\.\.\. \d+ more"),               # Java "... N more"
+    re.compile(r"^\s*\^"),                            # Python/Node caret indicator
+    re.compile(r"^[A-Z][A-Za-z0-9]*(?:Error|Exception):"),  # nested error class
+)
+
+
+def _trim_to_stack_frames(ctx_lines: list[str]) -> list[str]:
+    """Return only the leading sequence of stack-frame-shaped lines from
+    ``ctx_lines``. Stops at the first non-frame line.
+
+    Errors are usually followed by their stack frames immediately. When the
+    next log line in the stream is something unrelated (a user-content dump,
+    a request log, a JSON response body), we don't want to drag it into the
+    error's description as if it were context. Anything after the first
+    non-frame line is discarded.
+    """
+    kept: list[str] = []
+    for line in ctx_lines:
+        if not line.strip():
+            # Blank lines pass through — common between Java frames
+            kept.append(line)
+            continue
+        if any(p.search(line) for p in _STACK_FRAME_PATTERNS):
+            kept.append(line)
+            continue
+        break
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # AWSService
 # ---------------------------------------------------------------------------
@@ -555,6 +592,12 @@ class AWSService:
                 # Drop the first line if it's the error line itself (same message)
                 if ctx_lines and ctx_lines[0].strip() == message.strip():
                     ctx_lines = ctx_lines[1:]
+                # Stop accumulating at the first line that doesn't look like a
+                # stack frame or error continuation. TargetApp emits user
+                # interview HTML right after some errors in the same request
+                # handler — without this filter those lines get glued onto the
+                # error description and corrupt the signal.
+                ctx_lines = _trim_to_stack_frames(ctx_lines)
                 if ctx_lines:
                     message = message + "\n" + "\n".join(ctx_lines[:20])
             except (BotoCoreError, ClientError):
