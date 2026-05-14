@@ -244,8 +244,13 @@ class RAGService:
         logger.info("Indexed %d chunks total", total)
         return total
 
-    async def search(self, query: str, n_results: int = 5) -> list[CodeChunk]:
-        """Semantic search over indexed chunks. Best first, up to n_results."""
+    async def search(self, query: str, n_results: int = 5, min_score: float = 0.0) -> list[CodeChunk]:
+        """Semantic search over indexed chunks. Best first, up to n_results.
+
+        min_score filters out chunks below the threshold before returning.
+        Recommended: 0.45 for code search (scores below this are noise).
+        Default is 0.0 (no filtering) for backwards compatibility.
+        """
         if self._collection.count() == 0:
             return []
 
@@ -254,6 +259,8 @@ class RAGService:
 
         chunks: list[CodeChunk] = []
         for m in matches:
+            if m.score < min_score:
+                continue
             meta = m.metadata
             chunks.append(CodeChunk(
                 chunk_id=meta.get("chunk_id", m.id),
@@ -271,6 +278,7 @@ class RAGService:
         query: str,
         n_results: int = 5,
         alpha: float = 0.7,
+        min_score: float = 0.0,
     ) -> list[CodeChunk]:
         """Hybrid lexical+semantic search over indexed code chunks.
 
@@ -285,6 +293,9 @@ class RAGService:
 
         Fetches max(n_results×4, 20) candidates so lexical can rescue low-scoring
         but exact-match chunks, then re-ranks and returns top n_results.
+
+        min_score filters out chunks below the threshold before returning.
+        Recommended: 0.45 for code search. Default 0.0 for backwards compatibility.
         """
         if self._collection.count() == 0:
             return []
@@ -303,6 +314,9 @@ class RAGService:
             matched = sum(1 for t in query_tokens if t in doc_lower)
             lexical_score = matched / len(query_tokens) if query_tokens else 0.0
             hybrid = alpha * vector_score + (1 - alpha) * lexical_score
+
+            if hybrid < min_score:
+                continue
 
             meta = m.metadata
             scored.append((hybrid, CodeChunk(
