@@ -576,30 +576,53 @@ class AWSService:
             ts = datetime.fromtimestamp(ev["timestamp"] / 1000, tz=timezone.utc).isoformat()
             message = ev.get("message", "").rstrip()
 
-            # Fetch context lines after the error to capture stack traces.
-            # Stack frames ("at functionName (/app/...)") appear on subsequent
-            # lines and won't match the error filter pattern above.
+            # Fetch context lines to capture stack traces.
+            #
+            # Two strategies depending on the error type:
+            #
+            # "app crashed" (nodemon) — the actual error appears BEFORE the
+            #   crash message. Look back 20 seconds in the same stream to get
+            #   the TypeError/stack trace that caused the crash.
+            #
+            # Everything else — stack frames appear AFTER the error line on
+            #   subsequent log lines. Fetch a 5-second forward window.
             try:
-                ctx_resp = logs.get_log_events(
-                    logGroupName=log_group,
-                    logStreamName=ev["logStreamName"],
-                    startTime=ev["timestamp"],
-                    endTime=ev["timestamp"] + 5000,  # 5-second window
-                    limit=25,
-                    startFromHead=True,
-                )
-                ctx_lines = [e.get("message", "").rstrip() for e in ctx_resp.get("events", [])]
-                # Drop the first line if it's the error line itself (same message)
-                if ctx_lines and ctx_lines[0].strip() == message.strip():
-                    ctx_lines = ctx_lines[1:]
-                # Stop accumulating at the first line that doesn't look like a
-                # stack frame or error continuation. AllInterviews emits user
-                # interview HTML right after some errors in the same request
-                # handler — without this filter those lines get glued onto the
-                # error description and corrupt the signal.
-                ctx_lines = _trim_to_stack_frames(ctx_lines)
-                if ctx_lines:
-                    message = message + "\n" + "\n".join(ctx_lines[:20])
+                is_crash = "app crashed" in message
+                if is_crash:
+                    ctx_resp = logs.get_log_events(
+                        logGroupName=log_group,
+                        logStreamName=ev["logStreamName"],
+                        startTime=ev["timestamp"] - 20_000,  # 20 seconds before crash
+                        endTime=ev["timestamp"],
+                        limit=25,
+                        startFromHead=True,
+                    )
+                    ctx_lines = [e.get("message", "").rstrip() for e in ctx_resp.get("events", [])]
+                    # Drop the crash line itself if it appears at the end
+                    if ctx_lines and ctx_lines[-1].strip() == message.strip():
+                        ctx_lines = ctx_lines[:-1]
+                    # Keep only the last 20 lines (closest to the crash)
+                    ctx_lines = ctx_lines[-20:]
+                    if ctx_lines:
+                        message = "\n".join(ctx_lines) + "\n" + message
+                else:
+                    ctx_resp = logs.get_log_events(
+                        logGroupName=log_group,
+                        logStreamName=ev["logStreamName"],
+                        startTime=ev["timestamp"],
+                        endTime=ev["timestamp"] + 5_000,  # 5-second forward window
+                        limit=25,
+                        startFromHead=True,
+                    )
+                    ctx_lines = [e.get("message", "").rstrip() for e in ctx_resp.get("events", [])]
+                    # Drop the first line if it's the error line itself
+                    if ctx_lines and ctx_lines[0].strip() == message.strip():
+                        ctx_lines = ctx_lines[1:]
+                    # Stop at first non-stack-frame line to avoid dragging in
+                    # user content (interview HTML, JSON response bodies, etc.)
+                    ctx_lines = _trim_to_stack_frames(ctx_lines)
+                    if ctx_lines:
+                        message = message + "\n" + "\n".join(ctx_lines[:20])
             except (BotoCoreError, ClientError):
                 pass  # context is best-effort; proceed with just the error line
 
