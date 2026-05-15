@@ -407,6 +407,12 @@ class FixGenerationAgent(BaseAgent):
             steps.append(f"✗ Sandbox attempt {attempt}/{_MAX_ATTEMPTS} failed ({reason})\n{_test_failures}")
             logger.warning("[FixGen] Sandbox attempt %d failed for %s", attempt, incident.id)
 
+            # Sandbox unavailable (npm/Docker not present) — skip rather than retry
+            if sandbox_result.error and "not available" in sandbox_result.error:
+                steps.append("⚠ Sandbox unavailable in this environment — skipping validation")
+                logger.warning("[FixGen] Sandbox unavailable for %s — proceeding without validation", incident.id)
+                break
+
             if attempt == _MAX_ATTEMPTS:
                 return _fail(
                     f"Sandbox tests failed after {_MAX_ATTEMPTS} attempts: {reason}",
