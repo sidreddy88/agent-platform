@@ -22,6 +22,7 @@ from app.models.events import ErrorEvent, EventSource, Severity
 from app.services.aws import AWSService
 from app.services.cloudflare_service import cloudflare_service
 from app.services.digitalocean import do_service
+from app.services.event_queue import event_queue
 from app.services.pending_events import pending_event_store
 
 logger = logging.getLogger(__name__)
@@ -366,20 +367,21 @@ class DetectionService:
                         error_type = exc_match.group(1).upper()
                     else:
                         error_type = next(
-                            (kw for kw in ("FATAL", "CRITICAL", "EXCEPTION", "ERROR", "Error")
+                            (kw for kw in ("FATAL", "CRITICAL", "EXCEPTION", "ERROR", "Error", "app crashed")
                              if kw in msg),
                             "ECS_ERROR",
-                        ).upper()
+                        ).upper().replace(" ", "_")
 
-                    # Categorise for the dashboard's Errors / Non-errors split.
-                    # Deprecation warnings (compat hygiene) and connection-class
-                    # timeouts (transient network blips, not code bugs) route to
-                    # Non-errors so the Errors tab stays focused on real bugs.
-                    category = (
-                        "non_error"
-                        if any(m in error_type for m in ("WARNING", "DEPRECATION", "TIMEOUT", "CONNECTION"))
-                        else "error"
-                    )
+                    # Categorise for the dashboard tab split:
+                    #   crash     — process exited (nodemon "app crashed")
+                    #   non_error — deprecation warnings, transient network blips
+                    #   error     — everything else
+                    if "APP_CRASHED" in error_type:
+                        category = "crash"
+                    elif any(m in error_type for m in ("WARNING", "DEPRECATION", "TIMEOUT", "CONNECTION")):
+                        category = "non_error"
+                    else:
+                        category = "error"
 
                     stream_parts = log["stream"].rsplit("/", 1)
                     task_id = stream_parts[-1] if len(stream_parts) > 1 else log["stream"]
@@ -517,6 +519,15 @@ class DetectionService:
 
         for event in all_events:
             try:
+                # Crashes (process exits) bypass the approval gate — they are
+                # high-severity enough that human review before diagnosis adds
+                # unnecessary delay. All other events wait for manual approval.
+                if event.category == "crash":
+                    await event_queue.enqueue(event)
+                    await broadcast({"type": "crash_auto_queued", "title": event.title})
+                    logger.info("[CRASH] Auto-queued for pipeline: %s", event.title)
+                    continue
+
                 pe, is_new = pending_event_store.add(event)
                 if pe is None:
                     continue

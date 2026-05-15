@@ -11,7 +11,7 @@ export function EventApprovalPage({ events }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [dismissing, setDismissing] = useState<Set<string>>(new Set());
-  const [tab, setTab] = useState<"errors" | "non_errors">("errors");
+  const [tab, setTab] = useState<"crashes" | "errors" | "non_errors">("crashes");
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded((prev) => {
@@ -55,11 +55,11 @@ export function EventApprovalPage({ events }: Props) {
   }
 
   const undismissed = events.filter((e) => !dismissed.has(e.id));
-  const errorCount = undismissed.filter((e) => (e.category ?? "error") === "error").length;
+  const crashCount    = undismissed.filter((e) => e.category === "crash").length;
+  const errorCount    = undismissed.filter((e) => (e.category ?? "error") === "error").length;
   const nonErrorCount = undismissed.filter((e) => (e.category ?? "error") === "non_error").length;
-  const visible = undismissed.filter(
-    (e) => (e.category ?? "error") === (tab === "errors" ? "error" : "non_error")
-  );
+  const categoryForTab = tab === "crashes" ? "crash" : tab === "errors" ? "error" : "non_error";
+  const visible = undismissed.filter((e) => (e.category ?? "error") === categoryForTab);
 
   return (
     <div style={container}>
@@ -80,6 +80,10 @@ export function EventApprovalPage({ events }: Props) {
 
       {/* Sub-tabs */}
       <div style={tabRow}>
+        <button style={tabBtn(tab === "crashes")} onClick={() => setTab("crashes")}>
+          Crashes
+          <span style={tabCountBadge(tab === "crashes")}>{crashCount}</span>
+        </button>
         <button style={tabBtn(tab === "errors")} onClick={() => setTab("errors")}>
           Errors
           <span style={tabCountBadge(tab === "errors")}>{errorCount}</span>
@@ -93,7 +97,9 @@ export function EventApprovalPage({ events }: Props) {
       {visible.length === 0 ? (
         <div style={empty}>
           <p style={emptyText}>
-            {tab === "errors"
+            {tab === "crashes"
+              ? "No crashes detected. Process exits and nodemon restarts will appear here."
+              : tab === "errors"
               ? "No pending errors. Run a scan to detect new issues."
               : "No non-error signals. Deprecation warnings and connection timeouts will appear here."}
           </p>

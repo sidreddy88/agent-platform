@@ -553,7 +553,7 @@ class AWSService:
             logGroupName=log_group,
             startTime=start_ms,
             endTime=end_ms,
-            filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback" ?"DeprecationWarning" ?"Failed to "',
+            filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback" ?"DeprecationWarning" ?"Failed to " ?"app crashed"',
         )
 
         _MAX_EVENTS = limit if limit is not None else 300
