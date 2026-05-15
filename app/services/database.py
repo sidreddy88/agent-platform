@@ -189,6 +189,23 @@ class _Tables:
         Index("idx_agent_failures_created_at", "created_at"),
     )
 
+    # Maps each indexed file (doc_id = relative file path) to the chunk vector
+    # IDs currently live in the vector store, plus a content hash for change
+    # detection. When a file is re-indexed, old chunk IDs are deleted from the
+    # vector store and this table is updated atomically.
+    doc_chunk_registry = Table(
+        "doc_chunk_registry",
+        metadata,
+        Column("doc_id", String, nullable=False),           # relative file path
+        Column("chunk_vector_id", String, nullable=False),  # chunk_id in vector store
+        Column("content_hash", String, nullable=False),     # sha256 of file content
+        Column("collection", String, nullable=False),       # vector collection name
+        Column("indexed_at", String, nullable=False),
+        Column("status", String, nullable=False, default="active"),  # active | superseded
+        Index("idx_dcr_doc_id", "doc_id"),
+        Index("idx_dcr_chunk_vector_id", "chunk_vector_id"),
+    )
+
 
 tables = _Tables()
 
