@@ -35,6 +35,53 @@ _FALSY_ERROR_FIELD_RE = re.compile(
     r'\b[a-z]\w*(?:Error|Exception)\s*:\s*(?:false|null|undefined)\b'
 )
 
+_SKIP_MARKERS = (
+    # Moderation / classification payloads
+    "publish_decision", "human_reviewer_note", "LLM check completed",
+    "risk_score", "suspicious_signals",
+    # WordPress / HTML interview content
+    "<p><strong>", "<br/>", "<br />", "rendered:", "excerpt:",
+    # TargetApp-specific content fields
+    "panelAnswer", "previewPanelAnswer", "postInfo {",
+)
+
+_EXC_CLASS_RE = re.compile(r'\b([A-Z][a-zA-Z0-9]*(?:Error|Exception|Fault|Warning))\b')
+_KEYWORDS = ("FATAL", "CRITICAL", "EXCEPTION", "ERROR", "Error", "app crashed")
+
+
+def classify_ecs_log(msg: str) -> tuple[str, str] | None:
+    """Classify a raw ECS log message.
+
+    Returns ``(error_type, category)`` if the message is a real error, or
+    ``None`` if it should be skipped (false positive / structured status field).
+
+    Used by both the background detection poller and the on-demand scan endpoint
+    so they stay in sync.
+    """
+    if any(marker in msg for marker in _SKIP_MARKERS):
+        return None
+    if _FALSY_ERROR_FIELD_RE.search(msg):
+        return None
+
+    exc_match = _EXC_CLASS_RE.search(msg)
+    if exc_match:
+        error_type = exc_match.group(1).upper()
+    else:
+        error_type = next(
+            (kw for kw in _KEYWORDS if kw in msg),
+            "ECS_ERROR",
+        ).upper().replace(" ", "_")
+
+    if "APP_CRASHED" in error_type:
+        category = "crash"
+    elif any(m in error_type for m in ("WARNING", "DEPRECATION", "TIMEOUT", "CONNECTION")):
+        category = "non_error"
+    else:
+        category = "error"
+
+    return error_type, category
+
+
 # Detection thresholds
 ECS_CPU_THRESHOLD_PCT = 85.0
 ECS_MEMORY_THRESHOLD_PCT = 90.0
@@ -345,56 +392,15 @@ class DetectionService:
                 seen: set[str] = set()
                 for log in matches:
                     msg = log["message"]
-                    # Skip structured application output that incidentally contains
-                    # "error" or "Failed to" inside review text, JSON values, or
-                    # user-generated content (TargetApp dumps full interview
-                    # answers in HTML form to its logs — those triggered the
-                    # `Error`/`Failed to ` filter via prose like "trial and error"
-                    # or "failed to recognize"). Markers cover three classes:
-                    #   1. Moderation pipeline payloads
-                    #   2. WordPress-rendered HTML interview content
-                    #   3. TargetApp-specific structured fields
-                    if any(marker in msg for marker in (
-                        # 1. Moderation / classification payloads
-                        "publish_decision", "human_reviewer_note", "LLM check completed",
-                        "risk_score", "suspicious_signals",
-                        # 2. WordPress / HTML interview content
-                        "<p><strong>", "<br/>", "<br />", "rendered:", "excerpt:",
-                        # 3. TargetApp-specific content fields
-                        "panelAnswer", "previewPanelAnswer", "postInfo {",
-                    )):
+                    classified = classify_ecs_log(msg)
+                    if classified is None:
                         continue
-                    # Skip lines where an Error/Exception field is logged with a
-                    # falsy value — these are application status flags, not real
-                    # errors (e.g. "clarifyTimeoutError: false", "authorizationError: null")
-                    if _FALSY_ERROR_FIELD_RE.search(msg):
-                        continue
+                    error_type, category = classified
                     normalized = re.sub(r'\b\d+\b', 'N', msg[:120]).strip()
                     sig = normalized[:80]
                     if sig in seen:
                         continue
                     seen.add(sig)
-                    # Try to extract a specific exception/error class name first
-                    exc_match = re.search(r'\b([A-Z][a-zA-Z0-9]*(?:Error|Exception|Fault|Warning))\b', msg)
-                    if exc_match:
-                        error_type = exc_match.group(1).upper()
-                    else:
-                        error_type = next(
-                            (kw for kw in ("FATAL", "CRITICAL", "EXCEPTION", "ERROR", "Error", "app crashed")
-                             if kw in msg),
-                            "ECS_ERROR",
-                        ).upper().replace(" ", "_")
-
-                    # Categorise for the dashboard tab split:
-                    #   crash     — process exited (nodemon "app crashed")
-                    #   non_error — deprecation warnings, transient network blips
-                    #   error     — everything else
-                    if "APP_CRASHED" in error_type:
-                        category = "crash"
-                    elif any(m in error_type for m in ("WARNING", "DEPRECATION", "TIMEOUT", "CONNECTION")):
-                        category = "non_error"
-                    else:
-                        category = "error"
 
                     stream_parts = log["stream"].rsplit("/", 1)
                     task_id = stream_parts[-1] if len(stream_parts) > 1 else log["stream"]
