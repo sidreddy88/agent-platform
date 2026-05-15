@@ -232,18 +232,27 @@ class SandboxService:
         import os
         env = {**os.environ, "NODE_ENV": "test"}
 
-        install = subprocess.run(
-            ["npm", "install"],
-            capture_output=True, text=True, cwd=workdir, timeout=180, env=env,
-        )
+        try:
+            install = subprocess.run(
+                ["npm", "install"],
+                capture_output=True, text=True, cwd=workdir, timeout=180, env=env,
+            )
+        except FileNotFoundError:
+            logger.warning("[Sandbox] npm not found — sandbox unavailable in this environment")
+            return SandboxResult(passed=False, output="", error="npm not available in this environment — sandbox skipped")
+
         if install.returncode != 0:
             logger.error("[Sandbox] npm install failed")
             return SandboxResult(passed=False, output=install.stderr, error="npm install failed")
 
-        result = subprocess.run(
-            ["npm", "test"],
-            capture_output=True, text=True, cwd=workdir, timeout=180, env=env,
-        )
+        try:
+            result = subprocess.run(
+                ["npm", "test"],
+                capture_output=True, text=True, cwd=workdir, timeout=180, env=env,
+            )
+        except FileNotFoundError:
+            return SandboxResult(passed=False, output="", error="npm not available in this environment — sandbox skipped")
+
         output = result.stdout + result.stderr
         passed = result.returncode == 0
         logger.info("[Sandbox] Tests %s via direct npm test (exit %d)", "PASSED" if passed else "FAILED", result.returncode)
