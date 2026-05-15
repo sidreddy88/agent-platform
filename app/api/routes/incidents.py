@@ -16,6 +16,7 @@ from app.api.websocket_dashboard import broadcast
 from app.core.config import settings
 from app.models.events import ErrorEvent, EventSource, IncidentStatus
 from app.services.aws import AWSService
+from app.services.detection import classify_ecs_log
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 from app.services.pending_events import pending_event_store
@@ -114,10 +115,10 @@ async def scan_last_24h() -> Dict[str, Any]:
                     continue
                 seen.add(sig)
 
-                exc_match = re.search(
-                    r'\b([A-Z][a-zA-Z0-9]*(?:Error|Exception|Fault|Warning))\b', msg
-                )
-                error_type = exc_match.group(1).upper() if exc_match else "ECS_ERROR"
+                classified = classify_ecs_log(msg)
+                if classified is None:
+                    continue
+                error_type, category = classified
 
                 stream_parts = stream.rsplit("/", 1)
                 task_id = stream_parts[-1] if len(stream_parts) > 1 else stream
@@ -130,12 +131,22 @@ async def scan_last_24h() -> Dict[str, Any]:
                     description=msg[:600],
                     service=service,
                     resource_id=log_group,
+                    category=category,
                     metadata={
                         "log_group": log_group,
                         "task_id": task_id,
                         "timestamp": log["timestamp"],
                     },
                 )
+
+                # Crashes bypass the approval queue — auto-enqueue immediately
+                if category == "crash":
+                    await event_queue.enqueue(event)
+                    await broadcast({"type": "crash_auto_queued", "title": event.title})
+                    queued.append({"id": event.id, "title": event.title, "service": service})
+                    await _scan_log(f"  → crash auto-queued: {msg[:80].strip()}", level="event")
+                    continue
+
                 pe, is_new = pending_event_store.add(event)
                 if pe is None:
                     continue
