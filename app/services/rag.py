@@ -25,6 +25,7 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.services.tracing import _get_client as _lf_client
 from app.services.vector_store import VectorItem, make_collection
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,7 @@ class RAGService:
             raise ValueError("OpenAI API key required (set OPENAI_API_KEY in .env)")
 
         self._openai = AsyncOpenAI(api_key=api_key)
+        self._collection_name = collection_name
         self._collection = make_collection(collection_name, chroma_path=chroma_path)
         self._incident_collection = make_collection("incidents", chroma_path=chroma_path)
 
@@ -254,23 +256,49 @@ class RAGService:
         if self._collection.count() == 0:
             return []
 
-        embedding = await self._embed([query])
-        matches = self._collection.query(embedding[0], n_results=n_results)
+        lf = _lf_client()
+        start = time.perf_counter()
 
-        chunks: list[CodeChunk] = []
-        for m in matches:
-            if m.score < min_score:
-                continue
-            meta = m.metadata
-            chunks.append(CodeChunk(
-                chunk_id=meta.get("chunk_id", m.id),
-                file_path=meta.get("file_path", ""),
-                language=meta.get("language", ""),
-                start_line=int(meta.get("start_line", 0)),
-                end_line=int(meta.get("end_line", 0)),
-                content=m.document,
-                score=m.score,
-            ))
+        async def _run() -> list[CodeChunk]:
+            embedding = await self._embed([query])
+            matches = self._collection.query(embedding[0], n_results=n_results)
+            chunks: list[CodeChunk] = []
+            for m in matches:
+                if m.score < min_score:
+                    continue
+                meta = m.metadata
+                chunks.append(CodeChunk(
+                    chunk_id=meta.get("chunk_id", m.id),
+                    file_path=meta.get("file_path", ""),
+                    language=meta.get("language", ""),
+                    start_line=int(meta.get("start_line", 0)),
+                    end_line=int(meta.get("end_line", 0)),
+                    content=m.document,
+                    score=m.score,
+                ))
+            return chunks
+
+        if lf is None:
+            return await _run()
+
+        with lf.start_as_current_observation(
+            name="rag.search",
+            as_type="span",
+            input={"query": query, "n_results": n_results, "min_score": min_score},
+        ) as obs:
+            chunks = await _run()
+            obs.update(
+                output={"num_results": len(chunks), "top_score": chunks[0].score if chunks else None},
+                metadata={
+                    "collection": self._collection_name,
+                    "duration_ms": int((time.perf_counter() - start) * 1000),
+                    "results": [
+                        {"rank": i, "score": c.score, "file_path": c.file_path,
+                         "chunk_id": c.chunk_id, "start_line": c.start_line}
+                        for i, c in enumerate(chunks)
+                    ],
+                },
+            )
         return chunks
 
     async def hybrid_search(
@@ -300,37 +328,61 @@ class RAGService:
         if self._collection.count() == 0:
             return []
 
-        embedding = await self._embed([query])
-        candidates = self._collection.query(
-            embedding[0], n_results=max(n_results * 4, 20)
-        )
+        lf = _lf_client()
+        start = time.perf_counter()
 
-        query_tokens = set(query.lower().split())
-        scored: list[tuple[float, CodeChunk]] = []
+        async def _run() -> list[CodeChunk]:
+            embedding = await self._embed([query])
+            candidates = self._collection.query(
+                embedding[0], n_results=max(n_results * 4, 20)
+            )
+            query_tokens = set(query.lower().split())
+            scored: list[tuple[float, float, float, CodeChunk]] = []
+            for m in candidates:
+                vector_score = m.score
+                doc_lower = m.document.lower()
+                matched = sum(1 for t in query_tokens if t in doc_lower)
+                lexical_score = matched / len(query_tokens) if query_tokens else 0.0
+                hybrid = alpha * vector_score + (1 - alpha) * lexical_score
+                if hybrid < min_score:
+                    continue
+                meta = m.metadata
+                scored.append((hybrid, vector_score, lexical_score, CodeChunk(
+                    chunk_id=meta.get("chunk_id", m.id),
+                    file_path=meta.get("file_path", ""),
+                    language=meta.get("language", ""),
+                    start_line=int(meta.get("start_line", 0)),
+                    end_line=int(meta.get("end_line", 0)),
+                    content=m.document,
+                    score=round(hybrid, 4),
+                )))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return scored[:n_results]
 
-        for m in candidates:
-            vector_score = m.score
-            doc_lower = m.document.lower()
-            matched = sum(1 for t in query_tokens if t in doc_lower)
-            lexical_score = matched / len(query_tokens) if query_tokens else 0.0
-            hybrid = alpha * vector_score + (1 - alpha) * lexical_score
+        if lf is None:
+            return [c for _, _, _, c in await _run()]
 
-            if hybrid < min_score:
-                continue
-
-            meta = m.metadata
-            scored.append((hybrid, CodeChunk(
-                chunk_id=meta.get("chunk_id", m.id),
-                file_path=meta.get("file_path", ""),
-                language=meta.get("language", ""),
-                start_line=int(meta.get("start_line", 0)),
-                end_line=int(meta.get("end_line", 0)),
-                content=m.document,
-                score=round(hybrid, 4),
-            )))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [chunk for _, chunk in scored[:n_results]]
+        with lf.start_as_current_observation(
+            name="rag.hybrid_search",
+            as_type="span",
+            input={"query": query, "n_results": n_results, "alpha": alpha, "min_score": min_score},
+        ) as obs:
+            scored = await _run()
+            chunks = [c for _, _, _, c in scored]
+            obs.update(
+                output={"num_results": len(chunks), "top_score": chunks[0].score if chunks else None},
+                metadata={
+                    "collection": self._collection_name,
+                    "duration_ms": int((time.perf_counter() - start) * 1000),
+                    "results": [
+                        {"rank": i, "score": c.score, "vector_score": round(vs, 4),
+                         "lexical_score": round(ls, 4), "file_path": c.file_path,
+                         "chunk_id": c.chunk_id, "start_line": c.start_line}
+                        for i, (_, vs, ls, c) in enumerate(scored)
+                    ],
+                },
+            )
+        return chunks
 
     async def get_file(self, path: str) -> list[CodeChunk]:
         """Return all indexed chunks for a specific file, ordered by start line."""
@@ -394,7 +446,11 @@ class RAGService:
         """Semantic search over indexed incidents. Returns matches above min_score, best first."""
         if self._incident_collection.count() == 0:
             return []
-        try:
+
+        lf = _lf_client()
+        start = time.perf_counter()
+
+        async def _run() -> list[dict]:
             embedding = await self._embed([query])
             results = self._incident_collection.query(embedding[0], n_results=n_results)
             return [
@@ -411,6 +467,30 @@ class RAGService:
                 for m in results
                 if m.score >= min_score
             ]
+
+        try:
+            if lf is None:
+                return await _run()
+
+            with lf.start_as_current_observation(
+                name="rag.search_incidents",
+                as_type="span",
+                input={"query": query, "n_results": n_results, "min_score": min_score},
+            ) as obs:
+                hits = await _run()
+                obs.update(
+                    output={"num_results": len(hits), "top_score": hits[0]["score"] if hits else None},
+                    metadata={
+                        "collection": "incidents",
+                        "duration_ms": int((time.perf_counter() - start) * 1000),
+                        "results": [
+                            {"rank": i, "score": h["score"], "incident_id": h["incident_id"],
+                             "error_type": h["error_type"]}
+                            for i, h in enumerate(hits)
+                        ],
+                    },
+                )
+            return hits
         except Exception as exc:
             logger.warning("[RAG] Incident search failed: %s", exc)
             return []
@@ -434,14 +514,14 @@ class RAGService:
         """
         if self._incident_collection.count() == 0:
             return []
-        try:
-            # Fetch a wider candidate set at min_score=0.0 so lexical can rescue
-            # low-scoring but exact-match documents
+
+        lf = _lf_client()
+        start = time.perf_counter()
+
+        async def _run() -> list[dict]:
             embedding = await self._embed([query])
             candidates = self._incident_collection.query(embedding[0], n_results=max(n_results * 4, 20))
-
             query_tokens = set(query.lower().split())
-
             scored = []
             for m in candidates:
                 vector_score = m.score
@@ -450,9 +530,7 @@ class RAGService:
                 lexical_score = matched / len(query_tokens) if query_tokens else 0.0
                 hybrid = alpha * vector_score + (1 - alpha) * lexical_score
                 scored.append((hybrid, vector_score, lexical_score, m))
-
             scored.sort(key=lambda x: x[0], reverse=True)
-
             return [
                 {
                     "incident_id": m.metadata.get("incident_id", m.id),
@@ -469,6 +547,31 @@ class RAGService:
                 for hybrid, vector_score, lexical_score, m in scored
                 if hybrid >= min_score
             ][:n_results]
+
+        try:
+            if lf is None:
+                return await _run()
+
+            with lf.start_as_current_observation(
+                name="rag.hybrid_search_incidents",
+                as_type="span",
+                input={"query": query, "n_results": n_results, "alpha": alpha, "min_score": min_score},
+            ) as obs:
+                hits = await _run()
+                obs.update(
+                    output={"num_results": len(hits), "top_score": hits[0]["score"] if hits else None},
+                    metadata={
+                        "collection": "incidents",
+                        "duration_ms": int((time.perf_counter() - start) * 1000),
+                        "results": [
+                            {"rank": i, "score": h["score"], "vector_score": h["vector_score"],
+                             "lexical_score": h["lexical_score"], "incident_id": h["incident_id"],
+                             "error_type": h["error_type"]}
+                            for i, h in enumerate(hits)
+                        ],
+                    },
+                )
+            return hits
         except Exception as exc:
             logger.warning("[RAG] Hybrid search failed: %s", exc)
             return []
