@@ -27,6 +27,14 @@ from app.services.pending_events import pending_event_store
 
 logger = logging.getLogger(__name__)
 
+# Matches camelCase/lowerCamel object fields whose name contains "Error" or
+# "Exception" but whose value is falsy (false, null, undefined).
+# e.g. "clarifyTimeoutError: false", "authorizationError: null"
+# These are status flags logged by the application, not actual errors.
+_FALSY_ERROR_FIELD_RE = re.compile(
+    r'\b[a-z]\w*(?:Error|Exception)\s*:\s*(?:false|null|undefined)\b'
+)
+
 # Detection thresholds
 ECS_CPU_THRESHOLD_PCT = 85.0
 ECS_MEMORY_THRESHOLD_PCT = 90.0
@@ -355,6 +363,11 @@ class DetectionService:
                         # 3. AllInterviews-specific content fields
                         "panelAnswer", "previewPanelAnswer", "postInfo {",
                     )):
+                        continue
+                    # Skip lines where an Error/Exception field is logged with a
+                    # falsy value — these are application status flags, not real
+                    # errors (e.g. "clarifyTimeoutError: false", "authorizationError: null")
+                    if _FALSY_ERROR_FIELD_RE.search(msg):
                         continue
                     normalized = re.sub(r'\b\d+\b', 'N', msg[:120]).strip()
                     sig = normalized[:80]
