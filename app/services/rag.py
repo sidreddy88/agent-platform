@@ -541,18 +541,34 @@ class RAGService:
                 yield fp
 
     async def _index_file(self, file_path: Path, rel_root: Path) -> int:
-        """Read, chunk, embed, and upsert one file. Returns chunk count."""
+        """Read, chunk, embed, and upsert one file. Returns chunk count.
+
+        Uses the doc_chunk_registry to:
+        1. Skip files whose content hasn't changed (hash check).
+        2. Delete stale chunks from the vector store when a file is updated,
+           so old vectors don't accumulate silently.
+        """
         try:
-            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            raw = file_path.read_bytes()
         except OSError as exc:
             raise RuntimeError(f"Cannot read {file_path}: {exc}") from exc
 
+        content = raw.decode("utf-8", errors="ignore")
+        content_hash = hashlib.sha256(raw).hexdigest()
         language = SUPPORTED_EXTENSIONS[file_path.suffix]
         relative = str(file_path.relative_to(rel_root))
 
-        # Use function-boundary chunking for JS/TS — avoids diluting short
-        # functions with surrounding unrelated code. Falls back to line-based
-        # if no top-level function declarations are found (e.g. config files).
+        # ── Hash check: skip unchanged files ─────────────────────────────
+        if not self._file_changed(relative, content_hash):
+            return 0
+
+        # ── Delete stale chunks from previous indexing run ────────────────
+        old_ids = self._get_chunk_ids(relative)
+        if old_ids:
+            self._collection.delete(old_ids)
+            self._mark_superseded(relative)
+
+        # ── Chunk ─────────────────────────────────────────────────────────
         if language in ("javascript", "typescript"):
             chunks = _chunk_js_by_function(relative, content, language)
             if not chunks:
@@ -563,7 +579,7 @@ class RAGService:
         if not chunks:
             return 0
 
-        # Embed all chunks in one API call (up to 2048 inputs per request)
+        # ── Embed and upsert ──────────────────────────────────────────────
         texts = [c.content for c in chunks]
         embeddings = await self._embed(texts)
 
@@ -583,7 +599,88 @@ class RAGService:
             for c, emb in zip(chunks, embeddings)
         ])
 
+        # ── Register new chunks ───────────────────────────────────────────
+        self._register_chunks(relative, [c.chunk_id for c in chunks], content_hash)
+
         return len(chunks)
+
+    # ------------------------------------------------------------------
+    # Document chunk registry helpers
+    # ------------------------------------------------------------------
+
+    def _file_changed(self, doc_id: str, content_hash: str) -> bool:
+        """Return True if the file is new or its content hash differs from registry."""
+        from sqlalchemy import select
+        from app.services.database import engine, tables
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    select(tables.doc_chunk_registry.c.content_hash)
+                    .where(tables.doc_chunk_registry.c.doc_id == doc_id)
+                    .where(tables.doc_chunk_registry.c.status == "active")
+                    .limit(1)
+                ).fetchone()
+            if row is None:
+                return True
+            return row.content_hash != content_hash
+        except Exception as exc:
+            logger.warning("[RAG] Registry hash check failed for %s: %s", doc_id, exc)
+            return True  # re-index on uncertainty
+
+    def _get_chunk_ids(self, doc_id: str) -> list[str]:
+        """Return all active chunk vector IDs for a doc."""
+        from sqlalchemy import select
+        from app.services.database import engine, tables
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    select(tables.doc_chunk_registry.c.chunk_vector_id)
+                    .where(tables.doc_chunk_registry.c.doc_id == doc_id)
+                    .where(tables.doc_chunk_registry.c.status == "active")
+                ).fetchall()
+            return [r.chunk_vector_id for r in rows]
+        except Exception as exc:
+            logger.warning("[RAG] Registry chunk lookup failed for %s: %s", doc_id, exc)
+            return []
+
+    def _mark_superseded(self, doc_id: str) -> None:
+        """Mark all active registry rows for a doc as superseded."""
+        from sqlalchemy import update
+        from app.services.database import engine, tables
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(tables.doc_chunk_registry)
+                    .where(tables.doc_chunk_registry.c.doc_id == doc_id)
+                    .where(tables.doc_chunk_registry.c.status == "active")
+                    .values(status="superseded")
+                )
+        except Exception as exc:
+            logger.warning("[RAG] Registry supersede failed for %s: %s", doc_id, exc)
+
+    def _register_chunks(self, doc_id: str, chunk_ids: list[str], content_hash: str) -> None:
+        """Insert new active registry rows for freshly indexed chunks."""
+        from datetime import datetime, timezone
+        from app.services.database import engine, tables
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    tables.doc_chunk_registry.insert(),
+                    [
+                        {
+                            "doc_id": doc_id,
+                            "chunk_vector_id": cid,
+                            "content_hash": content_hash,
+                            "collection": self._collection._name,
+                            "indexed_at": now,
+                            "status": "active",
+                        }
+                        for cid in chunk_ids
+                    ],
+                )
+        except Exception as exc:
+            logger.warning("[RAG] Registry insert failed for %s: %s", doc_id, exc)
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """Fetch embeddings from OpenAI with exponential backoff on 429 rate limits."""
