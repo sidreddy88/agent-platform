@@ -139,14 +139,6 @@ async def scan_last_24h() -> Dict[str, Any]:
                     },
                 )
 
-                # Crashes bypass the approval queue — auto-enqueue immediately
-                if category == "crash":
-                    await event_queue.enqueue(event)
-                    await broadcast({"type": "crash_auto_queued", "title": event.title})
-                    queued.append({"id": event.id, "title": event.title, "service": service})
-                    await _scan_log(f"  → crash auto-queued: {msg[:80].strip()}", level="event")
-                    continue
-
                 pe, is_new = pending_event_store.add(event)
                 if pe is None:
                     continue
@@ -154,7 +146,13 @@ async def scan_last_24h() -> Dict[str, Any]:
                 await broadcast({"type": msg_type, "event": pending_event_store.serialize(pe)})
                 if is_new:
                     queued.append({"id": pe.id, "title": event.title, "service": service})
-                    await _scan_log(f"  → pending approval: [{error_type}] {msg[:80].strip()}", level="event")
+                    if category == "crash":
+                        # Crashes appear in the Crashes tab AND auto-enqueue to the pipeline
+                        await event_queue.enqueue(event)
+                        await broadcast({"type": "crash_auto_queued", "title": event.title})
+                        await _scan_log(f"  → crash auto-queued: {msg[:80].strip()}", level="event")
+                    else:
+                        await _scan_log(f"  → pending approval: [{error_type}] {msg[:80].strip()}", level="event")
                 else:
                     await _scan_log(
                         f"  ↻ duplicate ({pe.occurrences}× seen): [{error_type}] {msg[:80].strip()}",
