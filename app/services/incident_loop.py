@@ -435,7 +435,10 @@ class IncidentLoop:
             try:
                 query = f"{event.title} {event.description[:200]}"
                 _rag_similar = await self._rag.search_incidents(query, min_score=0.90)
-                _skip = {IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
+                _skip = {
+                    IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE,
+                    IncidentStatus.FIX_FAILED, IncidentStatus.VERIFICATION_FAILED,
+                }
                 for s in _rag_similar:
                     live = incident_store.get(s["incident_id"])
                     if not live or live.status in _skip:
