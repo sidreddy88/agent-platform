@@ -76,6 +76,9 @@ class VectorCollection(ABC):
     def all_items(self) -> list[VectorMatch]: ...
 
     @abstractmethod
+    def delete(self, ids: Sequence[str]) -> None: ...
+
+    @abstractmethod
     def clear(self) -> None: ...
 
 
@@ -165,6 +168,10 @@ class ChromaCollection(VectorCollection):
             )
             for doc, meta in zip(results["documents"], results["metadatas"])
         ]
+
+    def delete(self, ids: Sequence[str]) -> None:
+        if ids:
+            self._coll.delete(ids=list(ids))
 
     def clear(self) -> None:
         self._chroma.delete_collection(self._name)
@@ -318,6 +325,13 @@ class PgVectorCollection(VectorCollection):
             for r in rows
         ]
 
+    def delete(self, ids: Sequence[str]) -> None:
+        if not ids:
+            return
+        from sqlalchemy import delete as sa_delete
+        with self._engine.begin() as conn:
+            conn.execute(sa_delete(self._table).where(self._table.c.id.in_(list(ids))))
+
     def clear(self) -> None:
         with self._engine.begin() as conn:
             conn.execute(self._table.delete())
@@ -371,4 +385,5 @@ class _EmptyCollection(VectorCollection):
     def get_by_filter(self, where: dict[str, Any]) -> list[VectorMatch]: return []
     def all_metadata(self) -> list[dict[str, Any]]: return []
     def all_items(self) -> list[VectorMatch]: return []
+    def delete(self, ids: Sequence[str]) -> None: pass
     def clear(self) -> None: pass
