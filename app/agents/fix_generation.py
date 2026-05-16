@@ -1510,6 +1510,23 @@ class FixGenerationAgent(BaseAgent):
                 logger.error("[FixGen] Agentic LLM call failed (iteration %d): %s", iteration, exc)
                 return "", "", [], None
 
+            if stop_reason == "max_tokens":
+                logger.warning(
+                    "[FixGen] Agentic: LLM hit max_tokens at iteration %d — tool inputs may be truncated; discarding",
+                    iteration,
+                )
+                # Truncated tool calls produce incomplete new_text — don't accept them.
+                # Ask the model to produce a shorter replacement on the next iteration.
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response was cut off because it exceeded the output limit. "
+                        "Write a shorter, more focused fix. Use apply_edit with only the minimum "
+                        "lines that need to change — do not reproduce unchanged surrounding code."
+                    ),
+                })
+                continue
+
             if stop_reason == "end_turn" or not tool_calls:
                 if not edit_result:
                     logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
