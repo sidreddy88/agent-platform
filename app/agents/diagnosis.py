@@ -358,6 +358,7 @@ class DiagnosisAgent(BaseAgent):
         self._aws = aws or AWSService()
         self._rag = rag
         self._github = github or GitHubService()
+        self._tree_cache: dict[tuple[str, str, str], set[str]] = {}  # (owner, repo, sha) → paths
         _owner, _repo = settings.fix_target_repo.split("/", 1)
         self._owner = _owner
         self._repo = _repo
@@ -585,14 +586,22 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
 
+    async def _get_repo_tree(self) -> set[str]:
+        """Return the cached file-path set for the target repo, fetching if needed."""
+        paths, sha = await self._github.get_file_tree(self._owner, self._repo)
+        key = (self._owner, self._repo, sha)
+        if key not in self._tree_cache:
+            self._tree_cache[key] = paths
+        return self._tree_cache[key]
+
     async def _file_exists_in_repo(self, path: str) -> bool:
-        """Return True if `path` is a real file in the target repo."""
+        """O(1) membership check against the cached repo tree."""
         p = (path or "").strip().lstrip("/")
         if not p:
             return False
         try:
-            await self._github.get_file_contents(self._owner, self._repo, p)
-            return True
+            tree = await self._get_repo_tree()
+            return p in tree
         except Exception:
             return False
 
