@@ -663,8 +663,6 @@ class DiagnosisAgent(BaseAgent):
                 ungrounded.append(path)
                 setattr(result, file_attr, None)
                 setattr(result, fn_attr, None)
-                fn_attr = "affected_function" if attr == "affected_file" else "additional_fix_function"
-                setattr(result, fn_attr, None)
 
         # Verify blast_radius entries — each has a "file" key that may be hallucinated.
         if result.blast_radius:
