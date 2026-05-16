@@ -125,7 +125,7 @@ class GatewayLLMService:
 
     @property
     def _model(self) -> str:
-        _, model = self._gateway._get_routing(self._task_type)
+        _, model, _mt = self._gateway._get_routing(self._task_type)
         return model
 
     async def complete(
@@ -161,7 +161,7 @@ class GatewayLLMService:
         import json
         import litellm
 
-        _, model = self._gateway._get_routing(self._task_type)
+        _, model, max_tokens = self._gateway._get_routing(self._task_type)
 
         # Convert Anthropic tool format → LiteLLM/OpenAI format
         litellm_tools = [
@@ -185,7 +185,7 @@ class GatewayLLMService:
             messages=msgs,
             tools=litellm_tools,
             tool_choice="auto",
-            max_tokens=4096,
+            max_tokens=max_tokens,
         )
 
         choice = response.choices[0]
@@ -240,8 +240,8 @@ class LLMGateway:
 
     def _validate_fix_review_providers(self) -> None:
         """Enforce that fix and review always use different LLM providers."""
-        _, fix_model = self._get_routing("fix")
-        _, review_model = self._get_routing("review")
+        _, fix_model, _ = self._get_routing("fix")
+        _, review_model, _ = self._get_routing("review")
         fix_provider = _infer_provider(fix_model)
         review_provider = _infer_provider(review_model)
         if fix_provider == review_provider and fix_provider != "unknown":
@@ -259,10 +259,10 @@ class LLMGateway:
             logger.warning("[gateway] Config not found at %s — using defaults", path)
             return {}
 
-    def _get_routing(self, task_type: str) -> tuple[str, str]:
+    def _get_routing(self, task_type: str) -> tuple[str, str, int]:
         entry = self._config.get("routing", {}).get(task_type, {})
         provider = entry.get("provider") or _infer_provider(entry.get("model", ""))
-        return provider, entry.get("model", "claude-sonnet-4-6")
+        return provider, entry.get("model", "claude-sonnet-4-6"), entry.get("max_tokens", 4096)
 
     def _compute_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
         rates = self._config.get("cost_per_1k_tokens", {}).get(model, {})
@@ -334,7 +334,8 @@ class LLMGateway:
         system: str | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        provider_name, model = self._get_routing(task_type)
+        provider_name, model, max_tokens = self._get_routing(task_type)
+        kwargs.setdefault("max_tokens", max_tokens)
 
         start = time.perf_counter()
         raw = await self._call_provider(self._provider, messages, model, task_type, system=system, **kwargs)
