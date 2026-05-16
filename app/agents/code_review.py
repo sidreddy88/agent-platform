@@ -129,30 +129,40 @@ Key questions to answer:
 - Does it handle ALL invalid inputs, not just the specific bad value that triggered the error?
 """
 
-    prompt = f"""You are a senior code reviewer. Analyze this file diff for issues.
+    prompt = f"""You are a senior code reviewer. Analyze this file diff for issues INTRODUCED BY THIS CHANGE.
 
 {diff_text}{rag_section}{ai_fix_warning}
 
+SCOPE: Only flag issues in lines marked + (added) or directly caused by removed lines (-).
+Do NOT flag pre-existing patterns that were already in the file before this diff.
+
+BEFORE FLAGGING ANY ISSUE, verify:
+- Is this actually wrong, or does the framework/library already handle it?
+  Examples of things that are NOT issues:
+  * "Missing JWT expiration check" — jwt.verify() validates expiration, signature, and audience automatically
+  * "await inside async callback is blocking" — await in an async function is non-blocking by design
+  * "No input validation" on a route that had none before this diff — pre-existing, not introduced here
+  * Architecture or design concerns that existed before this change
+- Am I certain this is wrong, or am I guessing based on incomplete context?
+  If uncertain, omit it.
+
 Check for:
 1. CORRECTNESS — does the fix address the actual root cause, or does it just suppress the symptom?
-                 (e.g. converting invalid input instead of rejecting it is a symptom fix)
                  SYMPTOM-FIX RED FLAGS — treat any of these as CRITICAL unless there is a strong reason:
-                 a) A null/undefined guard (if (x && x.y), x?.y, x ?? default, try/catch) is added
-                    at or near the crash line without also fixing the function that produces x.
-                    The correct fix is in the producer, not the consumer.
-                 b) An LLM/API/DB response is guarded with optional chaining at the access site
-                    instead of validating/normalising it in the function that makes the call.
-                 c) The same crash site was patched in a previous PR (regression) — if the error
-                    recurs at the same line, the upstream source was never fixed.
+                 a) A null/undefined guard added at the crash line without fixing the producer function
+                 b) An LLM/API/DB response guarded with optional chaining at the access site
+                    instead of validating in the function that makes the call
+                 c) The same crash site was patched in a previous PR — if the error recurs at the
+                    same line, the upstream source was never fixed
 2. BUGS       — logic errors, off-by-one, null/undefined dereferences, wrong conditions,
-                unhandled exceptions, incorrect error propagation
-3. SECURITY   — SQL injection, XSS, command injection, hardcoded secrets or tokens,
-                insecure deserialization, path traversal, missing auth checks
-4. PERFORMANCE — N+1 queries, O(n²) loops, missing indexes hinted by the code,
-                 unnecessary allocations, synchronous blocking in async context
-5. CROSS-FILE — if related codebase context is provided above: duplicate logic that already
-                exists elsewhere, callers that may break due to signature changes, patterns
-                that contradict how the rest of the codebase handles the same concern
+                unhandled promise rejections, incorrect error propagation
+3. SECURITY   — Issues INTRODUCED by this change only: SQL injection, XSS, command injection,
+                hardcoded secrets, insecure deserialization, path traversal.
+                Do NOT flag pre-existing auth patterns or architecture not touched by this diff.
+4. PERFORMANCE — N+1 queries, O(n²) loops introduced by this change, unnecessary allocations.
+                 Do NOT flag "async/await is blocking" — it is not.
+5. CROSS-FILE — callers that will break due to signature or return-type changes in this diff,
+                patterns that contradict how the rest of the codebase handles the same concern
 
 For each issue found output exactly:
 ISSUE | <severity: CRITICAL/HIGH/MEDIUM/LOW> | line <N or range> | <category> | <concise description>
@@ -163,7 +173,12 @@ End with a one-sentence summary of this file's overall quality."""
 
     return await llm.complete(
         messages=[{"role": "user", "content": prompt}],
-        system="You are a security-conscious senior engineer doing a thorough code review.",
+        system=(
+            "You are a senior engineer doing a precise, grounded code review. "
+            "Flag real issues introduced by this diff. Do not flag things that are handled by "
+            "the language runtime, standard libraries, or frameworks. Do not flag pre-existing "
+            "patterns not touched by this change. If you are not certain something is wrong, omit it."
+        ),
     )
 
 
