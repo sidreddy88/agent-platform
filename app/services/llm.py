@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 MODEL = "claude-sonnet-4-20250514"
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
-MAX_TOKENS = 4096
+MAX_TOKENS = 8192
 
 
 class LLMService:
