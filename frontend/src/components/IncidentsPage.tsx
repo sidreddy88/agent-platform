@@ -156,7 +156,7 @@ export function IncidentsPage({
             </span>
           )}
           <button style={scanBtn(scanning)} onClick={handleScan} disabled={scanning}>
-            {scanning ? "Scanning..." : "Scan Last 24 Hours"}
+            {scanning ? "Scanning..." : "Scan Last 7 Days"}
           </button>
           <button style={clearBtn(clearing)} onClick={handleClear} disabled={clearing}>
             {clearing ? "Clearing..." : "Clear Non-Resolved"}
