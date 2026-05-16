@@ -63,6 +63,11 @@ def classify_ecs_log(msg: str) -> tuple[str, str] | None:
     if _FALSY_ERROR_FIELD_RE.search(msg):
         return None
 
+    # Check for crash before regex — backward context prepended by get_error_logs()
+    # may contain exception class names (TypeError etc.) that would shadow the crash.
+    if "app crashed" in msg:
+        return "APP_CRASHED", "crash"
+
     exc_match = _EXC_CLASS_RE.search(msg)
     if exc_match:
         error_type = exc_match.group(1).upper()
