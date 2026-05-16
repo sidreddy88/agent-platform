@@ -670,6 +670,24 @@ class DiagnosisAgent(BaseAgent):
                 fn_attr = "affected_function" if attr == "affected_file" else "additional_fix_function"
                 setattr(result, fn_attr, None)
 
+        # Verify blast_radius entries — each has a "file" key that may be hallucinated.
+        if result.blast_radius:
+            verified = []
+            dropped = []
+            for entry in result.blast_radius:
+                path = entry.get("file", "")
+                if not path or await self._file_exists_in_repo(path):
+                    verified.append(entry)
+                else:
+                    dropped.append(path)
+                    logger.warning(
+                        "DiagnosisAgent: blast_radius file '%s' not found in %s/%s — removing entry",
+                        path, self._owner, self._repo,
+                    )
+            result.blast_radius = verified
+            if dropped:
+                ungrounded.extend(dropped)
+
         if ungrounded:
             note = (
                 f"GROUNDING FAILURE: function name(s) {ungrounded} not found in "
