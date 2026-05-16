@@ -451,18 +451,28 @@ class GitHubService:
         """Commit a file create or update on a branch. Returns the new commit SHA.
 
         Pass sha=None to create a new file; pass the existing sha to update.
+        On 409 (stale SHA), re-fetches the current SHA for the branch and retries once.
         """
         encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        payload: dict = {"message": message, "content": encoded, "branch": branch}
-        if sha:
-            payload["sha"] = sha
-        async with self._client() as client:
-            response = await client.put(
-                f"/repos/{owner}/{repo}/contents/{path}",
-                json=payload,
-            )
-            await self._raise_for_status(response)
-            return response.json()["commit"]["sha"]
+
+        async def _attempt(current_sha: str | None) -> httpx.Response:
+            payload: dict = {"message": message, "content": encoded, "branch": branch}
+            if current_sha:
+                payload["sha"] = current_sha
+            async with self._client() as client:
+                return await client.put(
+                    f"/repos/{owner}/{repo}/contents/{path}",
+                    json=payload,
+                )
+
+        response = await _attempt(sha)
+        if response.status_code == 409 and sha is not None:
+            # SHA is stale — re-fetch from the branch and retry once
+            _, fresh_sha = await self.get_file_contents(owner, repo, path, ref=branch)
+            response = await _attempt(fresh_sha)
+
+        await self._raise_for_status(response)
+        return response.json()["commit"]["sha"]
 
     async def create_issue(
         self,
