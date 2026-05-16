@@ -94,6 +94,7 @@ export function IncidentsPage({
   onPendingEventsChanged,
 }: Props) {
   const [scanning, setScanning] = useState(false);
+  const [scanningCrashes, setScanningCrashes] = useState(false);
   const [scanResult, setScanResult] = useState<{ events_found: number } | null>(null);
   const [clearing, setClearing] = useState(false);
   const [clearingEvents, setClearingEvents] = useState(false);
@@ -138,6 +139,20 @@ export function IncidentsPage({
     }
   }
 
+  async function handleScanCrashes() {
+    setScanningCrashes(true);
+    setScanResult(null);
+    try {
+      const res = await fetch("/incidents/scan/crashes", { method: "POST" });
+      setScanResult(await res.json());
+      await onPendingEventsChanged();
+    } catch {
+      setScanResult({ events_found: 0 });
+    } finally {
+      setScanningCrashes(false);
+    }
+  }
+
   return (
     <div style={container}>
       {/* Header */}
@@ -155,8 +170,11 @@ export function IncidentsPage({
                 : "No errors detected"}
             </span>
           )}
-          <button style={scanBtn(scanning)} onClick={handleScan} disabled={scanning}>
+          <button style={scanBtn(scanning)} onClick={handleScan} disabled={scanning || scanningCrashes}>
             {scanning ? "Scanning..." : "Scan Last 7 Days"}
+          </button>
+          <button style={scanBtn(scanningCrashes)} onClick={handleScanCrashes} disabled={scanning || scanningCrashes}>
+            {scanningCrashes ? "Scanning..." : "Crashes — 4 Weeks"}
           </button>
           <button style={clearBtn(clearing)} onClick={handleClear} disabled={clearing}>
             {clearing ? "Clearing..." : "Clear Non-Resolved"}
