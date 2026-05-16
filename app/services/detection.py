@@ -416,7 +416,7 @@ class DetectionService:
                         error_type=error_type,
                         task_id=task_id,
                         title=f"{error_type} in {service}",
-                        description=msg[:300],
+                        description=msg[:3000],
                         service=service,
                         resource_id=log_group,
                         category=category,

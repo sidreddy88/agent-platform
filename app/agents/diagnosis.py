@@ -358,6 +358,7 @@ class DiagnosisAgent(BaseAgent):
         self._aws = aws or AWSService()
         self._rag = rag
         self._github = github or GitHubService()
+        self._tree_cache: dict[tuple[str, str], set[str]] = {}  # (owner, repo) → paths
         _owner, _repo = settings.fix_target_repo.split("/", 1)
         self._owner = _owner
         self._repo = _repo
@@ -585,6 +586,40 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
 
+    async def _get_repo_tree(self) -> set[str] | None:
+        """Return the cached file-path set for the target repo, fetching if needed.
+
+        Returns None if the tree cannot be fetched so callers can fail open.
+        """
+        # Check cache first — keyed by repo since we don't have sha yet.
+        simple_key = (self._owner, self._repo)
+        if simple_key in self._tree_cache:
+            return self._tree_cache[simple_key]
+        try:
+            paths, sha = await self._github.get_file_tree(self._owner, self._repo)
+            self._tree_cache[simple_key] = paths
+            return paths
+        except Exception as exc:
+            logger.warning(
+                "DiagnosisAgent: could not fetch repo tree for %s/%s — grounding checks will be skipped: %s",
+                self._owner, self._repo, exc,
+            )
+            return None
+
+    async def _file_exists_in_repo(self, path: str) -> bool:
+        """O(1) membership check against the cached repo tree.
+
+        Returns True when the tree is unavailable — fail open rather than
+        incorrectly nulling file paths that we simply couldn't verify.
+        """
+        p = (path or "").strip().lstrip("/")
+        if not p:
+            return False
+        tree = await self._get_repo_tree()
+        if tree is None:
+            return True  # can't verify — assume it exists
+        return p in tree
+
     async def _symbol_exists_in_repo(self, symbol: str) -> bool:
         """Check whether `symbol` appears in the target repo on the default branch.
 
@@ -615,35 +650,64 @@ class DiagnosisAgent(BaseAgent):
         """
         ungrounded: list[str] = []
 
-        if result.affected_function:
-            if not await self._symbol_exists_in_repo(result.affected_function):
-                ungrounded.append(result.affected_function)
+        # Verify function names. A bad function name nulls only that function field —
+        # NOT the file field. Express anonymous handlers (no searchable name) are common
+        # and the file path is sufficient for fix generation.
+        for fn_attr in ("affected_function", "additional_fix_function"):
+            fn = getattr(result, fn_attr)
+            if fn and not await self._symbol_exists_in_repo(fn):
+                ungrounded.append(fn)
                 logger.warning(
-                    "DiagnosisAgent: affected_function '%s' not found in %s/%s — "
-                    "treating as ungrounded and escalating",
-                    result.affected_function, self._owner, self._repo,
+                    "DiagnosisAgent: %s '%s' not found in %s/%s — nulling function only",
+                    fn_attr, fn, self._owner, self._repo,
                 )
-                result.affected_function = None
-                result.affected_file = None
+                setattr(result, fn_attr, None)
 
-        if result.additional_fix_function:
-            if not await self._symbol_exists_in_repo(result.additional_fix_function):
-                ungrounded.append(result.additional_fix_function)
+        # Verify file paths independently — a hallucinated file path nulls both
+        # the file field and its paired function field.
+        for file_attr, fn_attr in (
+            ("affected_file", "affected_function"),
+            ("additional_fix_file", "additional_fix_function"),
+        ):
+            path = getattr(result, file_attr)
+            if path and not await self._file_exists_in_repo(path):
                 logger.warning(
-                    "DiagnosisAgent: additional_fix_function '%s' not found in %s/%s",
-                    result.additional_fix_function, self._owner, self._repo,
+                    "DiagnosisAgent: %s '%s' not found in %s/%s — nulling",
+                    file_attr, path, self._owner, self._repo,
                 )
-                result.additional_fix_function = None
-                result.additional_fix_file = None
+                ungrounded.append(path)
+                setattr(result, file_attr, None)
+                setattr(result, fn_attr, None)
+
+        # Verify blast_radius entries — each has a "file" key that may be hallucinated.
+        if result.blast_radius:
+            verified = []
+            dropped = []
+            for entry in result.blast_radius:
+                path = entry.get("file", "")
+                if not path or await self._file_exists_in_repo(path):
+                    verified.append(entry)
+                else:
+                    dropped.append(path)
+                    logger.warning(
+                        "DiagnosisAgent: blast_radius file '%s' not found in %s/%s — removing entry",
+                        path, self._owner, self._repo,
+                    )
+            result.blast_radius = verified
+            if dropped:
+                ungrounded.extend(dropped)
 
         if ungrounded:
             note = (
-                f"GROUNDING FAILURE: function name(s) {ungrounded} not found in "
-                f"{self._owner}/{self._repo} — diagnosis reasoning may be sound but the "
-                f"code target was not verified. Escalating for human review."
+                f"GROUNDING NOTE: {ungrounded} not found in "
+                f"{self._owner}/{self._repo} — may be anonymous/inline handler."
             )
             result.evidence = [*result.evidence, note]
-            result.confidence = min(result.confidence, 0.65)
+            # Only cap confidence if the file itself is also unverified.
+            # A missing function name with a verified file is common for Express
+            # anonymous route handlers and should not block fix generation.
+            if result.affected_file is None:
+                result.confidence = min(result.confidence, 0.65)
             result.escalate = result.confidence < CONFIDENCE_THRESHOLD
 
         # ----- Prose scan -----------------------------------------------
@@ -915,4 +979,30 @@ Confidence guide:
             logger.info("DiagnosisAgent retrying after parse failure")
             result = await self.run(retry_prompt)
             parsed = _parse_diagnosis_result(result.answer)
-        return await self._enforce_grounding(parsed)
+        grounded = await self._enforce_grounding(parsed)
+
+        # If both primary targets were nulled by the grounding check, the LLM
+        # named files/functions that don't exist. Give it one retry with the
+        # failed names listed explicitly so it can search the repo correctly.
+        if grounded.affected_function is None and grounded.affected_file is None:
+            bad_names = [
+                n for n in [parsed.affected_function, parsed.affected_file]
+                if n
+            ]
+            if bad_names:
+                grounding_retry_prompt = (
+                    prompt
+                    + f"\n\nGROUNDING FAILURE: the following names you cited do not exist in "
+                    f"{self._owner}/{self._repo}: {bad_names}. "
+                    "You MUST call verify_symbol_in_repo and get_file_contents to confirm "
+                    "every function name and file path before writing them into the JSON. "
+                    "Return a corrected JSON using only names you have verified exist."
+                )
+                logger.info(
+                    "DiagnosisAgent retrying after grounding failure — bad names: %s", bad_names
+                )
+                result = await self.run(grounding_retry_prompt)
+                parsed = _parse_diagnosis_result(result.answer)
+                grounded = await self._enforce_grounding(parsed)
+
+        return grounded
