@@ -703,6 +703,20 @@ class FixGenerationAgent(BaseAgent):
                     continue
             logger.info("[FixGen] No stack frame path found in repo — falling back")
 
+        # ── 1b. File paths mentioned in diagnosis prose ───────────────────
+        # When affected_file was nulled by grounding but the diagnosis text
+        # still contains the correct path, extract and verify it here.
+        if incident.diagnosis:
+            import re as _re
+            prose_paths = _re.findall(r'\b([\w/-]+\.(?:js|ts|jsx|tsx))\b', incident.diagnosis)
+            for prose_path in dict.fromkeys(prose_paths):  # dedupe, preserve order
+                try:
+                    await self._github.get_file_contents(self._owner, self._repo, prose_path, ref=PR_BASE)
+                    logger.info("[FixGen] Diagnosis prose resolved file: %s", prose_path)
+                    return prose_path, incident.diagnosis_affected_function or "the function handling this error"
+                except Exception:
+                    continue
+
         # ── 2. Code search using diagnosis function name or regex extraction ──
         # Prefer diagnosis_affected_function over regex — it's already been reasoned
         # about by the DiagnosisAgent and is far less likely to be a service/class name.
