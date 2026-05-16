@@ -358,7 +358,7 @@ class DiagnosisAgent(BaseAgent):
         self._aws = aws or AWSService()
         self._rag = rag
         self._github = github or GitHubService()
-        self._tree_cache: dict[tuple[str, str, str], set[str]] = {}  # (owner, repo, sha) → paths
+        self._tree_cache: dict[tuple[str, str], set[str]] = {}  # (owner, repo) → paths
         _owner, _repo = settings.fix_target_repo.split("/", 1)
         self._owner = _owner
         self._repo = _repo
@@ -586,24 +586,39 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
 
-    async def _get_repo_tree(self) -> set[str]:
-        """Return the cached file-path set for the target repo, fetching if needed."""
-        paths, sha = await self._github.get_file_tree(self._owner, self._repo)
-        key = (self._owner, self._repo, sha)
-        if key not in self._tree_cache:
-            self._tree_cache[key] = paths
-        return self._tree_cache[key]
+    async def _get_repo_tree(self) -> set[str] | None:
+        """Return the cached file-path set for the target repo, fetching if needed.
+
+        Returns None if the tree cannot be fetched so callers can fail open.
+        """
+        # Check cache first — keyed by repo since we don't have sha yet.
+        simple_key = (self._owner, self._repo)
+        if simple_key in self._tree_cache:
+            return self._tree_cache[simple_key]
+        try:
+            paths, sha = await self._github.get_file_tree(self._owner, self._repo)
+            self._tree_cache[simple_key] = paths
+            return paths
+        except Exception as exc:
+            logger.warning(
+                "DiagnosisAgent: could not fetch repo tree for %s/%s — grounding checks will be skipped: %s",
+                self._owner, self._repo, exc,
+            )
+            return None
 
     async def _file_exists_in_repo(self, path: str) -> bool:
-        """O(1) membership check against the cached repo tree."""
+        """O(1) membership check against the cached repo tree.
+
+        Returns True when the tree is unavailable — fail open rather than
+        incorrectly nulling file paths that we simply couldn't verify.
+        """
         p = (path or "").strip().lstrip("/")
         if not p:
             return False
-        try:
-            tree = await self._get_repo_tree()
-            return p in tree
-        except Exception:
-            return False
+        tree = await self._get_repo_tree()
+        if tree is None:
+            return True  # can't verify — assume it exists
+        return p in tree
 
     async def _symbol_exists_in_repo(self, symbol: str) -> bool:
         """Check whether `symbol` appears in the target repo on the default branch.
