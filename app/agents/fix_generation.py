@@ -658,11 +658,15 @@ class FixGenerationAgent(BaseAgent):
         # The DiagnosisAgent has already reasoned about root cause and named the file
         # and function. Prefer files where the function is defined; fall back to files
         # where it is called (the call site may itself be the bug).
-        if incident.diagnosis_affected_file and incident.diagnosis_affected_function:
+        if incident.diagnosis_affected_file:
             diag_file = incident.diagnosis_affected_file.lstrip("/")
-            diag_fn = incident.diagnosis_affected_function
+            diag_fn = incident.diagnosis_affected_function  # may be None for anonymous handlers
             try:
                 content, _ = await self._github.get_file_contents(self._owner, self._repo, diag_file, ref=PR_BASE)
+                if diag_fn is None:
+                    # Anonymous handler — file is the only target; use it directly.
+                    logger.info("[FixGen] Using diagnosis target (anonymous handler): %s", diag_file)
+                    return diag_file, "the function handling this error"
                 if self._extract_js_function(content, diag_fn):
                     logger.info("[FixGen] Using diagnosis target: %s → %s", diag_file, diag_fn)
                     return diag_file, diag_fn
