@@ -967,4 +967,30 @@ Confidence guide:
             logger.info("DiagnosisAgent retrying after parse failure")
             result = await self.run(retry_prompt)
             parsed = _parse_diagnosis_result(result.answer)
-        return await self._enforce_grounding(parsed)
+        grounded = await self._enforce_grounding(parsed)
+
+        # If both primary targets were nulled by the grounding check, the LLM
+        # named files/functions that don't exist. Give it one retry with the
+        # failed names listed explicitly so it can search the repo correctly.
+        if grounded.affected_function is None and grounded.affected_file is None:
+            bad_names = [
+                n for n in [parsed.affected_function, parsed.affected_file]
+                if n
+            ]
+            if bad_names:
+                grounding_retry_prompt = (
+                    prompt
+                    + f"\n\nGROUNDING FAILURE: the following names you cited do not exist in "
+                    f"{self._owner}/{self._repo}: {bad_names}. "
+                    "You MUST call verify_symbol_in_repo and get_file_contents to confirm "
+                    "every function name and file path before writing them into the JSON. "
+                    "Return a corrected JSON using only names you have verified exist."
+                )
+                logger.info(
+                    "DiagnosisAgent retrying after grounding failure — bad names: %s", bad_names
+                )
+                result = await self.run(grounding_retry_prompt)
+                parsed = _parse_diagnosis_result(result.answer)
+                grounded = await self._enforce_grounding(parsed)
+
+        return grounded
