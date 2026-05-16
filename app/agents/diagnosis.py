@@ -596,8 +596,13 @@ class DiagnosisAgent(BaseAgent):
         if simple_key in self._tree_cache:
             return self._tree_cache[simple_key]
         try:
-            paths, sha = await self._github.get_file_tree(self._owner, self._repo)
+            ref = await self._github.get_default_branch(self._owner, self._repo)
+            paths, _ = await self._github.get_file_tree(self._owner, self._repo, ref=ref)
             self._tree_cache[simple_key] = paths
+            logger.info(
+                "DiagnosisAgent: loaded repo tree for %s/%s@%s (%d files)",
+                self._owner, self._repo, ref, len(paths),
+            )
             return paths
         except Exception as exc:
             logger.warning(
