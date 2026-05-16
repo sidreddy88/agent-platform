@@ -585,6 +585,17 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
 
+    async def _file_exists_in_repo(self, path: str) -> bool:
+        """Return True if `path` is a real file in the target repo."""
+        p = (path or "").strip().lstrip("/")
+        if not p:
+            return False
+        try:
+            await self._github.get_file_contents(self._owner, self._repo, p)
+            return True
+        except Exception:
+            return False
+
     async def _symbol_exists_in_repo(self, symbol: str) -> bool:
         """Check whether `symbol` appears in the target repo on the default branch.
 
@@ -635,6 +646,20 @@ class DiagnosisAgent(BaseAgent):
                 )
                 result.additional_fix_function = None
                 result.additional_fix_file = None
+
+        # Verify file paths independently — the LLM may hallucinate a plausible-looking
+        # file path even when the function name passes the symbol search.
+        for attr in ("affected_file", "additional_fix_file"):
+            path = getattr(result, attr)
+            if path and not await self._file_exists_in_repo(path):
+                logger.warning(
+                    "DiagnosisAgent: %s '%s' not found in %s/%s — nulling",
+                    attr, path, self._owner, self._repo,
+                )
+                ungrounded.append(path)
+                setattr(result, attr, None)
+                fn_attr = "affected_function" if attr == "affected_file" else "additional_fix_function"
+                setattr(result, fn_attr, None)
 
         if ungrounded:
             note = (
