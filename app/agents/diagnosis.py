@@ -635,38 +635,34 @@ class DiagnosisAgent(BaseAgent):
         """
         ungrounded: list[str] = []
 
-        if result.affected_function:
-            if not await self._symbol_exists_in_repo(result.affected_function):
-                ungrounded.append(result.affected_function)
+        # Verify function names. A bad function name nulls only that function field —
+        # NOT the file field. Express anonymous handlers (no searchable name) are common
+        # and the file path is sufficient for fix generation.
+        for fn_attr in ("affected_function", "additional_fix_function"):
+            fn = getattr(result, fn_attr)
+            if fn and not await self._symbol_exists_in_repo(fn):
+                ungrounded.append(fn)
                 logger.warning(
-                    "DiagnosisAgent: affected_function '%s' not found in %s/%s — "
-                    "treating as ungrounded and escalating",
-                    result.affected_function, self._owner, self._repo,
+                    "DiagnosisAgent: %s '%s' not found in %s/%s — nulling function only",
+                    fn_attr, fn, self._owner, self._repo,
                 )
-                result.affected_function = None
-                result.affected_file = None
+                setattr(result, fn_attr, None)
 
-        if result.additional_fix_function:
-            if not await self._symbol_exists_in_repo(result.additional_fix_function):
-                ungrounded.append(result.additional_fix_function)
-                logger.warning(
-                    "DiagnosisAgent: additional_fix_function '%s' not found in %s/%s",
-                    result.additional_fix_function, self._owner, self._repo,
-                )
-                result.additional_fix_function = None
-                result.additional_fix_file = None
-
-        # Verify file paths independently — the LLM may hallucinate a plausible-looking
-        # file path even when the function name passes the symbol search.
-        for attr in ("affected_file", "additional_fix_file"):
-            path = getattr(result, attr)
+        # Verify file paths independently — a hallucinated file path nulls both
+        # the file field and its paired function field.
+        for file_attr, fn_attr in (
+            ("affected_file", "affected_function"),
+            ("additional_fix_file", "additional_fix_function"),
+        ):
+            path = getattr(result, file_attr)
             if path and not await self._file_exists_in_repo(path):
                 logger.warning(
                     "DiagnosisAgent: %s '%s' not found in %s/%s — nulling",
-                    attr, path, self._owner, self._repo,
+                    file_attr, path, self._owner, self._repo,
                 )
                 ungrounded.append(path)
-                setattr(result, attr, None)
+                setattr(result, file_attr, None)
+                setattr(result, fn_attr, None)
                 fn_attr = "affected_function" if attr == "affected_file" else "additional_fix_function"
                 setattr(result, fn_attr, None)
 
@@ -690,12 +686,15 @@ class DiagnosisAgent(BaseAgent):
 
         if ungrounded:
             note = (
-                f"GROUNDING FAILURE: function name(s) {ungrounded} not found in "
-                f"{self._owner}/{self._repo} — diagnosis reasoning may be sound but the "
-                f"code target was not verified. Escalating for human review."
+                f"GROUNDING NOTE: {ungrounded} not found in "
+                f"{self._owner}/{self._repo} — may be anonymous/inline handler."
             )
             result.evidence = [*result.evidence, note]
-            result.confidence = min(result.confidence, 0.65)
+            # Only cap confidence if the file itself is also unverified.
+            # A missing function name with a verified file is common for Express
+            # anonymous route handlers and should not block fix generation.
+            if result.affected_file is None:
+                result.confidence = min(result.confidence, 0.65)
             result.escalate = result.confidence < CONFIDENCE_THRESHOLD
 
         # ----- Prose scan -----------------------------------------------
