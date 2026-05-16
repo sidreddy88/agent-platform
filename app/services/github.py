@@ -305,6 +305,22 @@ class GitHubService:
             await self._raise_for_status(response)
             return response.json()["default_branch"]
 
+    async def get_file_tree(self, owner: str, repo: str, ref: str = "main") -> tuple[set[str], str]:
+        """Return (set_of_file_paths, tree_sha) for the repo at ref.
+
+        Uses the recursive Git Trees endpoint — one API call for the full tree.
+        The sha is returned so callers can cache by (repo, sha).
+        """
+        async with self._client() as client:
+            resp = await client.get(
+                f"/repos/{owner}/{repo}/git/trees/{ref}",
+                params={"recursive": "1"},
+            )
+            await self._raise_for_status(resp)
+            data = resp.json()
+        paths = {item["path"] for item in data.get("tree", []) if item.get("type") == "blob"}
+        return paths, data["sha"]
+
     async def search_code(self, owner: str, repo: str, query: str) -> list[dict]:
         """
         Search file *contents* in the repo using GitHub Code Search API.

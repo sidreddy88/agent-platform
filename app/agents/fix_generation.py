@@ -658,11 +658,15 @@ class FixGenerationAgent(BaseAgent):
         # The DiagnosisAgent has already reasoned about root cause and named the file
         # and function. Prefer files where the function is defined; fall back to files
         # where it is called (the call site may itself be the bug).
-        if incident.diagnosis_affected_file and incident.diagnosis_affected_function:
+        if incident.diagnosis_affected_file:
             diag_file = incident.diagnosis_affected_file.lstrip("/")
-            diag_fn = incident.diagnosis_affected_function
+            diag_fn = incident.diagnosis_affected_function  # may be None for anonymous handlers
             try:
                 content, _ = await self._github.get_file_contents(self._owner, self._repo, diag_file, ref=PR_BASE)
+                if diag_fn is None:
+                    # Anonymous handler — file is the only target; use it directly.
+                    logger.info("[FixGen] Using diagnosis target (anonymous handler): %s", diag_file)
+                    return diag_file, "the function handling this error"
                 if self._extract_js_function(content, diag_fn):
                     logger.info("[FixGen] Using diagnosis target: %s → %s", diag_file, diag_fn)
                     return diag_file, diag_fn
@@ -698,6 +702,20 @@ class FixGenerationAgent(BaseAgent):
                 except Exception:
                     continue
             logger.info("[FixGen] No stack frame path found in repo — falling back")
+
+        # ── 1b. File paths mentioned in diagnosis prose ───────────────────
+        # When affected_file was nulled by grounding but the diagnosis text
+        # still contains the correct path, extract and verify it here.
+        if incident.diagnosis:
+            import re as _re
+            prose_paths = _re.findall(r'\b([\w/-]+\.(?:js|ts|jsx|tsx))\b', incident.diagnosis)
+            for prose_path in dict.fromkeys(prose_paths):  # dedupe, preserve order
+                try:
+                    await self._github.get_file_contents(self._owner, self._repo, prose_path, ref=PR_BASE)
+                    logger.info("[FixGen] Diagnosis prose resolved file: %s", prose_path)
+                    return prose_path, incident.diagnosis_affected_function or "the function handling this error"
+                except Exception:
+                    continue
 
         # ── 2. Code search using diagnosis function name or regex extraction ──
         # Prefer diagnosis_affected_function over regex — it's already been reasoned
@@ -1491,6 +1509,23 @@ class FixGenerationAgent(BaseAgent):
             except Exception as exc:
                 logger.error("[FixGen] Agentic LLM call failed (iteration %d): %s", iteration, exc)
                 return "", "", [], None
+
+            if stop_reason == "max_tokens":
+                logger.warning(
+                    "[FixGen] Agentic: LLM hit max_tokens at iteration %d — tool inputs may be truncated; discarding",
+                    iteration,
+                )
+                # Truncated tool calls produce incomplete new_text — don't accept them.
+                # Ask the model to produce a shorter replacement on the next iteration.
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response was cut off because it exceeded the output limit. "
+                        "Write a shorter, more focused fix. Use apply_edit with only the minimum "
+                        "lines that need to change — do not reproduce unchanged surrounding code."
+                    ),
+                })
+                continue
 
             if stop_reason == "end_turn" or not tool_calls:
                 if not edit_result:

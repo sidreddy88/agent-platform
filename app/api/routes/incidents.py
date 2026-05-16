@@ -128,7 +128,7 @@ async def scan_last_24h() -> Dict[str, Any]:
                     error_type=error_type,
                     task_id=task_id,
                     title=f"{error_type} in {service}",
-                    description=msg[:600],
+                    description=msg[:3000],
                     service=service,
                     resource_id=log_group,
                     category=category,

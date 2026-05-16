@@ -93,9 +93,10 @@ CODE REVIEW (the review that returned REQUEST_CHANGES):
 CLASSIFICATION RULES:
   BLOCKING issues (always → refix_first):
     - The fix addresses the wrong function or wrong root cause
-    - New bugs, crashes, or regressions introduced by the fix
-    - Security vulnerabilities (SQL injection, auth bypass, data exposure)
-    - Data loss or corruption risk
+    - New bugs, crashes, or regressions INTRODUCED BY THIS PR
+    - Security vulnerabilities INTRODUCED BY THIS PR (not pre-existing patterns)
+    - Syntactically invalid or incomplete code (truncated lines, missing braces)
+    - Data loss or corruption risk introduced by this change
     - Fix breaks other existing functionality
 
   NON-BLOCKING issues (ok to merge_now if severity is P0 or P1):
@@ -104,12 +105,17 @@ CLASSIFICATION RULES:
     - Logging improvements
     - Code style, naming, or documentation
     - Performance improvements (not regressions)
+    - Pre-existing security patterns not introduced by this PR
+      (e.g. missing auth on an endpoint that had no auth before this change)
     - Prototype pollution / input validation for edge cases that aren't in the hot path
 
 DECISION LOGIC:
   - Any BLOCKING issue present → refix_first (regardless of severity)
   - P0 or P1 + only NON-BLOCKING issues → merge_now (get the fix in, follow up later)
   - P2 or P3 + only NON-BLOCKING issues → refix_first (there's time to do it properly)
+
+IMPORTANT: If the review flags a security or quality issue that existed in the codebase
+BEFORE this PR, that is non-blocking. This PR is judged only on what it changes.
 
 Respond with ONLY a valid JSON object:
 {{

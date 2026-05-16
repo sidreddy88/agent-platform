@@ -592,17 +592,17 @@ class AWSService:
                     ctx_resp = logs.get_log_events(
                         logGroupName=log_group,
                         logStreamName=ev["logStreamName"],
-                        startTime=ev["timestamp"] - 20_000,  # 20 seconds before crash
+                        startTime=ev["timestamp"] - 30_000,  # 30 seconds before crash
                         endTime=ev["timestamp"],
-                        limit=25,
+                        limit=50,
                         startFromHead=True,
                     )
                     ctx_lines = [e.get("message", "").rstrip() for e in ctx_resp.get("events", [])]
                     # Drop the crash line itself if it appears at the end
                     if ctx_lines and ctx_lines[-1].strip() == message.strip():
                         ctx_lines = ctx_lines[:-1]
-                    # Keep only the last 20 lines (closest to the crash)
-                    ctx_lines = ctx_lines[-20:]
+                    # Keep the last 40 lines (closest to the crash — full stack trace)
+                    ctx_lines = ctx_lines[-40:]
                     if ctx_lines:
                         message = "\n".join(ctx_lines) + "\n" + message
                 else:
