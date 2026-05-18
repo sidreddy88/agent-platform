@@ -27,6 +27,7 @@ from app.models.events import IncidentState
 from app.services.blast_radius import BlastRadiusGuard
 from app.services.github import GitHubError, GitHubService
 from app.services.llm import HAIKU_MODEL, LLMService
+from app.services.repo import LocalRepoService
 from app.services.session_logger import session_logger
 
 logger = logging.getLogger(__name__)
@@ -84,12 +85,49 @@ class FixGenerationAgent(BaseAgent):
         self._llm_haiku = LLMService(model=HAIKU_MODEL)
         self._github = github or GitHubService()
         self._owner, self._repo = settings.fix_target_repo.split("/", 1)
+        self._local_repo = LocalRepoService(self._owner, self._repo)
         self._rag = None
         try:
             from app.services.rag import RAGService
             self._rag = RAGService()
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Local repo helpers
+    # ------------------------------------------------------------------
+
+    async def _ensure_local_repo(self) -> None:
+        try:
+            await self._local_repo.ensure_fresh()
+            logger.info("[FixGen] Local repo ready (%d files)", len(self._local_repo.list_files()))
+        except Exception as exc:
+            logger.warning("[FixGen] Local repo unavailable — falling back to GitHub API for reads: %s", exc)
+
+    async def _read_file(self, path: str, ref: str = PR_BASE) -> tuple[str, str]:
+        """Return (content, sha). Content from local clone; SHA from API (for writes).
+
+        SHA is fetched right before it's needed, minimising the stale-SHA window.
+        """
+        if self._local_repo.ready and self._local_repo.file_exists(path):
+            try:
+                content = self._local_repo.read_file(path)
+                _, sha = await self._github.get_file_contents(self._owner, self._repo, path, ref=ref)
+                return content, sha
+            except Exception:
+                pass
+        # Fallback: full API fetch
+        return await self._github.get_file_contents(self._owner, self._repo, path, ref=ref)
+
+    async def _path_exists_in_repo(self, path: str) -> bool:
+        """Check file existence — local clone first, GitHub API as fallback."""
+        if self._local_repo.ready:
+            return self._local_repo.file_exists(path)
+        try:
+            await self._github.get_file_contents(self._owner, self._repo, path, ref=PR_BASE)
+            return True
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Public API
@@ -195,6 +233,8 @@ class FixGenerationAgent(BaseAgent):
         today = datetime.utcnow().strftime("%Y-%m-%d")
         sev = str(event.severity).split(".")[-1] if event.severity else "P2"
 
+        await self._ensure_local_repo()
+
         def _fail(desc: str, issue_url: str | None = None, branch: str = "") -> tuple[FixResult, list[str]]:
             return FixResult(
                 issue_url=issue_url,
@@ -233,30 +273,31 @@ class FixGenerationAgent(BaseAgent):
             logger.info("[FixGen] EXTEND mode: fetching from PR branch %s", fetch_ref)
 
         try:
-            content, file_sha = await self._github.get_file_contents(
-                self._owner, self._repo, file_path, ref=fetch_ref
-            )
+            content, file_sha = await self._read_file(file_path, ref=fetch_ref)
             steps.append(f"✓ Fetched {file_path} from {fetch_ref} (sha={file_sha[:8]}, {len(content)} chars)")
             logger.info("[FixGen] Fetched %s (%d chars) from %s", file_path, len(content), fetch_ref)
-        except GitHubError as exc:
+        except (GitHubError, Exception) as exc:
             # 404 — try to find the file elsewhere in the repo by basename
             if "404" in str(exc):
                 basename = file_path.rsplit("/", 1)[-1]
                 steps.append(f"⚠ {file_path} not found — searching repo for '{basename}'")
-                matches = await self._github.find_files_by_name(
-                    self._owner, self._repo, basename, ref=PR_BASE
-                )
+                # Use local clone listing if available, else fall back to GitHub tree search
+                if self._local_repo.ready:
+                    all_paths = self._local_repo.list_files()
+                    matches = [p for p in all_paths if p.rsplit("/", 1)[-1] == basename]
+                else:
+                    matches = await self._github.find_files_by_name(
+                        self._owner, self._repo, basename, ref=PR_BASE
+                    )
                 if matches:
                     file_path = matches[0]
                     steps.append(f"✓ Found at {file_path} — retrying fetch")
                     logger.info("[FixGen] Resolved path via tree search: %s", file_path)
                     try:
-                        content, file_sha = await self._github.get_file_contents(
-                            self._owner, self._repo, file_path, ref=PR_BASE
-                        )
+                        content, file_sha = await self._read_file(file_path, ref=PR_BASE)
                         steps.append(f"✓ Fetched {file_path} ({len(content)} chars)")
                         test_candidates, default_test_path = self._test_file_candidates(file_path)
-                    except GitHubError as exc2:
+                    except Exception as exc2:
                         steps.append(f"✗ Retry failed: {exc2}")
                         return _fail(f"Could not fetch {file_path}: {exc2}", branch=branch_name)
                 else:
@@ -305,7 +346,7 @@ class FixGenerationAgent(BaseAgent):
             logger.error("[FixGen] LLM error: %s", exc)
             return _fail(f"LLM error: {exc}", branch=branch_name)
 
-        if not old_function:
+        if not old_function and not patches:
             steps.append(f"✗ LLM could not locate {function_name} in the file")
             return _fail(f"{function_name} not found in {file_path}", branch=branch_name)
 
@@ -348,9 +389,7 @@ class FixGenerationAgent(BaseAgent):
                 steps.append(f"↻ Critique LIKELY WRONG — retrying with alternate frame: {alt_path}")
                 logger.info("[FixGen] Critique rejected — switching to %s → %s", alt_path, alt_fn)
                 try:
-                    alt_content, _ = await self._github.get_file_contents(
-                        self._owner, self._repo, alt_path, ref=PR_BASE
-                    )
+                    alt_content, _ = await self._read_file(alt_path, ref=PR_BASE)
                     alt_context_bundle = await self._fetch_call_chain(
                         alt_path, alt_fn or function_name, alt_content
                     )
@@ -490,6 +529,33 @@ class FixGenerationAgent(BaseAgent):
                 branch_name, file_sha,
             )
             steps.append(f"✓ Committed fix (sha={commit_sha[:8]})")
+
+            # ── 5b. Secondary file fix (same issue, different file) ───────
+            secondary_path = incident.diagnosis_additional_fix_file
+            if secondary_path and incident.diagnosis_additional_fix:
+                try:
+                    sec_content, sec_sha = await self._read_file(secondary_path, ref=PR_BASE)
+                    sec_fn = incident.diagnosis_additional_fix_function or "(module-level)"
+                    sec_old, sec_new, sec_patches, _ = await self._generate_fix(
+                        sec_content, sec_fn, incident, secondary_path,
+                        test_failures=(
+                            f"The identical fix was already applied to {file_path}. "
+                            f"Apply the same change here: {incident.diagnosis_additional_fix}"
+                        ),
+                    )
+                    if sec_old or sec_patches:
+                        sec_new_content = self._apply_all_edits(sec_content, sec_old, sec_new, sec_patches)
+                        await self._github.update_file(
+                            self._owner, self._repo, secondary_path, sec_new_content,
+                            f"fix: same issue in {secondary_path.split('/')[-1]}",
+                            branch_name, sec_sha,
+                        )
+                        steps.append(f"✓ Committed secondary fix to {secondary_path}")
+                    else:
+                        steps.append(f"⚠ Secondary fix skipped — LLM produced no edits for {secondary_path}")
+                except Exception as exc:
+                    steps.append(f"⚠ Secondary fix failed ({secondary_path}): {exc} — proceeding with primary only")
+                    logger.warning("[FixGen] Secondary fix error for %s: %s", secondary_path, exc)
 
             pr_number, pr_url = await self._github.create_pull_request(
                 self._owner, self._repo,
@@ -662,7 +728,7 @@ class FixGenerationAgent(BaseAgent):
             diag_file = incident.diagnosis_affected_file.lstrip("/")
             diag_fn = incident.diagnosis_affected_function  # may be None for anonymous handlers
             try:
-                content, _ = await self._github.get_file_contents(self._owner, self._repo, diag_file, ref=PR_BASE)
+                content, _ = await self._read_file(diag_file, ref=PR_BASE)
                 if diag_fn is None:
                     # Anonymous handler — file is the only target; use it directly.
                     logger.info("[FixGen] Using diagnosis target (anonymous handler): %s", diag_file)
@@ -692,15 +758,15 @@ class FixGenerationAgent(BaseAgent):
             # Try caller frames first — that's where the null originates.
             ordered = frames[1:] + frames[:1] if is_null and len(frames) > 1 else frames
             for raw_path, fn_name in ordered:
-                try:
-                    await self._github.get_file_contents(self._owner, self._repo, raw_path, ref=PR_BASE)
+                exists = (
+                    self._local_repo.ready and self._local_repo.file_exists(raw_path)
+                ) or await self._path_exists_in_repo(raw_path)
+                if exists:
                     if is_null and raw_path == frames[0][0]:
                         logger.info("[FixGen] Null error — only crash frame found in repo: %s", raw_path)
                     else:
                         logger.info("[FixGen] Stack trace resolved: %s → %s", raw_path, fn_name)
                     return raw_path, fn_name or "the function handling this error"
-                except Exception:
-                    continue
             logger.info("[FixGen] No stack frame path found in repo — falling back")
 
         # ── 1b. File paths mentioned in diagnosis prose ───────────────────
@@ -710,12 +776,12 @@ class FixGenerationAgent(BaseAgent):
             import re as _re
             prose_paths = _re.findall(r'\b([\w/-]+\.(?:js|ts|jsx|tsx))\b', incident.diagnosis)
             for prose_path in dict.fromkeys(prose_paths):  # dedupe, preserve order
-                try:
-                    await self._github.get_file_contents(self._owner, self._repo, prose_path, ref=PR_BASE)
+                exists = (
+                    self._local_repo.ready and self._local_repo.file_exists(prose_path)
+                ) or await self._path_exists_in_repo(prose_path)
+                if exists:
                     logger.info("[FixGen] Diagnosis prose resolved file: %s", prose_path)
                     return prose_path, incident.diagnosis_affected_function or "the function handling this error"
-                except Exception:
-                    continue
 
         # ── 2. Code search using diagnosis function name or regex extraction ──
         # Prefer diagnosis_affected_function over regex — it's already been reasoned
@@ -731,9 +797,7 @@ class FixGenerationAgent(BaseAgent):
                 first_reference: tuple[str, str] | None = None
                 for path in candidates[:5]:
                     try:
-                        content, _ = await self._github.get_file_contents(
-                            self._owner, self._repo, path, ref=PR_BASE
-                        )
+                        content, _ = await self._read_file(path, ref=PR_BASE)
                         if self._extract_js_function(content, fn_name):
                             logger.info("[FixGen] Code search resolved (definition): %s → %s", fn_name, path)
                             return path, fn_name
@@ -1050,9 +1114,7 @@ class FixGenerationAgent(BaseAgent):
                           if not any(s in r["path"] for s in _SKIP) and r["path"] != file_path]
             for path in candidates[:5]:
                 try:
-                    src_content, _ = await self._github.get_file_contents(
-                        self._owner, self._repo, path, ref=PR_BASE
-                    )
+                    src_content, _ = await self._read_file(path, ref=PR_BASE)
                     # Only use this file if it actually DEFINES the function (not just calls it)
                     if self._extract_js_function(src_content, source_fn):
                         logger.info("[FixGen] Source trace resolved: %s → %s", source_fn, path)
@@ -1087,9 +1149,7 @@ class FixGenerationAgent(BaseAgent):
         # ── Imports (Tier 3) ──────────────────────────────────────────
         for imp_path in self._parse_local_imports(file_path, content)[:4]:
             try:
-                imp_content, _ = await self._github.get_file_contents(
-                    self._owner, self._repo, imp_path, ref=PR_BASE
-                )
+                imp_content, _ = await self._read_file(imp_path, ref=PR_BASE)
                 imports.append((imp_path, imp_content[:1200]))
                 logger.debug("[FixGen] Call chain: fetched import %s", imp_path)
             except Exception:
@@ -1106,9 +1166,7 @@ class FixGenerationAgent(BaseAgent):
                 if any(s in path for s in _SKIP):
                     continue
                 try:
-                    caller_content, _ = await self._github.get_file_contents(
-                        self._owner, self._repo, path, ref=PR_BASE
-                    )
+                    caller_content, _ = await self._read_file(path, ref=PR_BASE)
                     callers.append((path, caller_content[:1200]))
                     logger.debug("[FixGen] Call chain: fetched caller %s", path)
                 except Exception:
@@ -1121,9 +1179,7 @@ class FixGenerationAgent(BaseAgent):
         test_candidates, _ = self._test_file_candidates(file_path)
         for test_path in test_candidates[:3]:
             try:
-                test_content, _ = await self._github.get_file_contents(
-                    self._owner, self._repo, test_path, ref=PR_BASE
-                )
+                test_content, _ = await self._read_file(test_path, ref=PR_BASE)
                 tests.append((test_path, test_content[:1500]))
                 logger.debug("[FixGen] Call chain: fetched test %s", test_path)
                 break  # one matching test file is plenty
@@ -1432,12 +1488,29 @@ class FixGenerationAgent(BaseAgent):
 
         # Pre-extract the target function so the LLM never needs to reproduce old text.
         # If extraction succeeds, apply_edit only needs new_text — old_text comes from here.
-        extracted_old = self._extract_js_function(content, function_name)
+        _is_sentinel = function_name in (
+            "(module-level)", "the function handling this error", "", None,
+        )
+        extracted_old = None if _is_sentinel else self._extract_js_function(content, function_name)
+        # Fall through to module-level path if extraction failed — the file may be a
+        # top-to-bottom script with no enclosing function (e.g. a Fargate task entry point).
+        _is_module_level = _is_sentinel or (extracted_old is None)
         if extracted_old:
             function_ref = (
                 f"\nCURRENT FUNCTION (do NOT reproduce this in apply_edit — it is already known):\n"
                 f"<OLD_REFERENCE>\n{extracted_old}\n</OLD_REFERENCE>\n\n"
                 f"Call apply_edit(new_text=<your fixed version>) when ready.\n"
+            )
+        elif _is_module_level:
+            function_ref = (
+                f"\nACTION REQUIRED — module-level fix (no enclosing function):\n"
+                f"The file content is shown above. Do NOT call read_file — the code is already here.\n"
+                f"Call patch_line NOW with:\n"
+                f"  old_snippet = the exact line(s) from the file that need changing (copy verbatim)\n"
+                f"  new_snippet = the replacement (for an insertion, prepend the new line before the existing one)\n"
+                f"Example for adding a line before a call:\n"
+                f"  patch_line(old_snippet='mongoose.connect(...)', new_snippet='mongoose.set(...);\\nmongoose.connect(...)')\n"
+                f"Do not call any other tool first. patch_line immediately.\n"
             )
         else:
             function_ref = (
@@ -1451,12 +1524,17 @@ class FixGenerationAgent(BaseAgent):
                 f"Do NOT guess at text — copy it exactly from the file content shown above.\n"
             )
 
+        _target_label = (
+            f"TARGET: module-level code in {file_path} (no enclosing function — use patch_line)"
+            if _is_module_level else
+            f"TARGET FUNCTION: {function_name} in {file_path}"
+        )
         initial_prompt = (
             f"Fix this production bug.\n\n"
             f"ERROR TYPE: {incident.error_event.error_type or 'unknown'}\n"
             f"ERROR: {incident.error_event.description or incident.error_event.title}\n"
             f"ROOT CAUSE: {incident.diagnosis}\n"
-            f"TARGET FUNCTION: {function_name} in {file_path}\n"
+            f"{_target_label}\n"
             f"{contract_warning}{human_notes_section}{test_failures_section}{additional_fix_section}"
             f"\n## TIER 1 — Code you are changing (most important)\n"
             f"FILE: {file_path}\n{content}\n"
@@ -1563,9 +1641,7 @@ class FixGenerationAgent(BaseAgent):
                 elif name == "read_file":
                     path = tc["input"].get("path", "")
                     try:
-                        file_content, _ = await self._github.get_file_contents(
-                            self._owner, self._repo, path, ref=PR_BASE
-                        )
+                        file_content, _ = await self._read_file(path, ref=PR_BASE)
                         result = file_content
                     except Exception as exc:
                         result = f"Error reading {path}: {exc}"
@@ -1587,12 +1663,32 @@ class FixGenerationAgent(BaseAgent):
                         verdict.get("escalate"),
                         verdict.get("escalate_reason"),
                     )
-                    result = "✓ verdict recorded — call end_turn now."
+                    if not edit_result and not patch_calls:
+                        result = (
+                            "ERROR: You called final_verdict before making any edits. "
+                            "You MUST call patch_line or apply_edit FIRST to actually change the code. "
+                            "Call patch_line now with the exact lines to change, then call final_verdict."
+                        )
+                    else:
+                        result = "✓ verdict recorded — call end_turn now."
                 else:
                     result = f"Unknown tool: {name}"
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
         if not edit_result:
+            # Module-level fix: LLM used patch_line only (no enclosing function to replace).
+            # If patch_calls has entries, return them as a patches-only result.
+            patches_only = [
+                (tc["input"]["old_snippet"], tc["input"]["new_snippet"])
+                for tc in patch_calls
+                if tc["input"].get("old_snippet") and tc["input"].get("new_snippet")
+            ]
+            if patches_only:
+                logger.info(
+                    "[FixGen] Agentic fix: module-level patch_line only (%d patches) in %s",
+                    len(patches_only), file_path,
+                )
+                return "", "", patches_only, verdict
             logger.error("[FixGen] Agentic fix: no apply_edit call after %d iterations", iteration + 1)
             return "", "", [], verdict
 

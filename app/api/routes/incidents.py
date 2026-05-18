@@ -180,6 +180,218 @@ async def scan_last_24h() -> Dict[str, Any]:
     }
 
 
+@router.post("/scan/14days")
+async def scan_last_14_days() -> Dict[str, Any]:
+    """On-demand scan of configured ECS log groups over the last 14 days."""
+    aws = AWSService()
+    raw: str = getattr(settings, "ecs_log_groups", "")
+    log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []
+    region = getattr(settings, "ecs_log_groups_region", "") or None
+
+    pending_event_store.reset_dismissed()
+    _SCAN_CAP = 200
+    _FOURTEEN_DAYS = 20_160  # 14 * 24 * 60 minutes
+    await _scan_log(
+        f"Scan started — checking {len(log_groups)} log group(s) over last 14 days "
+        f"(cap: {_SCAN_CAP} events)"
+    )
+
+    queued = []
+    errors = []
+    capped = False
+    for log_group in log_groups:
+        if len(queued) >= _SCAN_CAP:
+            capped = True
+            break
+        service = log_group.rstrip("/").split("/")[-1]
+        await _scan_log(f"Scanning {log_group} ...")
+        try:
+            matches = aws.get_error_logs(log_group, minutes=_FOURTEEN_DAYS, region=region)
+            await _scan_log(f"  {len(matches)} raw log entries fetched")
+
+            seen: set[tuple[str, str, str]] = set()
+            for log in matches:
+                if len(queued) >= _SCAN_CAP:
+                    capped = True
+                    break
+                msg = log["message"]
+                stream = log["stream"]
+                timestamp = str(log["timestamp"])
+                sig = (stream, timestamp, msg[:600])
+                if sig in seen:
+                    continue
+                seen.add(sig)
+
+                classified = classify_ecs_log(msg)
+                if classified is None:
+                    continue
+                error_type, category = classified
+
+                stream_parts = stream.rsplit("/", 1)
+                task_id = stream_parts[-1] if len(stream_parts) > 1 else stream
+
+                event = ErrorEvent(
+                    source=EventSource.CLOUDWATCH,
+                    error_type=error_type,
+                    task_id=task_id,
+                    title=f"{error_type} in {service}",
+                    description=msg[:3000],
+                    service=service,
+                    resource_id=log_group,
+                    category=category,
+                    metadata={
+                        "log_group": log_group,
+                        "task_id": task_id,
+                        "timestamp": log["timestamp"],
+                    },
+                )
+
+                pe, is_new = pending_event_store.add(event)
+                if pe is None:
+                    continue
+                msg_type = "pending_event_added" if is_new else "pending_event_updated"
+                await broadcast({"type": msg_type, "event": pending_event_store.serialize(pe)})
+                if is_new:
+                    queued.append({"id": pe.id, "title": event.title, "service": service})
+                    if category == "crash":
+                        await event_queue.enqueue(event)
+                        await broadcast({"type": "crash_auto_queued", "title": event.title})
+                        await _scan_log(f"  → crash auto-queued: {msg[:80].strip()}", level="event")
+                    else:
+                        await _scan_log(f"  → pending approval: [{error_type}] {msg[:80].strip()}", level="event")
+                else:
+                    await _scan_log(
+                        f"  ↻ duplicate ({pe.occurrences}× seen): [{error_type}] {msg[:80].strip()}",
+                        level="info",
+                    )
+
+        except Exception as exc:
+            errors.append({"log_group": log_group, "error": str(exc)})
+            await _scan_log(f"  Error scanning {log_group}: {exc}", level="error")
+
+    if capped:
+        await _scan_log(f"Reached {_SCAN_CAP}-event cap — stopping scan early", level="info")
+
+    summary = f"Scan complete — {len(queued)} event(s) awaiting approval"
+    if capped:
+        summary += f" (capped at {_SCAN_CAP})"
+    if not queued:
+        summary = "Scan complete — no new errors detected"
+    await _scan_log(summary, level="done")
+
+    return {
+        "events_found": len(queued),
+        "events": queued,
+        **({"scan_errors": errors} if errors else {}),
+    }
+
+
+@router.post("/scan/crashes")
+async def scan_crashes_4_weeks() -> Dict[str, Any]:
+    """Scan the last 4 weeks of ECS logs, returning APP_CRASHED events only."""
+    aws = AWSService()
+    raw: str = getattr(settings, "ecs_log_groups", "")
+    log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []
+    region = getattr(settings, "ecs_log_groups_region", "") or None
+
+    _SCAN_CAP = 200
+    _FOUR_WEEKS = 40_320  # 28 * 24 * 60 minutes
+    await _scan_log(
+        f"Crash scan started — checking {len(log_groups)} log group(s) over last 4 weeks "
+        f"(crashes only, cap: {_SCAN_CAP})"
+    )
+
+    queued = []
+    errors = []
+    capped = False
+    for log_group in log_groups:
+        if len(queued) >= _SCAN_CAP:
+            capped = True
+            break
+        service = log_group.rstrip("/").split("/")[-1]
+        await _scan_log(f"Scanning {log_group} ...")
+        try:
+            matches = aws.get_error_logs(log_group, minutes=_FOUR_WEEKS, region=region)
+            await _scan_log(f"  {len(matches)} raw log entries fetched")
+
+            seen: set[tuple[str, str, str]] = set()
+            for log in matches:
+                if len(queued) >= _SCAN_CAP:
+                    capped = True
+                    break
+                msg = log["message"]
+                stream = log["stream"]
+                timestamp = str(log["timestamp"])
+                sig = (stream, timestamp, msg[:600])
+                if sig in seen:
+                    continue
+                seen.add(sig)
+
+                classified = classify_ecs_log(msg)
+                if classified is None:
+                    continue
+                error_type, category = classified
+
+                # Crashes only
+                if category != "crash":
+                    continue
+
+                stream_parts = stream.rsplit("/", 1)
+                task_id = stream_parts[-1] if len(stream_parts) > 1 else stream
+
+                event = ErrorEvent(
+                    source=EventSource.CLOUDWATCH,
+                    error_type=error_type,
+                    task_id=task_id,
+                    title=f"{error_type} in {service}",
+                    description=msg[:3000],
+                    service=service,
+                    resource_id=log_group,
+                    category=category,
+                    metadata={
+                        "log_group": log_group,
+                        "task_id": task_id,
+                        "timestamp": log["timestamp"],
+                    },
+                )
+
+                pe, is_new = pending_event_store.add(event)
+                if pe is None:
+                    continue
+                msg_type = "pending_event_added" if is_new else "pending_event_updated"
+                await broadcast({"type": msg_type, "event": pending_event_store.serialize(pe)})
+                if is_new:
+                    queued.append({"id": pe.id, "title": event.title, "service": service})
+                    await event_queue.enqueue(event)
+                    await broadcast({"type": "crash_auto_queued", "title": event.title})
+                    await _scan_log(f"  → crash auto-queued: {msg[:80].strip()}", level="event")
+                else:
+                    await _scan_log(
+                        f"  ↻ duplicate ({pe.occurrences}× seen): [{error_type}] {msg[:80].strip()}",
+                        level="info",
+                    )
+
+        except Exception as exc:
+            errors.append({"log_group": log_group, "error": str(exc)})
+            await _scan_log(f"  Error scanning {log_group}: {exc}", level="error")
+
+    if capped:
+        await _scan_log(f"Reached {_SCAN_CAP}-event cap — stopping scan early", level="info")
+
+    summary = f"Crash scan complete — {len(queued)} crash(es) found"
+    if capped:
+        summary += f" (capped at {_SCAN_CAP})"
+    if not queued:
+        summary = "Crash scan complete — no new crashes detected"
+    await _scan_log(summary, level="done")
+
+    return {
+        "events_found": len(queued),
+        "events": queued,
+        **({"scan_errors": errors} if errors else {}),
+    }
+
+
 @router.get("")
 async def list_incidents() -> List[Dict[str, Any]]:
     """All incidents, newest first."""
