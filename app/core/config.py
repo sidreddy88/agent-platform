@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # Target repo for AI-generated fix PRs (owner/repo)
     fix_target_repo: str = "VoyageGroupMag/AllInterviews"
 
+    # Root directory for persistent local repo clones (used by LocalRepoService).
+    # Defaults to ~/.agent-platform/repos if unset.
+    repo_clone_root: str = ""
+
     # Directory containing AGENTS.md + CONSTRAINTS.md to inject into every agent call.
     # Relative to the project root, or absolute. Set to "" to disable injection.
     harness_docs_path: str = "targets/allinterviews"

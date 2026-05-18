@@ -89,7 +89,11 @@ class IncidentStore:
         Also blocks if a prior incident for the same error was resolved via a merged PR
         (outcome == 'fix_merged') — prevents the same fixed error from re-entering
         the pipeline without explicit human intervention."""
-        skip = {IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE}
+        # FIX_FAILED / VERIFICATION_FAILED are terminal failures — a new attempt is allowed.
+        skip = {
+            IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE,
+            IncidentStatus.FIX_FAILED, IncidentStatus.VERIFICATION_FAILED,
+        }
         desc_key = self._normalize_desc(description)
         for incident in self._incidents.values():
             if incident.status in skip:
