@@ -220,6 +220,10 @@ DECISION GUIDE:
   "noise"     — transient / expected / false alarm — stand down
   "duplicate" — open PR already covers this — link and stand down
 
+CRITICAL: You may ONLY output decision="duplicate" if check_duplicate_pr returned "DUPLICATE:...".
+If it returned "NO_DUPLICATE", you MUST NOT output "duplicate" even if you believe a fix is in progress.
+Use "real" if the error is happening and no open PR was found by the tool.
+
 Answer with ONLY a valid JSON object, no other text:
 {{
   "decision": "real",
