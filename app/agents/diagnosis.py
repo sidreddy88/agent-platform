@@ -34,6 +34,7 @@ from app.services.aws import AWSError, AWSService
 from app.services.github import GitHubService
 from app.services.llm import LLMService
 from app.services.rag import RAGService
+from app.services.repo import LocalRepoService
 
 logger = logging.getLogger(__name__)
 
@@ -358,10 +359,10 @@ class DiagnosisAgent(BaseAgent):
         self._aws = aws or AWSService()
         self._rag = rag
         self._github = github or GitHubService()
-        self._tree_cache: dict[tuple[str, str], set[str]] = {}  # (owner, repo) → paths
         _owner, _repo = settings.fix_target_repo.split("/", 1)
         self._owner = _owner
         self._repo = _repo
+        self._local_repo = LocalRepoService(self._owner, self._repo)
         self._register_tools()
 
     def _register_tools(self) -> None:
@@ -468,6 +469,41 @@ class DiagnosisAgent(BaseAgent):
             except Exception as exc:
                 return f"Could not fetch {file_path}: {exc}"
 
+        async def _grep_codebase(pattern: str, file_glob: str = "*.js") -> str:
+            """Exact-string search across every file in the local repo clone.
+
+            Returns each matching line with its file path and line number.
+            Use this when you need to find WHERE a specific function or string is
+            called/defined — e.g. 'mongoose.connect' or 'require(\"mongoose\")'.
+            Faster and more precise than search_codebase for exact patterns.
+            Input: {pattern: string, file_glob: string (default '**/*.js')}
+            """
+            local_repo = self._local_repo
+            if not local_repo.ready:
+                return "Local repo not available — use search_codebase instead."
+            import fnmatch
+            matches: list[str] = []
+            try:
+                for rel_path in sorted(local_repo.list_files()):
+                    if not fnmatch.fnmatch(rel_path, file_glob):
+                        continue
+                    try:
+                        content = local_repo.read_file(rel_path)
+                    except Exception:
+                        continue
+                    for i, line in enumerate(content.splitlines(), 1):
+                        if pattern in line:
+                            matches.append(f"{rel_path}:{i}: {line.strip()[:120]}")
+                            if len(matches) >= 50:
+                                break
+                    if len(matches) >= 50:
+                        break
+            except Exception as exc:
+                return f"grep_codebase error: {exc}"
+            if not matches:
+                return f"No matches for '{pattern}' in {file_glob}."
+            return f"{len(matches)} match(es) for '{pattern}':\n" + "\n".join(matches)
+
         async def _search_similar_incidents(symptoms: str) -> str:
             """Find past incidents with similar symptoms from the knowledge base."""
             matches = _find_similar_incidents(symptoms)
@@ -565,6 +601,18 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
         self.register_tool(
+            "grep_codebase",
+            _grep_codebase,
+            (
+                "Exact-string search across every file in the local repo clone. "
+                "Returns file paths and line numbers for every match. "
+                "Use this instead of search_codebase when you need to find WHERE a specific "
+                "string appears — e.g. 'mongoose.connect', 'require(\"mongoose\")', a function "
+                "call, or an import. search_codebase is semantic/fuzzy; grep_codebase is exact. "
+                "Input: {pattern: string, file_glob: string (default '*.js', matches all .js files at any depth)}"
+            ),
+        )
+        self.register_tool(
             "search_similar_incidents",
             _search_similar_incidents,
             (
@@ -586,44 +634,30 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
 
-    async def _get_repo_tree(self) -> set[str] | None:
-        """Return the cached file-path set for the target repo, fetching if needed.
-
-        Returns None if the tree cannot be fetched so callers can fail open.
-        """
-        # Check cache first — keyed by repo since we don't have sha yet.
-        simple_key = (self._owner, self._repo)
-        if simple_key in self._tree_cache:
-            return self._tree_cache[simple_key]
+    async def _ensure_local_repo(self) -> bool:
+        """Ensure the local clone is fresh. Returns True on success, False on failure."""
         try:
-            ref = await self._github.get_default_branch(self._owner, self._repo)
-            paths, _ = await self._github.get_file_tree(self._owner, self._repo, ref=ref)
-            self._tree_cache[simple_key] = paths
+            await self._local_repo.ensure_fresh()
             logger.info(
-                "DiagnosisAgent: loaded repo tree for %s/%s@%s (%d files)",
-                self._owner, self._repo, ref, len(paths),
+                "DiagnosisAgent: local repo ready for %s/%s (%d files)",
+                self._owner, self._repo, len(self._local_repo.list_files()),
             )
-            return paths
+            return True
         except Exception as exc:
             logger.warning(
-                "DiagnosisAgent: could not fetch repo tree for %s/%s — grounding checks will be skipped: %s",
+                "DiagnosisAgent: could not prepare local repo for %s/%s — grounding checks will be skipped: %s",
                 self._owner, self._repo, exc,
             )
-            return None
+            return False
 
     async def _file_exists_in_repo(self, path: str) -> bool:
-        """O(1) membership check against the cached repo tree.
-
-        Returns True when the tree is unavailable — fail open rather than
-        incorrectly nulling file paths that we simply couldn't verify.
-        """
+        """Check if a file exists in the local clone. Fails open if clone unavailable."""
         p = (path or "").strip().lstrip("/")
         if not p:
             return False
-        tree = await self._get_repo_tree()
-        if tree is None:
+        if not self._local_repo.ready:
             return True  # can't verify — assume it exists
-        return p in tree
+        return self._local_repo.file_exists(p)
 
     async def _symbol_exists_in_repo(self, symbol: str) -> bool:
         """Check whether `symbol` appears in the target repo on the default branch.
@@ -645,7 +679,9 @@ class DiagnosisAgent(BaseAgent):
                 return True
         return False
 
-    async def _enforce_grounding(self, result: DiagnosisResult) -> DiagnosisResult:
+    async def _enforce_grounding(
+        self, result: DiagnosisResult, incident_tokens: set[str] | None = None
+    ) -> DiagnosisResult:
         """Cap confidence and null out function names that don't exist in the repo.
 
         Catches the case where the LLM violates the prompt's grounding rule and names
@@ -732,7 +768,11 @@ class DiagnosisAgent(BaseAgent):
         for n in (result.affected_function, result.additional_fix_function):
             if n:
                 already_seen.add(n)
-        to_check = [n for n in candidates if n not in already_seen][:_MAX_PROSE_CANDIDATES]
+        # Also skip tokens that came directly from the incident error text — they
+        # are not LLM inventions, so absence from the repo is expected (e.g.
+        # a Mongoose config key that needs to be ADDED, not an existing function).
+        excluded = already_seen | (incident_tokens or set())
+        to_check = [n for n in candidates if n not in excluded][:_MAX_PROSE_CANDIDATES]
 
         if to_check:
             existence = await asyncio.gather(
@@ -785,9 +825,19 @@ class DiagnosisAgent(BaseAgent):
 
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
+        await self._ensure_local_repo()
+
         event = incident.error_event
         log_group = event.metadata.get("log_group", "")
         pattern = event.metadata.get("pattern", event.error_type or event.title)
+
+        # Tokens extracted from the incident's own error text are not LLM inventions.
+        # Exclude them from prose grounding so we don't penalise the diagnosis for
+        # citing a library property / config key that needs to be added (e.g. strictQuery).
+        incident_text = " ".join(filter(None, [
+            event.error_type, event.title, event.description, incident.triage_reasoning,
+        ]))
+        incident_tokens: set[str] = set(_extract_prose_symbols(incident_text))
 
         log_group_warning = ""
         if not log_group:
@@ -843,6 +893,34 @@ Complete each step before moving to the next.
    NOT just the raw error type. If the stack trace shows `insertMany appmasterreferrals`,
    query that. If it shows `classifyFields`, query that function name.
 
+   If there is NO stack trace (e.g. a DeprecationWarning, startup warning, or config
+   warning), find the call site with an exact search:
+     a. Call grep_codebase with the exact string that triggers the warning
+        (e.g. "mongoose.connect" for a Mongoose warning). This returns EVERY file
+        and line number where the pattern appears — it is exact, not fuzzy.
+     b. Call get_file_contents on EACH matching file. Read them all.
+     c. Pick the service entry point — the file that is actually executed when the
+        process starts (typically server.js, index.js, or the "main" in package.json).
+     d. After reading the file, check if the call site is at TOP LEVEL (no enclosing
+        function). If so, set affected_function to null — do NOT invent "main" or "run".
+        This is the correct answer for module-level scripts and does NOT lower confidence.
+   CRITICAL: affected_file MUST be a file path that literally appeared in your
+   grep_codebase results. The service name (e.g. "TaskTargetApp") is NOT a
+   filename — do not append ".js" to service names. If grep returned
+   "create-post-fargate.js" and "server.js", those are your only valid choices.
+
+   If grep_codebase returns matches across multiple files:
+     - Put the primary entry point in affected_file (the file most directly causing
+       the incident — e.g. the Fargate task file for a scheduled-task warning)
+     - After identifying the primary, explicitly check whether server.js, index.js,
+       or app.js ALSO contains the same issue (call get_file_contents on each if grep
+       returned them). If they do, put the most important one in additional_fix_file.
+     - Set additional_fix to a short description of the identical change needed
+       (e.g. "Add mongoose.set('strictQuery', true) before mongoose.connect in server.js")
+   Do NOT list worker files (routes/workers/**) as the primary or secondary unless
+   the incident is specifically about a worker. Focus on top-level entry points.
+   The fix agent will commit both files in the same PR.
+
 6. get_file_contents — fetch the FULL source of the file(s) identified in step 5.
    RAG returns 400-char fragments — you MUST read the full file to understand the code.
    Do not stop at one file. If that file spawns workers, calls helpers, or delegates to
@@ -863,7 +941,16 @@ Complete each step before moving to the next.
    call verify_symbol_in_repo with that exact name. This is not optional, even if the name
    "obviously" should exist or "matches the naming convention".
 
-   Two valid outcomes:
+   MODULE-LEVEL EXCEPTION — skip this step entirely when the fix is in module-level code:
+   If you read the file in step 6 and the call site you need to fix is at the TOP LEVEL of
+   the script (not inside any named function — e.g. `mongoose.connect(...)` sitting directly
+   in the file body with no enclosing `function foo()` or arrow function), then:
+     - Set affected_function to null. This is the CORRECT answer, not a gap.
+     - Do NOT invent a name like "main", "run", "init", or "start" just to have a value.
+     - Do NOT call verify_symbol_in_repo for an invented name — skip step 7 entirely.
+     - null for module-level code does NOT lower confidence. It is honest and accurate.
+
+   Two valid outcomes for named functions:
      a) FOUND  → the symbol is real; you may use it as affected_function and the file path
                  reported by the tool as affected_file. Prefer that path over any guess.
      b) NOT_FOUND → the symbol does not exist on the default branch. You MUST:
@@ -876,13 +963,11 @@ Complete each step before moving to the next.
                  - in `fix_approach`, describe WHAT must change conceptually, not WHERE.
    Naming a symbol you have not verified is a hallucination. Do not do it.
 
-   This applies to PROSE FIELDS too — root_cause, fix_approach, additional_fix.
-   Do not name a function in those narrative fields unless verify_symbol_in_repo
-   returned FOUND for it. The runtime re-checks every camelCase function name in
-   the prose; unverified names cap confidence further and escalate. If you don't
-   know the real symbol, describe the failing operation in plain English (e.g.
-   "the Vision API caller", "the function that uploads the derived image to S3")
-   and list candidate file paths in `evidence`.
+   Only verify symbols you intend to put in affected_function or additional_fix_function.
+   Do NOT verify every function name that appears in a stack trace or as context — only
+   the PRIMARY function you are targeting for the fix. Verifying peripheral symbols wastes
+   tool calls and incorrectly lowers confidence when they are wrappers or test helpers
+   that may not exist on the default branch.
 
 8. Answer with a JSON diagnosis.
 
@@ -962,12 +1047,16 @@ Answer with ONLY a valid JSON object:
 
 Confidence guide:
   0.90+ → near certain, clear evidence in code + logs, AND affected_function verified FOUND
-  0.70-0.90 → probable, strong log evidence but limited code visibility
+  0.80-0.90 → direct code observation (saw the exact line) AND matching stack traces, even if peripheral symbols unverified
+  0.70-0.80 → probable, strong log evidence but limited code visibility
   0.50-0.70 → possible, pattern matches but incomplete evidence
   <0.50 → uncertain, escalate to human
   If log_group was missing and steps 1–3 returned no data, cap confidence at 0.75.
-  If any named function returned NOT_FOUND in step 7, cap confidence at 0.65 and set the
-  corresponding *_function/*_file fields to null."""
+  If affected_function or additional_fix_function returned NOT_FOUND in step 7, cap confidence
+  at 0.65 and null those fields. Do NOT lower confidence for symbols mentioned only in evidence
+  prose — those are context references, not the fix target.
+  If affected_function is null because the fix is at MODULE LEVEL (no enclosing function exists),
+  this does NOT lower confidence — null is the correct answer for top-level script code."""
 
         result = await self.run(prompt)
         parsed = _parse_diagnosis_result(result.answer)
@@ -984,12 +1073,15 @@ Confidence guide:
             logger.info("DiagnosisAgent retrying after parse failure")
             result = await self.run(retry_prompt)
             parsed = _parse_diagnosis_result(result.answer)
-        grounded = await self._enforce_grounding(parsed)
+        grounded = await self._enforce_grounding(parsed, incident_tokens)
 
-        # If both primary targets were nulled by the grounding check, the LLM
-        # named files/functions that don't exist. Give it one retry with the
-        # failed names listed explicitly so it can search the repo correctly.
-        if grounded.affected_function is None and grounded.affected_file is None:
+        # Retry whenever the file was hallucinated — fix generation needs a real
+        # file path regardless of whether the function name survived grounding.
+        # (Original condition "both null" missed the case where the function
+        # passed the symbol check but the file was still wrong.)
+        file_was_nulled = grounded.affected_file is None and parsed.affected_file is not None
+        both_nulled = grounded.affected_function is None and grounded.affected_file is None
+        if file_was_nulled or both_nulled:
             bad_names = [
                 n for n in [parsed.affected_function, parsed.affected_file]
                 if n
@@ -1008,6 +1100,6 @@ Confidence guide:
                 )
                 result = await self.run(grounding_retry_prompt)
                 parsed = _parse_diagnosis_result(result.answer)
-                grounded = await self._enforce_grounding(parsed)
+                grounded = await self._enforce_grounding(parsed, incident_tokens)
 
         return grounded
