@@ -5,6 +5,18 @@ Come back to these after the incident corpus has grown and the eval script surfa
 
 ---
 
+## MonitorGenerationAgent
+
+**When to implement:** After at least one full incident-to-merge cycle has been observed in production and there is a concrete need to auto-generate CloudWatch alarms for new code paths.
+
+**What this is:** An agent that fires on every merged PR to the target repo. It reads the diff, identifies new code paths (functions, routes, error handlers), and generates CloudWatch alarm configs — one alarm per ~75 lines of changed code. Runs as a dry-run by default; set `CREATE_MONITORS=true` to provision alarms in AWS. Wired via `background_tasks.add_task(_run_monitor_generation, ...)` in `app/api/routes/webhooks.py`.
+
+**Why deferred:** The agent generates configs but never provisions them (`CREATE_MONITORS` was never set in production). It has never been used and adds complexity to the pipeline diagram without delivering value. The core pipeline (triage → diagnosis → fix → PR) is the interview story.
+
+**Pre-condition:** At least one full incident cycle resolved in production. `CREATE_MONITORS=true` set and tested. Alarm naming conventions agreed on to avoid drift.
+
+---
+
 ## OpenTelemetry Standardization
 
 **When to implement:** When there is a concrete reason to move off Langfuse — e.g., existing
