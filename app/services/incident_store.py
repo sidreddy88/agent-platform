@@ -1,9 +1,14 @@
 """
-Incident state store backed by SQLite (agent_platform.db).
+Incident state store — write-through to Postgres (SQLite in local dev).
 
 Incidents survive server restarts. State is loaded from the DB on startup
-and written through on every mutation. A legacy .incidents.json file is
-auto-migrated to the DB on first run and renamed to .incidents.json.migrated.
+and written through on every mutation.
+
+Dedup queries (get_open_pr_for_error, get_resolved_for_error) go directly
+to the database so they are correct across multiple ECS tasks sharing the
+same Postgres instance. Other reads use the in-memory dict for speed.
+
+A legacy .incidents.json file is auto-migrated to the DB on first run.
 """
 import json
 import logging
@@ -83,23 +88,31 @@ class IncidentStore:
         return re.sub(r'\b[a-f0-9]{8,}\b|\b\d+[a-zA-Z]*\b', 'X', collapsed[:100])
 
     def get_open_pr_for_error(self, error_type: str, service: str, description: str = "") -> Optional[str]:
-        """Return a handle (PR URL or incident ID) if an active incident matches
-        error_type + service + normalized description. Blocks duplicates even before
-        a PR exists (e.g. while the incident is still in TRIAGING or FIXING).
-        Also blocks if a prior incident for the same error was resolved via a merged PR
-        (outcome == 'fix_merged') — prevents the same fixed error from re-entering
-        the pipeline without explicit human intervention."""
-        # FIX_FAILED / VERIFICATION_FAILED are terminal failures — a new attempt is allowed.
-        skip = {
-            IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE,
-            IncidentStatus.FIX_FAILED, IncidentStatus.VERIFICATION_FAILED,
+        """Query Postgres for non-terminal incidents matching error_type + service +
+        normalized description. Direct DB query ensures correctness across ECS tasks.
+        FIX_FAILED / VERIFICATION_FAILED are skipped — a new attempt is allowed."""
+        from sqlalchemy import select
+        from app.services.database import engine, tables
+
+        skip_statuses = {
+            IncidentStatus.REJECTED.value, IncidentStatus.NOISE.value,
+            IncidentStatus.DUPLICATE.value, IncidentStatus.FIX_FAILED.value,
+            IncidentStatus.VERIFICATION_FAILED.value,
         }
         desc_key = self._normalize_desc(description)
-        for incident in self._incidents.values():
-            if incident.status in skip:
-                continue
-            # Skip RESOLVED unless the PR was actually merged — only a confirmed
-            # merged fix should suppress re-occurrences of the same error.
+
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    select(tables.incidents.c.data)
+                    .where(tables.incidents.c.status.not_in(list(skip_statuses)))
+                ).fetchall()
+            candidates = [IncidentState.model_validate_json(row.data) for row in rows]
+        except Exception as exc:
+            logger.warning("[IncidentStore] get_open_pr_for_error DB query failed, using cache: %s", exc)
+            candidates = list(self._incidents.values())
+
+        for incident in candidates:
             if incident.status == IncidentStatus.RESOLVED and incident.outcome != "fix_merged":
                 continue
             if (
@@ -111,11 +124,25 @@ class IncidentStore:
         return None
 
     def get_resolved_for_error(self, error_type: str, service: str) -> Optional["IncidentState"]:
-        """Return the most recently resolved incident for this error_type + service (regression check)."""
+        """Query Postgres for resolved incidents matching error_type + service.
+        Direct DB query ensures regression context is current across ECS tasks."""
+        from sqlalchemy import select
+        from app.services.database import engine, tables
+
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    select(tables.incidents.c.data)
+                    .where(tables.incidents.c.status == IncidentStatus.RESOLVED.value)
+                ).fetchall()
+            all_resolved = [IncidentState.model_validate_json(row.data) for row in rows]
+        except Exception as exc:
+            logger.warning("[IncidentStore] get_resolved_for_error DB query failed, using cache: %s", exc)
+            all_resolved = [i for i in self._incidents.values() if i.status == IncidentStatus.RESOLVED]
+
         candidates = [
-            i for i in self._incidents.values()
-            if i.status == IncidentStatus.RESOLVED
-            and i.error_event.error_type == error_type
+            i for i in all_resolved
+            if i.error_event.error_type == error_type
             and i.error_event.service == service
             and i.diagnosis
         ]
