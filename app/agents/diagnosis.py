@@ -32,6 +32,7 @@ from app.core.config import settings
 from app.models.events import IncidentState
 from app.services.aws import AWSError, AWSService
 from app.services.github import GitHubService
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import LLMService
 from app.services.rag import RAGService
 from app.services.repo import LocalRepoService
@@ -390,7 +391,9 @@ class DiagnosisAgent(BaseAgent):
                     return f"No '{pattern}' events in the last {minutes} min."
                 lines = [f"[{e['timestamp']}] stream={e['stream'].rsplit('/', 1)[-1][:8]}... {e['message'][:200]}"
                          for e in events]
-                return f"{len(events)} sample(s):\n" + "\n".join(lines)
+                raw = f"{len(events)} sample(s):\n" + "\n".join(lines)
+                scan_for_injection(raw, source="cloudwatch-logs")
+                return wrap_untrusted(raw, source="cloudwatch-logs")
             except AWSError as exc:
                 return f"Could not fetch logs: {exc}"
 
@@ -452,20 +455,23 @@ class DiagnosisAgent(BaseAgent):
                     f"--- {c.file_path}:{c.start_line}-{c.end_line} (score={c.score}) ---\n"
                     f"{c.content[:400]}"
                 )
-            return "\n\n".join(parts)
+            raw = "\n\n".join(parts)
+            scan_for_injection(raw, source="rag-codebase-search")
+            return wrap_untrusted(raw, source="rag-codebase-search")
 
         async def _get_file_contents(file_path: str) -> str:
             """Fetch the full source of a file from the target repo."""
             try:
                 content, _ = await github.get_file_contents(owner, repo, file_path.lstrip("/"))
                 if len(content) > 12000:
-                    return (
+                    content = (
                         content[:12000]
                         + f"\n\n[TRUNCATED — file is {len(content)} chars, only first 12000 shown. "
                         f"If the function you need is not visible, call get_file_contents again "
                         f"with a more specific path or search for the function name via search_codebase.]"
                     )
-                return content
+                scan_for_injection(content, source=f"github-file:{file_path}")
+                return wrap_untrusted(content, source=f"github-file:{file_path}")
             except Exception as exc:
                 return f"Could not fetch {file_path}: {exc}"
 
