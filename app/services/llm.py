@@ -25,7 +25,7 @@ class LLMService:
     async def complete(
         self,
         messages: list[dict],
-        system: str | None = None,
+        system: str | list | None = None,
         tracing_ctx: "TracingContext | None" = None,
     ) -> str:
         """Single blocking call — returns full response text. Use for agent loops."""
@@ -61,7 +61,7 @@ class LLMService:
     async def stream_chat(
         self,
         messages: list[dict],
-        system: str | None = None,
+        system: str | list | None = None,
     ) -> AsyncIterator[str]:
         """Stream text chunks from Claude. Yields one string per token."""
         kwargs: dict = {
