@@ -215,12 +215,21 @@ class BaseAgent:
         except Exception:
             return ""
 
-    def _with_harness(self, system: str) -> str:
-        """Prepend harness docs to a system prompt so every LLM call sees them."""
+    def _with_harness(self, system: str) -> str | list:
+        """Prepend harness docs to a system prompt so every LLM call sees them.
+
+        When harness docs are present, returns a content-block list with
+        cache_control on the stable prefix so Anthropic caches it across
+        the ReAct loop iterations.  Both the Anthropic SDK and LiteLLM
+        accept list[dict] for the system parameter.
+        """
         docs = getattr(self, "_harness_docs", "")
         if not docs:
             return system
-        return f"{docs}\n\n---\n\n{system}"
+        return [
+            {"type": "text", "text": docs, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": f"\n\n---\n\n{system}"},
+        ]
 
     async def _call_llm(
         self,

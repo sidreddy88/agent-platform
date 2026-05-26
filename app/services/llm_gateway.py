@@ -43,6 +43,8 @@ class LLMResponse:
     provider: str
     model: str
     cost_usd: float
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +74,7 @@ class LiteLLMProvider(BaseProvider):
     ) -> LLMResponse:
         import litellm
 
-        system: str | None = kwargs.pop("system", None)
+        system: str | list | None = kwargs.pop("system", None)
         msgs = list(messages)
         if system:
             msgs = [{"role": "system", "content": system}] + msgs
@@ -84,6 +86,15 @@ class LiteLLMProvider(BaseProvider):
         )
         usage = response.usage
         provider = _infer_provider(model)
+
+        cache_read = 0
+        cache_creation = 0
+        if usage:
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details:
+                cache_read = getattr(details, "cached_tokens", 0) or 0
+            cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+
         return LLMResponse(
             content=response.choices[0].message.content or "",
             input_tokens=usage.prompt_tokens if usage else 0,
@@ -91,6 +102,8 @@ class LiteLLMProvider(BaseProvider):
             provider=provider,
             model=model,
             cost_usd=0.0,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
         )
 
 
@@ -131,7 +144,7 @@ class GatewayLLMService:
     async def complete(
         self,
         messages: list[dict],
-        system: str | None = None,
+        system: str | list | None = None,
         tracing_ctx: Any = None,
     ) -> str:
         resp = await self._gateway.complete(messages, self._task_type, system=system)
@@ -143,7 +156,7 @@ class GatewayLLMService:
         self,
         messages: list[dict],
         tools: list[dict],
-        system: str | None = None,
+        system: str | list | None = None,
     ) -> tuple[str, list[dict], str]:
         """
         Single tool-use round via LiteLLM.
@@ -182,7 +195,7 @@ class GatewayLLMService:
 
         response = await litellm.acompletion(
             model=model,
-            messages=msgs,
+            messages=msgs,  # type: ignore[arg-type]
             tools=litellm_tools,
             tool_choice="auto",
             max_tokens=max_tokens,
@@ -281,7 +294,7 @@ class LLMGateway:
         messages: list[dict],
         model: str,
         task_type: str,
-        system: str | None = None,
+        system: str | list | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Call provider, wrapped in a Langfuse generation span when tracing is active."""
@@ -331,7 +344,7 @@ class LLMGateway:
         self,
         messages: list[dict],
         task_type: str,
-        system: str | None = None,
+        system: str | list | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         provider_name, model, max_tokens = self._get_routing(task_type)
@@ -341,7 +354,10 @@ class LLMGateway:
         raw = await self._call_provider(self._provider, messages, model, task_type, system=system, **kwargs)
         latency_ms = (time.perf_counter() - start) * 1000
 
-        cost = self._compute_cost(model, raw.input_tokens, raw.output_tokens)
+        # Cached tokens are billed at 10% — compute actual cost accordingly
+        billed_input = raw.input_tokens - raw.cache_read_input_tokens
+        cost = self._compute_cost(model, billed_input, raw.output_tokens)
+        cost += self._compute_cost(model, raw.cache_read_input_tokens, 0) * 0.1
         resp = LLMResponse(
             content=raw.content,
             input_tokens=raw.input_tokens,
@@ -349,13 +365,17 @@ class LLMGateway:
             provider=provider_name,
             model=model,
             cost_usd=cost,
+            cache_read_input_tokens=raw.cache_read_input_tokens,
+            cache_creation_input_tokens=raw.cache_creation_input_tokens,
         )
 
         self._record_cost(task_type, provider_name, cost)
         logger.info(
-            "[gateway] task=%s provider=%s model=%s in=%d out=%d cost=%.6f latency=%.0fms",
+            "[gateway] task=%s provider=%s model=%s in=%d out=%d cache_read=%d cache_write=%d cost=%.6f latency=%.0fms",
             task_type, provider_name, model,
-            resp.input_tokens, resp.output_tokens, cost, latency_ms,
+            resp.input_tokens, resp.output_tokens,
+            resp.cache_read_input_tokens, resp.cache_creation_input_tokens,
+            cost, latency_ms,
         )
         return resp
 
