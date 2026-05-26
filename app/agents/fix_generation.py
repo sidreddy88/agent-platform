@@ -26,6 +26,7 @@ from app.core.config import settings
 from app.models.events import IncidentState
 from app.services.blast_radius import BlastRadiusGuard
 from app.services.github import GitHubError, GitHubService
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import HAIKU_MODEL, LLMService
 from app.services.repo import LocalRepoService
 from app.services.session_logger import session_logger
@@ -1642,7 +1643,8 @@ class FixGenerationAgent(BaseAgent):
                     path = tc["input"].get("path", "")
                     try:
                         file_content, _ = await self._read_file(path, ref=PR_BASE)
-                        result = file_content
+                        scan_for_injection(file_content, source=f"github-file:{path}")
+                        result = wrap_untrusted(file_content, source=f"github-file:{path}")
                     except Exception as exc:
                         result = f"Error reading {path}: {exc}"
                     logger.debug("[FixGen] Agentic read_file: %s", path)
