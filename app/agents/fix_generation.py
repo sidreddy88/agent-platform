@@ -39,6 +39,38 @@ PR_BASE = "staging"  # all fix PRs target this branch; fix branches are created 
 # Result
 # ---------------------------------------------------------------------------
 
+
+def _prune_tool_results(
+    messages: list[dict],
+    keep_last: int = 2,
+    threshold: int = 500,
+) -> tuple[list[dict], int]:
+    """Truncate large tool results that are no longer recent.
+
+    Keeps the last `keep_last` tool messages intact so the model retains
+    recent context. Earlier tool results longer than `threshold` chars are
+    replaced with a short stub — the model can re-call read_file if it
+    needs the content again.
+
+    Returns (pruned_messages, chars_removed).
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    prune_set = set(tool_indices[:-keep_last]) if len(tool_indices) > keep_last else set()
+
+    pruned_messages: list[dict] = []
+    chars_removed = 0
+    for i, msg in enumerate(messages):
+        if i in prune_set:
+            content = msg.get("content", "")
+            if isinstance(content, str) and len(content) > threshold:
+                chars_removed += len(content) - threshold
+                msg = {**msg, "content": f"[pruned — {len(content)} chars — re-call read_file if needed]"}
+        pruned_messages.append(msg)
+    return pruned_messages, chars_removed
+
+
+# ---------------------------------------------------------------------------
+
 @dataclass
 class FixResult:
     issue_url: str | None
@@ -1577,9 +1609,15 @@ class FixGenerationAgent(BaseAgent):
         patch_calls: list[dict] = []
         verdict: dict | None = None
         _SKIP = ("node_modules", "dist/", "build/", ".min.js")
+        _total_pruned_chars = 0
         import json as _json
 
         for iteration in range(14):
+            if iteration > 0 and iteration % 3 == 0:
+                messages, pruned = _prune_tool_results(messages)
+                _total_pruned_chars += pruned
+                if pruned:
+                    logger.debug("[FixGen] State pruning at iteration %d: removed %d chars", iteration, pruned)
             try:
                 text, tool_calls, stop_reason = await self._llm.complete_with_tools(
                     messages, self._FIX_TOOLS, system=system
@@ -1674,6 +1712,9 @@ class FixGenerationAgent(BaseAgent):
                 else:
                     result = f"Unknown tool: {name}"
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+        if _total_pruned_chars:
+            logger.info("[FixGen] State pruning total: %d chars removed across %d iterations", _total_pruned_chars, iteration + 1)
 
         if not edit_result:
             # Module-level fix: LLM used patch_line only (no enclosing function to replace).
