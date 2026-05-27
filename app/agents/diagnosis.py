@@ -441,7 +441,7 @@ class DiagnosisAgent(BaseAgent):
             if rag is None:
                 return "RAG not configured — codebase search unavailable."
             try:
-                chunks = await rag.search(query, n_results=4)
+                chunks = await rag.hybrid_search(query, n_results=4, min_score=0.45)
             except Exception as exc:
                 return f"RAG search error: {exc}"
             if not chunks:

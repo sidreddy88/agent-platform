@@ -1762,7 +1762,7 @@ class FixGenerationAgent(BaseAgent):
                 if self._rag._collection.count() > 0:
                     # Search for callers and related code — crucial for catching symptom fixes
                     query = f"{file_path} {incident.diagnosis or ''}"
-                    chunks = await self._rag.search(query, n_results=5)
+                    chunks = await self._rag.hybrid_search(query, n_results=5, min_score=0.45)
                     chunks = [c for c in chunks if c.file_path != file_path][:4]
                     if chunks:
                         lines = ["\nRELATED CODEBASE CONTEXT (callers, dependencies):"]
