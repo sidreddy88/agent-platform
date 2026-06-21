@@ -206,6 +206,25 @@ class _Tables:
         Index("idx_dcr_chunk_vector_id", "chunk_vector_id"),
     )
 
+    # Call graph edges — one row per (caller_function → callee_name) edge found
+    # by the tree-sitter parser. Persisted here for durability; loaded into the
+    # in-memory CodeGraph (hash map of sets) on startup for O(1) queries.
+    # code_graph_edges has no explicit PK — SQLite uses its implicit rowid,
+    # Postgres uses the serial sequence. Both auto-assign on insert.
+    code_graph_edges = Table(
+        "code_graph_edges",
+        metadata,
+        Column("caller_file", Text, nullable=False),      # repo-relative file path
+        Column("caller_function", Text, nullable=False),  # name of the enclosing function
+        Column("callee_name", Text, nullable=False),      # simple name of the called function
+        Column("line", Integer, nullable=False),          # line number of the call expression
+        Column("indexed_at", Text, nullable=False),       # ISO timestamp of indexing run
+        # callee_name index powers reverse lookup: "what calls classifyFields?"
+        Index("idx_cge_callee", "callee_name"),
+        # caller_file index powers incremental re-indexing: delete stale edges for one file
+        Index("idx_cge_caller_file", "caller_file"),
+    )
+
 
 tables = _Tables()
 
