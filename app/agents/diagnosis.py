@@ -39,6 +39,14 @@ from app.services.repo import LocalRepoService
 
 logger = logging.getLogger(__name__)
 
+try:
+    from app.services.code_graph.graph import CodeGraph
+    _code_graph = CodeGraph.load_from_store()
+except Exception as _cg_err:
+    from app.services.code_graph.graph import CodeGraph
+    _code_graph = CodeGraph()
+    logger.warning("[DiagnosisAgent] Call graph unavailable: %s", _cg_err)
+
 CONFIDENCE_THRESHOLD = 0.70
 
 # ---------------------------------------------------------------------------
@@ -640,6 +648,35 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
 
+        async def _find_callers(function_name: str) -> str:
+            """Look up every caller of a function in the call graph index."""
+            callers = _code_graph.find_callers(function_name)
+            if not callers:
+                return (
+                    f"No callers found for '{function_name}' in the call graph index. "
+                    f"Either it is an entry point (route/handler/cron) or the index has not been built. "
+                    f"Fall back to search_codebase to find callers manually."
+                )
+            lines = [f"Callers of `{function_name}` ({len(callers)} found):"]
+            for c in callers[:15]:
+                lines.append(f"  {c.file_path} → {c.function_name} (line {c.line})")
+            if len(callers) > 15:
+                lines.append(f"  ... and {len(callers) - 15} more")
+            return "\n".join(lines)
+
+        self.register_tool(
+            "find_callers",
+            _find_callers,
+            (
+                "Query the call graph index to find every function that calls the target function. "
+                "Returns file paths, caller function names, and line numbers. "
+                "Use this for blast radius analysis BEFORE deciding on a fix — it gives the complete "
+                "picture in one call, unlike search_codebase which only returns partial results. "
+                "If no results, fall back to search_codebase. "
+                "Input: {function_name: string (e.g. 'classifyFields')}"
+            ),
+        )
+
     async def _ensure_local_repo(self) -> bool:
         """Ensure the local clone is fresh. Returns True on success, False on failure."""
         try:
@@ -1006,9 +1043,10 @@ STEP 3 — write root_cause and fix_approach based solely on what you read in th
 
 PRE-FIX REASONING — populate `blast_radius` and `contract_change`:
 
-After identifying affected_function, search the repo for callers of that
-function (use search_codebase with the function name). For each distinct
-caller you find, add an entry to `blast_radius`:
+After identifying affected_function, find all callers using find_callers
+with the function name. This returns the complete caller list in one call.
+If find_callers returns no results, fall back to search_codebase. For each
+distinct caller you find, add an entry to `blast_radius`:
 
   - `file`: path of the caller (must be a real file you observed)
   - `function`: the calling function or "(top-level)" for module-scope calls
