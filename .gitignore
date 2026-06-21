@@ -33,3 +33,7 @@ memory/
 lecture.md
 plans/
 logs/
+
+# Interview prep docs — local reference only
+docs/interview-prep-*.md
+docs/call-graph-data-structures.md
