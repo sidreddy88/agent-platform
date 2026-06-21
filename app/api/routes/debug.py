@@ -43,6 +43,71 @@ async def index_codebase(background_tasks: BackgroundTasks):
     return {"status": "indexing_started", "path": settings.codebase_path}
 
 
+@router.post("/code-graph/index")
+async def index_code_graph(background_tasks: BackgroundTasks):
+    """
+    Trigger a full call graph index of the target codebase.
+
+    If CODEBASE_PATH is set and exists locally, uses it. Otherwise clones
+    fix_target_repo from GitHub via GITHUB_TOKEN (shallow clone, deleted after).
+    Runs in the background — returns immediately. Edges persist in Postgres
+    and are loaded into memory on the next server restart.
+    """
+    import logging
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from app.core.config import settings
+    from app.services.code_graph.graph import CodeGraph
+    from app.services.code_graph.store import clear_all_edges, persist_edges
+
+    async def _index():
+        log = logging.getLogger(__name__)
+        cloned_dir = None
+        try:
+            local = settings.codebase_path
+            if local and Path(local).is_dir():
+                codebase_path = local
+            else:
+                repo = settings.fix_target_repo
+                if not repo:
+                    log.error("[CodeGraph] No codebase_path and no fix_target_repo configured")
+                    return
+                token = settings.github_token
+                if not token:
+                    log.error("[CodeGraph] GITHUB_TOKEN not set — cannot clone %s", repo)
+                    return
+                cloned_dir = tempfile.mkdtemp(prefix="code_graph_clone_")
+                url = f"https://x-access-token:{token}@github.com/{repo}.git"
+                log.info("[CodeGraph] Cloning %s ...", repo)
+                result = subprocess.run(
+                    ["git", "clone", "--depth=1", url, cloned_dir],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    log.error("[CodeGraph] Clone failed: %s", result.stderr)
+                    return
+                codebase_path = cloned_dir
+
+            log.info("[CodeGraph] Indexing %s ...", codebase_path)
+            clear_all_edges()
+            graph = CodeGraph.build_from_directory(codebase_path)
+            persisted = persist_edges(graph._edges)
+            stats = graph.stats()
+            log.info(
+                "[CodeGraph] Done — %d edges, %d callers, %d callees",
+                persisted, stats["unique_callers"], stats["unique_callees"],
+            )
+        finally:
+            if cloned_dir:
+                shutil.rmtree(cloned_dir, ignore_errors=True)
+
+    background_tasks.add_task(_index)
+    return {"status": "indexing_started", "note": "Edges persist to Postgres. Restart server to load into memory."}
+
+
 @router.get("/rag")
 async def debug_rag(
     query: str,
