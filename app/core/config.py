@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     github_token: str = ""
     openai_api_key: str = ""
-    codebase_path: str = "/Users/Sidreddy/DevCode/SerpApiTestTool"
+    codebase_path: str = "/Users/Sidreddy/DevCode/TargetApp"
     # AWS — leave blank to use local credentials (~/.aws/credentials / env vars)
     aws_region: str = "us-east-1"
     aws_access_key_id: str = ""

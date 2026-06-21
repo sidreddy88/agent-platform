@@ -33,6 +33,16 @@ from app.services.session_logger import session_logger
 
 logger = logging.getLogger(__name__)
 
+# Module-level call graph singleton — loaded from Postgres on first import.
+# Agents query this directly via the find_callers tool; no disk I/O at query time.
+try:
+    from app.services.code_graph.graph import CodeGraph
+    _code_graph = CodeGraph.load_from_store()
+except Exception as _cg_err:
+    from app.services.code_graph.graph import CodeGraph
+    _code_graph = CodeGraph()
+    logger.warning("[FixGen] Call graph unavailable: %s", _cg_err)
+
 PR_BASE = "staging"  # all fix PRs target this branch; fix branches are created from its tip
 
 
@@ -1339,6 +1349,26 @@ class FixGenerationAgent(BaseAgent):
             },
         },
         {
+            "name": "find_callers",
+            "description": (
+                "Query the call graph to find every function that calls the target function. "
+                "Use this BEFORE generating a fix to understand the blast radius — if callers exist, "
+                "include updates to them in the same patch when needed. "
+                "Returns file paths, caller function names, and line numbers. "
+                "Returns an empty list if the function has no known callers or is not in the index."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "function_name": {
+                        "type": "string",
+                        "description": "Simple function name to look up (e.g. 'classifyFields', not 'obj.classifyFields')",
+                    }
+                },
+                "required": ["function_name"],
+            },
+        },
+        {
             "name": "apply_edit",
             "description": (
                 "Replace the primary target function with the fixed version. "
@@ -1695,6 +1725,22 @@ class FixGenerationAgent(BaseAgent):
                     except Exception as exc:
                         result = f"Search failed: {exc}"
                     logger.debug("[FixGen] Agentic search_code: %s", query)
+                elif name == "find_callers":
+                    fn_name = tc["input"].get("function_name", "")
+                    try:
+                        callers = _code_graph.find_callers(fn_name)
+                        if not callers:
+                            result = f"No callers found for '{fn_name}' in the call graph index."
+                        else:
+                            lines = [f"Callers of `{fn_name}` ({len(callers)} found):"]
+                            for c in callers[:10]:
+                                lines.append(f"  {c.file_path} → {c.function_name}() at line {c.line}")
+                            if len(callers) > 10:
+                                lines.append(f"  ... and {len(callers) - 10} more")
+                            result = "\n".join(lines)
+                    except Exception as exc:
+                        result = f"Call graph lookup failed: {exc}"
+                    logger.debug("[FixGen] find_callers: %s → %d results", fn_name, len(callers) if "callers" in dir() else 0)
                 elif name == "final_verdict":
                     verdict = tc["input"]
                     logger.info(

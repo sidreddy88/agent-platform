@@ -384,6 +384,85 @@ class RAGService:
             )
         return chunks
 
+    async def hybrid_search_rrf(
+        self,
+        query: str,
+        n_results: int = 5,
+        vector_pool: int = 20,
+        bm25_pool: int = 20,
+        k: int = 60,
+        min_score: float = 0.0,
+    ) -> list[CodeChunk]:
+        """Hybrid search using BM25 (full corpus) + vector, fused with RRF.
+
+        Unlike hybrid_search() which adds scores (requires comparable scales),
+        RRF combines ranked lists by position — safe when BM25 produces unbounded
+        scores incomparable to cosine similarity.
+
+        Stage 1: vector search → top vector_pool results ranked by cosine similarity.
+        Stage 2: BM25 over the FULL corpus → top bm25_pool results ranked by BM25 score.
+        Stage 3: RRF fusion of the two ranked lists — scores ignored, positions only.
+
+        Running BM25 over the full corpus is what allows it to surface chunks the
+        vector search missed — the key property that makes RRF > reranking the
+        vector candidate pool.
+        """
+        if self._collection.count() == 0:
+            return []
+
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError:
+            return await self.hybrid_search(query, n_results=n_results, min_score=min_score)
+
+        # Stage 1: vector search
+        embedding = await self._embed([query])
+        vector_candidates = self._collection.query(embedding[0], n_results=max(vector_pool, 20))
+        vector_ranking = [m.id for m in vector_candidates]  # ordered by cosine score
+
+        # Stage 2: BM25 over the full corpus
+        all_items = self._collection.all_items()
+        if not all_items:
+            return []
+
+        id_to_item = {m.id: m for m in all_items}
+        corpus_ids = [m.id for m in all_items]
+        tokenized_corpus = [m.document.lower().split() for m in all_items]
+
+        bm25 = BM25Okapi(tokenized_corpus)
+        query_tokens = query.lower().split()
+        bm25_scores = bm25.get_scores(query_tokens)
+        bm25_ranking = [corpus_ids[i]
+                        for i in sorted(range(len(corpus_ids)),
+                                        key=lambda i: bm25_scores[i], reverse=True)
+                        ][:bm25_pool]
+
+        # Stage 3: RRF — combine both ranked lists
+        rrf: dict[str, float] = {}
+        for rank, doc_id in enumerate(vector_ranking):
+            rrf[doc_id] = rrf.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+        for rank, doc_id in enumerate(bm25_ranking):
+            rrf[doc_id] = rrf.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+
+        fused = sorted(rrf.items(), key=lambda x: x[1], reverse=True)
+
+        results = []
+        for doc_id, rrf_score in fused[:n_results]:
+            m = id_to_item.get(doc_id)
+            if m is None:
+                continue
+            meta = m.metadata
+            results.append(CodeChunk(
+                chunk_id=meta.get("chunk_id", doc_id),
+                file_path=meta.get("file_path", ""),
+                language=meta.get("language", ""),
+                start_line=int(meta.get("start_line", 0)),
+                end_line=int(meta.get("end_line", 0)),
+                content=m.document,
+                score=round(rrf_score, 6),
+            ))
+        return results
+
     async def get_file(self, path: str) -> list[CodeChunk]:
         """Return all indexed chunks for a specific file, ordered by start line."""
         matches = self._collection.get_by_filter({"file_path": path})
@@ -581,10 +660,11 @@ class RAGService:
         query: str,
         n_results: int = 3,
         candidate_pool: int = 20,
+        min_score: float = 0.80,
     ) -> list[dict]:
         """Two-stage retrieval: vector for recall, cross-encoder for precision.
 
-        Stage 1: fetch `candidate_pool` results from vector search at min_score=0.0
+        Stage 1: fetch `candidate_pool` results from vector search at min_score.
         Stage 2: cross-encoder scores every (query, doc) pair jointly, re-sorts,
                  returns top n_results.
 
@@ -601,10 +681,10 @@ class RAGService:
             from sentence_transformers import CrossEncoder
         except ImportError:
             logger.warning("[RAG] sentence-transformers not installed — falling back to vector search")
-            return await self.search_incidents(query, n_results=n_results, min_score=0.0)
+            return await self.search_incidents(query, n_results=n_results, min_score=min_score)
 
         try:
-            candidates = await self.search_incidents(query, n_results=candidate_pool, min_score=0.0)
+            candidates = await self.search_incidents(query, n_results=candidate_pool, min_score=min_score)
             if not candidates:
                 return []
 
@@ -622,7 +702,7 @@ class RAGService:
             return reranked[:n_results]
         except Exception as exc:
             logger.warning("[RAG] Cross-encoder rerank failed: %s", exc)
-            return await self.search_incidents(query, n_results=n_results, min_score=0.0)
+            return await self.search_incidents(query, n_results=n_results, min_score=min_score)
 
     def clear(self) -> None:
         """Delete all indexed chunks (wipes the codebase collection)."""

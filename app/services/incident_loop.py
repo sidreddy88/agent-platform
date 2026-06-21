@@ -434,7 +434,7 @@ class IncidentLoop:
         if self._rag is not None:
             try:
                 query = f"{event.title} {event.description[:200]}"
-                _rag_similar = await self._rag.search_incidents(query, min_score=0.90)
+                _rag_similar = await self._rag.rerank_incidents(query, min_score=0.80)
                 _skip = {
                     IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE,
                     IncidentStatus.FIX_FAILED, IncidentStatus.VERIFICATION_FAILED,
