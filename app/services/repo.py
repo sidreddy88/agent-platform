@@ -79,7 +79,9 @@ class LocalRepoService:
     def _clone_url(self) -> str:
         token = settings.github_token
         if token:
-            return f"https://{token}@github.com/{self._owner}/{self._repo}.git"
+            # x-access-token as username + token as password — git sends both
+            # in the HTTP Basic header without prompting, works in non-TTY envs.
+            return f"https://x-access-token:{token}@github.com/{self._owner}/{self._repo}.git"
         return f"https://github.com/{self._owner}/{self._repo}.git"
 
     async def _clone(self) -> None:
@@ -89,7 +91,9 @@ class LocalRepoService:
             cmd += ["--branch", self._branch]
         cmd += [self._clone_url(), str(self._path)]
         logger.info("LocalRepo: cloning %s/%s → %s", self._owner, self._repo, self._path)
-        rc, _, stderr = await _run(cmd)
+        # Disable interactive credential prompts — fail fast in non-TTY envs.
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        rc, _, stderr = await _run(cmd, env=env)
         if rc != 0:
             raise RuntimeError(f"git clone failed: {stderr.strip()}")
         logger.info("LocalRepo: clone complete (%s/%s)", self._owner, self._repo)
@@ -110,11 +114,12 @@ class LocalRepoService:
         return stdout.strip() or "HEAD"
 
 
-async def _run(cmd: list[str]) -> tuple[int, str, str]:
+async def _run(cmd: list[str], env: dict | None = None) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     stdout, stderr = await proc.communicate()
     return proc.returncode, stdout.decode(), stderr.decode()
