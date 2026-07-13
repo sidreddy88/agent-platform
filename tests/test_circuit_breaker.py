@@ -6,6 +6,7 @@ Run:
 """
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -185,6 +186,57 @@ class TestCircuitBreakerHalfOpen:
         with pytest.raises(RuntimeError):
             await cb.call(_fail())   # failure → back to OPEN
         assert cb.state == CircuitState.OPEN
+
+
+# ---------------------------------------------------------------------------
+# CircuitBreaker — HALF_OPEN single-probe gate
+# ---------------------------------------------------------------------------
+
+class TestCircuitBreakerHalfOpenSingleProbe:
+    def _open_breaker(self, cb: CircuitBreaker) -> None:
+        cb._state = CircuitState.OPEN
+        cb._opened_at = 0.0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_call_rejected_while_probe_in_flight(self):
+        cb = CircuitBreaker(name="test", failure_threshold=1, success_threshold=2, timeout_seconds=0.0)
+        self._open_breaker(cb)
+
+        release = asyncio.Event()
+
+        async def _slow_ok():
+            await release.wait()
+            return "success"
+
+        probe_task = asyncio.create_task(cb.call(_slow_ok()))
+        await asyncio.sleep(0)   # let the probe claim the slot before we race it
+
+        with pytest.raises(CircuitOpenError):
+            await cb.call(_ok())   # second concurrent call must be rejected, not run _ok()
+
+        release.set()
+        assert await probe_task == "success"
+        assert cb.state == CircuitState.HALF_OPEN   # 1/2 successes — probe slot freed for the next one
+
+    @pytest.mark.asyncio
+    async def test_probe_slot_frees_after_probe_completes(self):
+        cb = CircuitBreaker(name="test", failure_threshold=1, success_threshold=2, timeout_seconds=0.0)
+        self._open_breaker(cb)
+
+        await cb.call(_ok())   # first probe, consumes and frees the slot
+        assert cb.state == CircuitState.HALF_OPEN
+        await cb.call(_ok())   # second probe — must not be rejected by a stale in-flight flag
+        assert cb.state == CircuitState.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_failed_probe_reopens_and_frees_slot(self):
+        cb = CircuitBreaker(name="test", failure_threshold=1, success_threshold=2, timeout_seconds=0.0)
+        self._open_breaker(cb)
+
+        with pytest.raises(RuntimeError):
+            await cb.call(_fail())   # probe fails → re-opens
+        assert cb.state == CircuitState.OPEN
+        assert cb._half_open_probe_in_flight is False
 
 
 # ---------------------------------------------------------------------------
