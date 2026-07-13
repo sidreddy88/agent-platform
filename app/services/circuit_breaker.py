@@ -5,8 +5,11 @@ Three states:
   CLOSED    Normal operation. Failures counted; opens when threshold reached.
   OPEN      Service considered down. All calls rejected with CircuitOpenError
             until timeout_seconds elapses.
-  HALF_OPEN Testing recovery. One call allowed through; success closes the
-            breaker, failure re-opens it immediately.
+  HALF_OPEN Testing recovery. Exactly one call is let through as a probe;
+            any other call arriving while that probe is in flight is
+            rejected immediately (same as OPEN). Probe success moves the
+            breaker toward CLOSED (or lets the next probe through, if
+            success_threshold > 1); probe failure re-opens it immediately.
 
 Applied to:
   "anthropic_llm" — LLMService.complete()
@@ -76,6 +79,7 @@ class CircuitBreaker:
     _failure_count:  int          = field(default=0,   init=False, repr=False)
     _success_count:  int          = field(default=0,   init=False, repr=False)
     _opened_at:      float        = field(default=0.0, init=False, repr=False)
+    _half_open_probe_in_flight: bool = field(default=False, init=False, repr=False)
 
     # Cumulative observability counters
     total_calls:    int = field(default=0, init=False, repr=False)
@@ -105,6 +109,17 @@ class CircuitBreaker:
             self.total_rejected += 1
             raise CircuitOpenError(self.name)
 
+        # HALF_OPEN allows exactly one in-flight probe. Any call that arrives
+        # while a probe is outstanding is rejected the same way OPEN would —
+        # it must not pile onto a service that's still being tested.
+        is_probe = False
+        if self._state == CircuitState.HALF_OPEN:
+            if self._half_open_probe_in_flight:
+                self.total_rejected += 1
+                raise CircuitOpenError(self.name)
+            self._half_open_probe_in_flight = True
+            is_probe = True
+
         try:
             result = await coro
             self._on_success()
@@ -114,6 +129,9 @@ class CircuitBreaker:
         except Exception as exc:
             self._on_failure(exc)
             raise
+        finally:
+            if is_probe:
+                self._half_open_probe_in_flight = False
 
     def reset(self) -> None:
         """Manually force the breaker to CLOSED (e.g. after ops intervention)."""
@@ -121,6 +139,7 @@ class CircuitBreaker:
         self._state         = CircuitState.CLOSED
         self._failure_count = 0
         self._success_count = 0
+        self._half_open_probe_in_flight = False
         logger.info("[CircuitBreaker] '%s' manually reset from %s → CLOSED", self.name, prev)
 
     def info(self) -> dict[str, Any]:
@@ -136,6 +155,7 @@ class CircuitBreaker:
             "total_calls":       self.total_calls,
             "total_failures":    self.total_failures,
             "total_rejected":    self.total_rejected,
+            "half_open_probe_in_flight": self._half_open_probe_in_flight,
         }
 
     # ------------------------------------------------------------------
