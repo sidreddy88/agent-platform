@@ -9,7 +9,11 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — build the frontend bundle
 # ---------------------------------------------------------------------------
-FROM node:20-alpine AS frontend-build
+# --platform=$BUILDPLATFORM: this stage only produces static JS/CSS, so it
+# builds natively on the runner instead of under arm64/QEMU emulation.
+# `npm ci` under QEMU was hanging indefinitely (silent for 19+ min, killed
+# by the job's 30-min timeout) — the last 2 prod deploys never shipped.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-build
 WORKDIR /app/frontend
 
 # Cache npm install layer separately from source so we don't reinstall
