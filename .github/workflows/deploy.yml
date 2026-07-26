@@ -98,3 +98,11 @@ jobs:
           done
           echo "Health check failed after 5 attempts"
           exit 1
+
+      - name: Rebuild code graph index
+        # Non-blocking: DiagnosisAgent/FixGenerationAgent fall back to RAG
+        # search when the graph is empty, so a failed rebuild shouldn't
+        # fail the deploy.
+        run: |
+          curl -sf --max-time 120 -X POST https://app.remediatelabs.io/debug/code-graph/index \
+            || echo "Code graph index rebuild failed, continuing"
