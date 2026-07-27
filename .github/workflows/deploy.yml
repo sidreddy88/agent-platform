@@ -86,10 +86,25 @@ jobs:
             --cluster "$ECS_CLUSTER" \
             --services "$ECS_SERVICE"
 
+      - name: Resolve ALB DNS (bypass Cloudflare Access)
+        # app.remediatelabs.io is proxied through Cloudflare Access, which
+        # intercepts *every* path (including /health and /debug/*) with a
+        # 302 to its login page. `curl -fL` treats that login page's 200 as
+        # success, so deploy-time checks against the public hostname are
+        # false positives. `--connect-to` keeps the TLS SNI/cert matching
+        # app.remediatelabs.io but routes the TCP connection straight to
+        # the ALB, skipping Cloudflare entirely.
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --names agent-platform-prod-alb \
+            --query 'LoadBalancers[0].DNSName' --output text)
+          echo "ALB_DNS=$ALB_DNS" >> "$GITHUB_ENV"
+
       - name: Verify health endpoint
         run: |
           for i in 1 2 3 4 5; do
-            if curl -sfL --max-time 10 https://app.remediatelabs.io/health > /dev/null; then
+            if curl -sf --max-time 10 --connect-to "app.remediatelabs.io:443:${ALB_DNS}:443" \
+                 https://app.remediatelabs.io/health > /dev/null; then
               echo "Health check OK"
               exit 0
             fi
@@ -104,5 +119,6 @@ jobs:
         # search when the graph is empty, so a failed rebuild shouldn't
         # fail the deploy.
         run: |
-          curl -sf --max-time 120 -X POST https://app.remediatelabs.io/debug/code-graph/index \
+          curl -sf --max-time 120 --connect-to "app.remediatelabs.io:443:${ALB_DNS}:443" \
+            -X POST https://app.remediatelabs.io/debug/code-graph/index \
             || echo "Code graph index rebuild failed, continuing"
