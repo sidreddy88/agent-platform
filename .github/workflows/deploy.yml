@@ -35,6 +35,10 @@ env:
   ECS_CLUSTER: agent-platform-prod
   ECS_SERVICE: agent-platform-prod
   ROLE_ARN: arn:aws:iam::542337758768:role/agent-platform-prod-github-deploy
+  # Stable for the ALB's lifetime; the deploy role isn't granted
+  # elasticloadbalancing:DescribeLoadBalancers so this can't be looked up
+  # dynamically without widening its IAM policy.
+  ALB_DNS: agent-platform-prod-alb-1390884005.us-east-1.elb.amazonaws.com
 
 jobs:
   deploy:
@@ -86,21 +90,14 @@ jobs:
             --cluster "$ECS_CLUSTER" \
             --services "$ECS_SERVICE"
 
-      - name: Resolve ALB DNS (bypass Cloudflare Access)
+      - name: Verify health endpoint
         # app.remediatelabs.io is proxied through Cloudflare Access, which
         # intercepts *every* path (including /health and /debug/*) with a
         # 302 to its login page. `curl -fL` treats that login page's 200 as
         # success, so deploy-time checks against the public hostname are
         # false positives. `--connect-to` keeps the TLS SNI/cert matching
         # app.remediatelabs.io but routes the TCP connection straight to
-        # the ALB, skipping Cloudflare entirely.
-        run: |
-          ALB_DNS=$(aws elbv2 describe-load-balancers \
-            --names agent-platform-prod-alb \
-            --query 'LoadBalancers[0].DNSName' --output text)
-          echo "ALB_DNS=$ALB_DNS" >> "$GITHUB_ENV"
-
-      - name: Verify health endpoint
+        # the ALB (env.ALB_DNS), skipping Cloudflare entirely.
         run: |
           for i in 1 2 3 4 5; do
             if curl -sf --max-time 10 --connect-to "app.remediatelabs.io:443:${ALB_DNS}:443" \
