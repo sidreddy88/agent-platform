@@ -380,4 +380,5 @@ class BaseAgent:
                 agent_tracker.increment_tool_call(self._current_run_id)
             return result
         except Exception as e:
+            logger.error("[%s] Tool '%s' failed: %s", self.__class__.__name__, name, e)
             return f"Error running tool '{name}': {e}"
