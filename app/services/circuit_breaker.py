@@ -193,6 +193,50 @@ class CircuitBreaker:
                     "[CircuitBreaker] '%s' → OPEN after %d failures. Last: %s",
                     self.name, self._failure_count, exc,
                 )
+                self._alert_opened(exc)
+
+    def _alert_opened(self, exc: Exception) -> None:
+        """
+        Fire an alert the moment this breaker trips OPEN. State transitions
+        here should never be silent — this exact gap (a breaker opening with
+        no notification anywhere) let a real ~21.5h outage go unnoticed
+        before this method existed (see debugging writeup, Aug 2026): an
+        invalid API key tripped 'anthropic_llm' OPEN and it just... stayed
+        that way, rejecting every call, until someone happened to look.
+
+        Fire-and-forget (asyncio.create_task) rather than awaited inline —
+        this runs from a sync method inside the hot call path (`call()`),
+        and a slow/failed Slack POST must never add latency to, or break,
+        the request that triggered it. Skipped outside a running event loop
+        (defensive only; _on_failure is always called from within `call()`,
+        which is itself a coroutine) and in the test environment, to avoid
+        spawning background alert tasks/console noise on every deliberate
+        breaker-trip test.
+        """
+        from app.core.config import settings
+        if settings.environment == "test":
+            return
+        try:
+            import asyncio
+
+            from app.services.alerting import Alert, Severity, alerting_service
+            asyncio.create_task(alerting_service.send_alert(Alert(
+                severity=Severity.CRITICAL,
+                title=f"Circuit breaker OPEN: {self.name}",
+                message=(
+                    f"'{self.name}' tripped OPEN after {self._failure_count} consecutive "
+                    f"failures. Last error: {exc}. Every call will be rejected for "
+                    f"{self.timeout_seconds:.0f}s before a single recovery probe is attempted."
+                ),
+                source="CircuitBreaker",
+                metadata={
+                    "breaker": self.name,
+                    "failure_count": self._failure_count,
+                    "last_error": str(exc),
+                },
+            )))
+        except RuntimeError:
+            logger.debug("[CircuitBreaker] Could not schedule OPEN alert — no running event loop")
 
 
 # ---------------------------------------------------------------------------
