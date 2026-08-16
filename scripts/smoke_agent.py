@@ -1,6 +1,7 @@
 """
-Quick smoke test for BaseAgent.
-Run from project root: python test_agent.py
+Quick smoke test for BaseAgent. Makes a live Anthropic API call — not a pytest
+test, run manually.
+Run from project root: python scripts/smoke_agent.py
 """
 
 import asyncio

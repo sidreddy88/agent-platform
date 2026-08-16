@@ -1,3 +1,8 @@
+"""
+Quick smoke test for the /ws/chat WebSocket endpoint. Requires the server
+running locally (npm run dev) — not a pytest test, run manually.
+Run: python scripts/smoke_websocket.py
+"""
 import asyncio
 import json
 

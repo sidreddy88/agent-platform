@@ -1,12 +1,12 @@
 # Agent Platform
 
-Multi-agent platform built with FastAPI and the Anthropic SDK. Agents use a ReAct loop (Thought → Action → Observation → Answer) implemented in `BaseAgent`.
+Multi-agent platform built with FastAPI and the Anthropic SDK. Most agents use a ReAct loop (Thought → Action → Observation → Answer) implemented in `BaseAgent`; a few (`CodeReviewAgent`, `MergeDecisionAgent`, `ErrorClarityAgent`) use direct sequential calls or a hand-rolled tool loop instead — see the Agents table below.
 
 ## Project Structure
 
 ```
 app/
-  agents/          # Agent implementations (all extend BaseAgent)
+  agents/          # Agent implementations (most extend BaseAgent — see Agents table)
   api/routes/      # FastAPI route handlers
   api/websocket.py # WebSocket endpoint for streaming
   core/config.py   # Settings loaded from .env via pydantic-settings
@@ -61,14 +61,29 @@ ChromaDB-backed vector store with OpenAI `text-embedding-3-small`. Call `rag.ind
 
 ## Agents
 
+12 agents live under `app/agents/`. Full detail (models, execution style, invocation points, design patterns) is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — this table is the quick-reference summary.
+
+**Production incident pipeline** (`app/services/incident_loop.py`, run in this order per event):
+
+| Agent | File | Description |
+|---|---|---|
+| TriageAgent | `app/agents/triage.py` | Classifies real/noise/duplicate + P0–P3 severity (Haiku) |
+| DiagnosisAgent | `app/agents/diagnosis.py` | Root cause + confidence score, grounded via RAG + call graph (Sonnet) |
+| FixGenerationAgent | `app/agents/fix_generation.py` | Generates a fix, self-critiques, sandbox-validates, opens a PR |
+| CodeReviewAgent | `app/agents/code_review.py` | Reviews the PR and posts feedback as a GitHub comment |
+| MergeDecisionAgent | `app/agents/merge_decision.py` | Decides merge-now vs refix-first when review requests changes |
+| ErrorClarityAgent | `app/agents/error_clarity.py` | Adds logging/error messages when diagnosis confidence is too low to fix |
+| MonitorGenerationAgent | `app/agents/monitor_generation.py` | Generates CloudWatch alarms from a merged PR's diff |
+
+**Standalone / earlier-design agents** (not wired into the incident pipeline — kept for reference, some routes disabled):
+
 | Agent | File | Description |
 |---|---|---|
 | RequirementsAgent | `app/agents/requirements.py` | Generates tech specs from product requirements |
-| CodeReviewAgent | `app/agents/code_review.py` | Reviews GitHub PRs and posts feedback |
 | CICDAgent | `app/agents/cicd.py` | Monitors GitHub Actions, diagnoses failures |
 | DeploymentAgent | `app/agents/deployment.py` | Monitors AWS ECS/EC2/CloudWatch health |
-| IncidentResponseAgent | `app/agents/incident.py` | Auto-diagnoses production incidents |
-| PerformanceAgent | `app/agents/performance.py` | Detects metric regressions via CloudWatch |
+| IncidentResponseAgent | `app/agents/incident.py` | Earlier general-purpose incident-diagnosis design, superseded by Triage+Diagnosis above |
+| PerformanceAgent | `app/agents/performance.py` | Detects metric regressions via CloudWatch; HTTP route currently disabled |
 
 ## User Preferences
 

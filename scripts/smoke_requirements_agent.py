@@ -1,6 +1,7 @@
 """
-Test the RequirementsAgent.
-Run: python test_requirements_agent.py
+Quick smoke test for RequirementsAgent. Makes a live Anthropic API call — not
+a pytest test, run manually.
+Run: python scripts/smoke_requirements_agent.py
 """
 
 import asyncio
