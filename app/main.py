@@ -23,6 +23,7 @@ from app.api.routes import orchestrator as orchestrator_routes
 # from app.api.routes import performance as performance_routes  # disabled — Atlas-backed
 from app.api.routes import sessions as sessions_routes
 from app.api.websocket_dashboard import router as ws_dashboard_router
+from app.services.alerting import alerting_service
 from app.services.database import init_db
 from app.services.detection import detection_service
 from app.services.drift_detector import drift_detector
@@ -140,6 +141,7 @@ async def _startup():
     asyncio.create_task(_agent_status_broadcaster())
     asyncio.create_task(_backfill_rag_index())
     asyncio.create_task(validate_models_live())
+    asyncio.create_task(alerting_service.run_forever())
 
 
 @app.on_event("shutdown")
@@ -148,3 +150,4 @@ async def _shutdown():
     threshold_monitor.stop()
     orchestrator.stop()
     drift_detector.stop()
+    alerting_service.stop()

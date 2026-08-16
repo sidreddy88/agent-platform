@@ -306,7 +306,7 @@ class LLMGateway:
         lf = _get_client()
 
         if lf is None:
-            return await provider.complete(messages, model, system=system, **kwargs)
+            return await self._complete_and_alert(provider, messages, model, system, **kwargs)
 
         provider_error: BaseException | None = None
         result: LLMResponse | None = None
@@ -336,13 +336,33 @@ class LLMGateway:
         except Exception:
             # Langfuse span setup/teardown failed — run without tracing
             if provider_error is None and result is None:
-                return await provider.complete(messages, model, system=system, **kwargs)
+                return await self._complete_and_alert(provider, messages, model, system, **kwargs)
 
         if provider_error is not None:
+            from app.services.alerting import alerting_service
+            await alerting_service.check_provider_error(provider_error)
             raise provider_error  # type: ignore[misc]
 
         assert result is not None
         return result
+
+    @staticmethod
+    async def _complete_and_alert(
+        provider: BaseProvider,
+        messages: list[dict],
+        model: str,
+        system: str | list | None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """provider.complete() with the same immediate provider-error alert as
+        the traced path above — used when Langfuse tracing is disabled or its
+        span setup itself fails, so the alert check isn't tracing-dependent."""
+        try:
+            return await provider.complete(messages, model, system=system, **kwargs)
+        except Exception as exc:
+            from app.services.alerting import alerting_service
+            await alerting_service.check_provider_error(exc)
+            raise
 
     async def complete(
         self,
