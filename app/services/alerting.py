@@ -19,15 +19,32 @@ Alert conditions checked by AlertingService.check_*():
       → WARNING  if spent >= 80 % of budget
       → CRITICAL if spent >= 100 % of budget
 
+  check_provider_error(exc)
+      → CRITICAL immediately, no threshold, on any LLM-provider auth/billing
+        failure (401, or a 400 naming a low credit balance). These are
+        binary "nothing will work until this is fixed" signals — waiting
+        for an error-rate percentage to accumulate is the wrong shape of
+        check for them.
+
+Until Aug 2026, check_agent_error_rate() and check_daily_cost() above were
+fully implemented but never called from anywhere — a real ~21.5h outage
+(an invalid Anthropic API key tripped the 'anthropic_llm' circuit breaker
+and every Triage/DiagnosisAgent call was rejected for most of a day) went
+completely unnoticed as a result. run_forever() below is what actually
+calls them now, on a fixed interval; wire it up at app startup like the
+other background loops (drift_detector, threshold_monitor, ...).
+
 Usage:
     from app.services.alerting import alerting_service
 
     await alerting_service.check_agent_error_rate("IncidentResponseAgent", 15.0)
     await alerting_service.check_daily_cost(8.50, 10.00)
+    asyncio.create_task(alerting_service.run_forever())   # periodic health check
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -39,6 +56,11 @@ import httpx
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# How often run_forever() re-checks per-agent error rates and daily cost.
+# Matches the cadence of the other periodic health loops in this codebase
+# (threshold_monitor, drift_detector) rather than inventing a new interval.
+_HEALTH_CHECK_INTERVAL_SECONDS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +137,7 @@ class AlertingService:
 
     def __init__(self) -> None:
         self._http: httpx.AsyncClient | None = None
+        self._running = False
 
     async def _client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
@@ -231,6 +254,81 @@ class AlertingService:
                 source="AlertingService",
                 metadata={"spent_usd": spent_usd, "budget_usd": budget, "pct": pct},
             ))
+
+    async def check_provider_error(self, exc: BaseException) -> None:
+        """
+        Fire an immediate CRITICAL alert on an LLM-provider auth/billing
+        failure — no threshold, no window, first occurrence fires.
+
+        These fail every call (retries won't help, `_is_retryable` already
+        excludes them) and are exactly the failure class that caused a real
+        ~21.5h silent outage before this method existed: an invalid API key
+        produced 401s, which tripped the circuit breaker, which then
+        rejected every call for the rest of the window — all without a
+        single alert firing, because nothing was watching for the *cause*,
+        only (unwired) aggregate error rates.
+
+        Duck-types `status_code` off the exception rather than importing
+        anthropic/litellm exception classes here, since this is called from
+        both the raw-SDK path (app/services/llm.py) and the LiteLLM gateway
+        path (app/services/llm_gateway.py), which raise different exception
+        hierarchies for the same underlying HTTP status.
+        """
+        status_code = getattr(exc, "status_code", None)
+        message = str(exc)
+        is_auth_error = status_code == 401
+        is_billing_error = status_code == 400 and "credit balance" in message.lower()
+        if not (is_auth_error or is_billing_error):
+            return
+
+        kind = "authentication" if is_auth_error else "billing"
+        await self.send_alert(Alert(
+            severity=Severity.CRITICAL,
+            title=f"LLM provider {kind} failure",
+            message=(
+                f"An LLM call failed with a {kind} error ({status_code}) that will "
+                f"never succeed on retry: {message[:300]}. Every agent call will "
+                "keep failing until this is fixed — check API key validity / "
+                "account credit balance immediately."
+            ),
+            source="AlertingService",
+            metadata={"status_code": status_code, "kind": kind, "raw_error": message[:500]},
+        ))
+
+    async def check_agent_health(self) -> None:
+        """
+        Pull today's per-agent error rates (agent_tracker) and today's total
+        LLM spend (the gateway's cost tracker) and run them through the
+        checks above. This is what actually calls check_agent_error_rate()/
+        check_daily_cost() now — see the module docstring for why that
+        matters.
+        """
+        from app.services.agent_tracker import agent_tracker
+        from app.services.llm_gateway import llm_gateway
+
+        for stat in agent_tracker.stats():
+            if stat["runs_today"] > 0:
+                await self.check_agent_error_rate(stat["agent_name"], stat["error_rate"] * 100)
+
+        costs = llm_gateway.costs_today()
+        await self.check_daily_cost(costs["llm_costs_today_usd"])
+
+    async def run_forever(self) -> None:
+        """Background loop: re-run check_agent_health() every _HEALTH_CHECK_INTERVAL_SECONDS."""
+        self._running = True
+        logger.info(
+            "[AlertingService] Health-check loop started (interval %ds)",
+            _HEALTH_CHECK_INTERVAL_SECONDS,
+        )
+        while self._running:
+            try:
+                await self.check_agent_health()
+            except Exception as exc:
+                logger.error("[AlertingService] Health check failed: %s", exc)
+            await asyncio.sleep(_HEALTH_CHECK_INTERVAL_SECONDS)
+
+    def stop(self) -> None:
+        self._running = False
 
     # ------------------------------------------------------------------
     # Channels

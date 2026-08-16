@@ -58,6 +58,8 @@ async def _retry_with_backoff(call_fn):
             return await call_fn()
         except anthropic.APIError as exc:
             if attempt == _MAX_RETRIES or not _is_retryable(exc):
+                from app.services.alerting import alerting_service
+                await alerting_service.check_provider_error(exc)
                 raise
             delay = min(_BASE_DELAY_SECONDS * (2 ** attempt), _MAX_DELAY_SECONDS)
             jitter = delay * 0.5
