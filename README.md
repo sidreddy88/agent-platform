@@ -90,7 +90,7 @@ The pipeline runs on FastAPI with WebSocket streaming for the live dashboard. St
 ```bash
 # 1. Install
 python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # requirements.txt + pytest, for local dev
 cd frontend && npm install && cd ..
 
 # 2. Environment
