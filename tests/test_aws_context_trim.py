@@ -1,7 +1,7 @@
 """Tests for `_trim_to_stack_frames` in app/services/aws.py.
 
 The helper exists to stop the context-line accumulator at the first line that
-doesn't look like a stack frame. Without it, AllInterviews's habit of dumping
+doesn't look like a stack frame. Without it, the target app's habit of dumping
 user interview HTML right after some errors corrupted error descriptions with
 unrelated content.
 """
