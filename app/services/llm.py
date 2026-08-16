@@ -8,14 +8,18 @@ import anthropic
 
 from app.core.config import settings
 from app.services.circuit_breaker import circuit_breaker_registry
+from app.services.model_config import DEFAULT_MODELS
 
 if TYPE_CHECKING:
     from app.services.tracing import TracingContext
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-20250514"
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
+# Sourced from config/llm_routing.json's "defaults" section via
+# app.services.model_config — see that module's docstring for why these
+# aren't hardcoded here directly.
+MODEL = DEFAULT_MODELS["sonnet"]
+HAIKU_MODEL = DEFAULT_MODELS["haiku"]
 MAX_TOKENS = 8192
 
 _MAX_RETRIES = 3

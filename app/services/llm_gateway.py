@@ -275,7 +275,11 @@ class LLMGateway:
     def _get_routing(self, task_type: str) -> tuple[str, str, int]:
         entry = self._config.get("routing", {}).get(task_type, {})
         provider = entry.get("provider") or _infer_provider(entry.get("model", ""))
-        return provider, entry.get("model", "claude-sonnet-4-6"), entry.get("max_tokens", 4096)
+        # Fallback (routing entry missing/omits "model") reads from the same
+        # config/llm_routing.json "defaults" section as llm.py's MODEL
+        # constant — one source of truth, see app.services.model_config.
+        from app.services.model_config import DEFAULT_MODELS
+        return provider, entry.get("model", DEFAULT_MODELS["sonnet"]), entry.get("max_tokens", 4096)
 
     def _compute_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
         rates = self._config.get("cost_per_1k_tokens", {}).get(model, {})

@@ -13,18 +13,20 @@ from app.api.routes import circuit_breaker as circuit_breaker_routes
 from app.api.routes import debug as debug_routes
 from app.api.routes import drift as drift_routes
 from app.api.routes import evals as evals_routes
-from app.api.routes import failures as failures_routes
 from app.api.routes import events as events_routes
+from app.api.routes import failures as failures_routes
 from app.api.routes import injection as injection_routes
 from app.api.routes import metrics as metrics_routes
 from app.api.routes import monitors as monitors_routes
 from app.api.routes import orchestrator as orchestrator_routes
+
 # from app.api.routes import performance as performance_routes  # disabled — Atlas-backed
 from app.api.routes import sessions as sessions_routes
 from app.api.websocket_dashboard import router as ws_dashboard_router
 from app.services.database import init_db
 from app.services.detection import detection_service
 from app.services.drift_detector import drift_detector
+from app.services.model_config import validate_models_live
 from app.services.orchestrator import orchestrator
 from app.services.threshold_monitor import threshold_monitor
 
@@ -137,6 +139,7 @@ async def _startup():
     asyncio.create_task(drift_detector.run_forever())
     asyncio.create_task(_agent_status_broadcaster())
     asyncio.create_task(_backfill_rag_index())
+    asyncio.create_task(validate_models_live())
 
 
 @app.on_event("shutdown")
