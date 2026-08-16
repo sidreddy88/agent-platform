@@ -17,6 +17,15 @@ os.environ["LANGFUSE_SECRET_KEY"] = ""
 os.environ["ENVIRONMENT"] = "test"
 # Disable harness doc injection in tests — avoids file I/O and keeps prompts clean
 os.environ["HARNESS_DOCS_PATH"] = ""
+# GitHubService.__init__ raises eagerly if this is empty, and
+# app/services/incident_loop.py constructs a module-level IncidentLoop()
+# singleton at import time that builds one — so importing incident_loop (or
+# anything that imports it) requires a token to be present, even though
+# nothing in the test suite makes a real GitHub call. Force-override (not
+# setdefault) so tests are hermetic regardless of whatever real token
+# happens to be in the developer's local .env — same reasoning as the
+# Langfuse keys above.
+os.environ["GITHUB_TOKEN"] = "test-github-token"
 
 
 @pytest.fixture(autouse=True)
