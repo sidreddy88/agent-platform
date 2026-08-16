@@ -46,6 +46,14 @@ locals {
     # than agent-platform's own infrastructure (us-east-1).
     { name = "ECS_LOG_GROUPS",        value = "/ecs/TaskTargetApp" },
     { name = "ECS_LOG_GROUPS_REGION", value = "us-east-2" },
+    # Target repo for AI-generated fix PRs. Previously carried only by
+    # app/core/config.py's hardcoded default -- that default was changed to
+    # a generic placeholder in PR #151 (scrubbing the real org/repo name out
+    # of source ahead of the repo eventually going public), which silently
+    # broke this in prod since nothing else was ever setting it here. Not a
+    # secret -- this file already names the target app in plain text above
+    # (ECS_LOG_GROUPS) -- so it's a plain env var, not routed through SSM.
+    { name = "FIX_TARGET_REPO", value = "TargetOrg/TargetApp" },
   ]
 
   # Every SSM parameter the container should pull at start. The ECS
