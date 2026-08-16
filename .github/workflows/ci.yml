@@ -1,0 +1,58 @@
+name: CI
+
+# Runs the (fully mocked, no live API calls) test suite and lint on every
+# PR. Previously nothing gated merges except the deploy-on-push workflow —
+# this is meant to catch regressions before they land on main.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -q
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff
+        # Non-blocking for now — there's an existing backlog of lint errors
+        # (ruff was configured but never wired into CI before this). Flip
+        # this to blocking once that backlog is cleaned up.
+        run: ruff check . || echo "::warning::ruff found issues — non-blocking until the existing backlog is cleaned up"

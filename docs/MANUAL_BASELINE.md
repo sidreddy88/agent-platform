@@ -18,7 +18,7 @@ Compute `(fix shipped − first occurrence)` per incident, then average.
 
 ## Reference incidents
 
-Fill in actual numbers based on real incidents from the AllInterviews
+Fill in actual numbers based on real incidents from the target app's
 production fleet. The two below are placeholders pulled from session
 memory — replace with real estimates and dates before quoting these in
 an interview.

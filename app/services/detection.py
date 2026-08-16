@@ -41,7 +41,7 @@ _SKIP_MARKERS = (
     "risk_score", "suspicious_signals",
     # WordPress / HTML interview content
     "<p><strong>", "<br/>", "<br />", "rendered:", "excerpt:",
-    # AllInterviews-specific content fields
+    # Target-app-specific content fields
     "panelAnswer", "previewPanelAnswer", "postInfo {",
 )
 
@@ -373,7 +373,7 @@ class DetectionService:
         """Scan ECS_LOG_GROUPS for ERROR/Exception/FATAL entries.
 
         Configured via ECS_LOG_GROUPS env var (comma-separated log group names):
-          ECS_LOG_GROUPS=/ecs/TaskAllInterviews,/ecs/OtherService
+          ECS_LOG_GROUPS=/ecs/TaskService1,/ecs/OtherService
 
         Emits at most 5 distinct error events per log group to avoid flooding
         the pipeline. TriageAgent sets severity.

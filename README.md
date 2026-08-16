@@ -29,7 +29,7 @@ It is also a research substrate: every LLM call and tool execution is captured a
 | False-positive rate | < 8% | Triage decisions reviewed against ground truth |
 | Sample size | 100+ production incidents | `agent_platform.db` from live deploy |
 
-Numbers refresh by re-running `scripts/measure_mttr.py --since YYYY-MM-DD`. See [`docs/MANUAL_BASELINE.md`](docs/MANUAL_BASELINE.md) for the pre-agent baseline these are measured against.
+Numbers refresh by re-running `scripts/measure_mttr.py --since YYYY-MM-DD`. Triage accuracy and sample size are sourced from a gitignored eval dataset/db from the live deploy, not reproducible from a fresh clone. The pre-agent baseline these are measured against is in [`docs/MANUAL_BASELINE.md`](docs/MANUAL_BASELINE.md) — currently a template pending real incident estimates.
 
 ---
 
@@ -91,6 +91,7 @@ The pipeline runs on FastAPI with WebSocket streaming for the live dashboard. St
 # 1. Install
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+cd frontend && npm install && cd ..
 
 # 2. Environment
 cp .env.example .env  # fill ANTHROPIC_API_KEY, GITHUB_TOKEN, AWS keys, etc.
@@ -98,7 +99,7 @@ cp .env.example .env  # fill ANTHROPIC_API_KEY, GITHUB_TOKEN, AWS keys, etc.
 # 3. Run
 npm run dev           # FastAPI on :8000 + Vite on :5173
 
-# 4. Tests (no live API calls — all mocked)
+# 4. Tests (mocked — no live API calls)
 pytest tests/
 ```
 
@@ -110,7 +111,9 @@ Full agent docs: [`CLAUDE.md`](CLAUDE.md).
 
 ```
 app/
-  agents/          # BaseAgent + 5 specialised agents (triage, diagnosis, fix, review, monitor)
+  agents/          # BaseAgent + 12 agents — 7 in the production pipeline (triage,
+                   # diagnosis, fix, review, merge-decision, error-clarity, monitor-gen),
+                   # 5 standalone/earlier-design — see CLAUDE.md's Agents table
   api/routes/      # FastAPI route handlers
   core/config.py   # Settings via pydantic-settings
   models/          # Pydantic data models (ErrorEvent, IncidentState, etc.)
@@ -119,7 +122,7 @@ mcp_server/        # MCP server exposing agents to Claude Desktop
 infra/             # Terraform for ECS Fargate + Cloudflare + SNS
 scripts/           # measure_mttr.py, eval_rag.py, triage_replay.py
 targets/           # External codebases the platform operates on
-tests/             # pytest test suite (~600 tests, all mocked)
+tests/             # pytest test suite (745 tests, mocked — no live API calls)
 docs/              # MANUAL_BASELINE, architecture notes
 ```
 
