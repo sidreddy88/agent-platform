@@ -8,3 +8,8 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F811"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: requires live credentials/data — skipped unless explicitly run",
+]
