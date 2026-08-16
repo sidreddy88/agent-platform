@@ -539,7 +539,7 @@ class AWSService:
 
         `region` overrides the session-wide AWS region for this call only —
         useful when the log group lives in a different region than the
-        agent-platform's own infrastructure (e.g. TargetApp in us-east-2
+        agent-platform's own infrastructure (e.g. the target app in us-east-2
         while agent-platform runs in us-east-1).
         """
         logs = self._client("logs", region=region)

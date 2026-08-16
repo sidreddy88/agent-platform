@@ -46,10 +46,10 @@ class SandboxResult:
 
 class SandboxService:
     """
-    Validates a fix by running the TargetApp test suite in an isolated Docker container.
+    Validates a fix by running the target app's test suite in an isolated Docker container.
 
     Two-phase lifecycle:
-      1. Clone TargetApp + apply harness patches
+      1. Clone the target repo (settings.fix_target_repo) + apply harness patches
       2. Baseline run  — build Docker image, run tests on unmodified source
       3. Apply fix files to workdir (volume-mounted into container)
       4. Fix run       — reuse image (no rebuild), run tests with fix applied
@@ -59,7 +59,7 @@ class SandboxService:
 
     async def run(self, fix_files: dict[str, str], incident_id: str) -> SandboxResult:
         """Run the test suite with fix_files applied. Always cleans up, even on error."""
-        tmp = tempfile.mkdtemp(prefix=f"target-app-{incident_id[:8]}-")
+        tmp = tempfile.mkdtemp(prefix=f"sandbox-{incident_id[:8]}-")
         try:
             return await asyncio.get_event_loop().run_in_executor(
                 None, self._run_sync, fix_files, tmp
@@ -78,14 +78,14 @@ class SandboxService:
         clone = subprocess.run(
             [
                 "git", "clone", "--depth=1",
-                f"https://{settings.github_token}@github.com/TargetOrg/TargetApp.git",
+                f"https://{settings.github_token}@github.com/{settings.fix_target_repo}.git",
                 workdir,
             ],
             capture_output=True, text=True,
         )
         if clone.returncode != 0:
             return SandboxResult(passed=False, output="", error=f"Clone failed: {clone.stderr.strip()}")
-        logger.info("[Sandbox] Cloned TargetApp")
+        logger.info("[Sandbox] Cloned %s", settings.fix_target_repo)
 
         # 2. Apply harness patches (no fix yet — baseline must see clean source)
         error = self._apply_patches(workdir)

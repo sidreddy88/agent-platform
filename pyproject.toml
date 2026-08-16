@@ -13,3 +13,6 @@ ignore = ["E501"]
 markers = [
     "live: requires live credentials/data — skipped unless explicitly run",
 ]
+# Actually enforce what the marker description above promises — "-m live"
+# opts back in for a deliberate live run.
+addopts = "-m 'not live'"

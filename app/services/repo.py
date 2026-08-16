@@ -5,7 +5,7 @@ Reads (file existence, content) come from the local clone.
 Writes (create branch, update file, create PR) stay on the GitHub API.
 
 Usage:
-    repo = LocalRepoService("TargetOrg", "TargetApp")
+    repo = LocalRepoService("your-org", "your-repo")
     await repo.ensure_fresh()          # clone or pull
     exists = repo.file_exists("routes/api/image.js")
     content = repo.read_file("routes/api/image.js")

@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     github_token: str = ""
     openai_api_key: str = ""
-    codebase_path: str = "/Users/Sidreddy/DevCode/TargetApp"
+    codebase_path: str = ""  # local path to the target codebase, for RAG indexing
     # AWS — leave blank to use local credentials (~/.aws/credentials / env vars)
     aws_region: str = "us-east-1"
     aws_access_key_id: str = ""
@@ -83,8 +83,8 @@ class Settings(BaseSettings):
     # Base URL for human approval links in Slack messages
     approval_base_url: str = "http://localhost:8000"
 
-    # Target repo for AI-generated fix PRs (owner/repo)
-    fix_target_repo: str = "TargetOrg/TargetApp"
+    # Target repo for AI-generated fix PRs (owner/repo) — set the real value via .env
+    fix_target_repo: str = "your-org/your-repo"
 
     # Root directory for persistent local repo clones (used by LocalRepoService).
     # Defaults to ~/.agent-platform/repos if unset.
@@ -99,7 +99,7 @@ class Settings(BaseSettings):
 
     # Detection poll interval in seconds. 5 min cadence: rate-limit-safe on
     # CloudWatch Logs (0.003 TPS vs 5 TPS limit) and matches the typical
-    # frequency at which an TargetApp error class repeats.
+    # frequency at which a given error class repeats in the target app.
     detection_poll_interval_seconds: int = 300
 
     # CloudWatch log filter patterns for application-level error detection.

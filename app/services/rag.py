@@ -131,7 +131,7 @@ def _chunk_js_by_function(file_path: str, content: str, language: str) -> list[C
     (caller should then fall back to _chunk_file).
 
     Known limitation: brace characters inside string literals are counted. This is
-    rare in the TargetApp backend and doesn't affect correctness in practice.
+    rare in the target app's backend and doesn't affect correctness in practice.
     """
     lines = content.splitlines()
     chunks: list[CodeChunk] = []

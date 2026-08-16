@@ -1,0 +1,5 @@
+# Test-only dependencies — not installed in the production Docker image
+# (Dockerfile installs requirements.txt directly, not this file).
+-r requirements.txt
+pytest>=8.3.3
+pytest-asyncio>=0.24.0

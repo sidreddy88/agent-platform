@@ -948,7 +948,7 @@ Complete each step before moving to the next.
         function). If so, set affected_function to null — do NOT invent "main" or "run".
         This is the correct answer for module-level scripts and does NOT lower confidence.
    CRITICAL: affected_file MUST be a file path that literally appeared in your
-   grep_codebase results. The service name (e.g. "TaskTargetApp") is NOT a
+   grep_codebase results. The service name (e.g. an ECS task name) is NOT a
    filename — do not append ".js" to service names. If grep returned
    "create-post-fargate.js" and "server.js", those are your only valid choices.
 
