@@ -37,6 +37,34 @@ The same pattern appears in `REFERRAL_MODEL_MAP` and the `PublishingApps` array 
 `routes/services/interview-user-service.js`. Adding a brand requires updating all three.
 See `docs/MULTI_BRAND.md` for the full checklist.
 
+**This duplication is not limited to named constants like `MODEL_MAP`.** Whole route
+handlers, middleware, and business logic get copy-pasted per brand — one near-identical
+file per brand is a first-class pattern in this codebase, not an exception. **Assume a
+bug found in one file exists in every sibling until you've actually searched and
+confirmed otherwise — never conclude a fix is complete just because the one file from
+the stack trace is fixed.**
+
+**Search for the pattern, don't rely on a memorized file list.** Brands get added and
+removed, and this duplication convention isn't confined to files named
+`*InterviewUsers.js` — it can show up anywhere similar per-brand logic exists. When you
+find a bug, use `search_codebase` / `grep_codebase` / `verify_symbol_in_repo` (whichever
+surfaces raw text matches) to search for the same function signature, route path, or
+vulnerable code shape across the whole repo — not just the one file the stack trace
+pointed at — before finalizing a diagnosis.
+
+For calibration, here's what this looked like in a real incident (illustrative, not an
+exhaustive or current list — always search rather than trust this): an unvalidated
+`previewCode` param cast to `Number` with no `.catch()` crashed the process from
+`inspiringInterviewUsers.js`, and a proper search found the identical handler verbatim
+in 7 more `routes/api/*InterviewUsers.js` siblings (artistOfTheDay, boldJourney,
+cityNational, cr, highlightApp, shoutout, smallBusinessOfTheDay) — none of which had
+crashed yet, but all of which had the same bug waiting to. The agent that shipped the
+fix only found and fixed the one file; the other 7 were found afterward, manually,
+outside the pipeline.
+
+List every affected file you actually find in `blast_radius`, not just the one from the
+stack trace.
+
 ## Content Moderation Pipeline
 
 `hardBlock()` runs first (free, keyword-based). Only if it passes does `classifyFields()`
