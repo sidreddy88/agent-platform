@@ -114,7 +114,16 @@ async def _run_scan(days: int) -> Dict[str, Any]:
         service = log_group.rstrip("/").split("/")[-1]
         await _scan_log(f"Scanning {log_group} ...")
         try:
-            matches = aws.get_error_logs(log_group, minutes=minutes, region=region)
+            # get_error_logs is synchronous boto3 -- run it off the event loop
+            # thread. Its own wall-clock budget bounds a single call, but even a
+            # bounded multi-second blocking call in-line here would freeze every
+            # other request (websocket updates, other API calls) for that whole
+            # duration, since this route is otherwise pure async. Confirmed in
+            # production: a scan against a rarely-matching filter hung the
+            # entire app, not just the scan request, for 10+ minutes.
+            matches = await asyncio.to_thread(
+                aws.get_error_logs, log_group, minutes=minutes, region=region,
+            )
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
             seen: set[tuple[str, str, str]] = set()
@@ -254,7 +263,12 @@ async def scan_crashes_4_weeks() -> Dict[str, Any]:
             # in production: a real crash from ~36 hours back never appeared in
             # a 4-week "crashes only" scan because a noisier recent day
             # consumed the whole budget before the chunk loop reached that far.
-            matches = aws.get_error_logs(
+            # Off the event loop thread -- see the comment on the equivalent
+            # call in _run_scan for why (this is exactly the call that hung
+            # the whole app in production once the narrower crash-only
+            # pattern above stopped hitting the event cap early).
+            matches = await asyncio.to_thread(
+                aws.get_error_logs,
                 log_group, minutes=_FOUR_WEEKS, region=region, filter_pattern='"app crashed"',
             )
             await _scan_log(f"  {len(matches)} raw log entries fetched")
