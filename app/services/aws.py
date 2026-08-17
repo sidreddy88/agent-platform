@@ -594,19 +594,40 @@ class AWSService:
             filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback" ?"DeprecationWarning" ?"Failed to " ?"app crashed"',
         )
 
-        _MAX_EVENTS = limit if limit is not None else 300
+        _MAX_EVENTS = limit if limit is not None else 400
+
+        # FilterLogEvents returns matches in ascending (oldest-first) order
+        # within whatever [startTime, endTime) window you give it. A single
+        # call spanning the whole requested window, capped at _MAX_EVENTS,
+        # means one noisy old day can consume the entire budget and starve
+        # out everything more recent -- confirmed in production: a 42-day
+        # scan of a high-volume log group returned 300/300 events, ALL from
+        # the very first day of the window, none from the other 41 days
+        # (including "today"). Fetch backwards in day-sized chunks instead,
+        # starting from now, so recent activity always gets priority; older
+        # chunks only get queried once there's budget left over.
+        _CHUNK_MS = 24 * 60 * 60 * 1000
         raw_events: list[dict] = []
-        next_token: str | None = None
-        while len(raw_events) < _MAX_EVENTS:
-            try:
-                kwargs = {**base_kwargs, **({"nextToken": next_token} if next_token else {})}
-                resp = logs.filter_log_events(**kwargs)
-            except (BotoCoreError, ClientError) as exc:
-                raise AWSError("CloudWatchLogs", str(exc)) from exc
-            raw_events.extend(resp.get("events", []))
-            next_token = resp.get("nextToken")
-            if not next_token:
-                break
+        chunk_end_ms = end_ms
+        while chunk_end_ms > start_ms and len(raw_events) < _MAX_EVENTS:
+            chunk_start_ms = max(start_ms, chunk_end_ms - _CHUNK_MS)
+            next_token: str | None = None
+            while len(raw_events) < _MAX_EVENTS:
+                try:
+                    kwargs = {
+                        **base_kwargs,
+                        "startTime": chunk_start_ms,
+                        "endTime": chunk_end_ms,
+                        **({"nextToken": next_token} if next_token else {}),
+                    }
+                    resp = logs.filter_log_events(**kwargs)
+                except (BotoCoreError, ClientError) as exc:
+                    raise AWSError("CloudWatchLogs", str(exc)) from exc
+                raw_events.extend(resp.get("events", []))
+                next_token = resp.get("nextToken")
+                if not next_token:
+                    break
+            chunk_end_ms = chunk_start_ms
         raw_events = raw_events[:_MAX_EVENTS]
 
         events = []
