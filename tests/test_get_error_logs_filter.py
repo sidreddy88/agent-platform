@@ -60,3 +60,51 @@ def test_crash_only_override_excludes_generic_error_terms():
     pattern = mock_logs.filter_log_events.call_args.kwargs["filterPattern"]
     assert "DeprecationWarning" not in pattern
     assert '"ERROR"' not in pattern
+
+
+# ---------------------------------------------------------------------------
+# Wall-clock safety net — the day-chunk walk must never run unbounded
+# ---------------------------------------------------------------------------
+#
+# Real production incident: with a narrow filter that legitimately matches
+# nothing for weeks, len(raw_events) < _MAX_EVENTS stays true for the ENTIRE
+# requested window, so every single day-chunk (up to 28 for a 4-week scan)
+# gets queried sequentially -- each a blocking network call, run in-line
+# inside an async route handler. This hung the whole app for 10+ minutes.
+
+def test_stops_early_once_wall_clock_budget_is_exceeded():
+    """A filter that never matches anything must not force all 28 day-chunks
+    of a 4-week scan to be queried -- the deadline must cut it off."""
+    service, mock_logs = _service_with_mock_logs_client()
+    mock_logs.filter_log_events.return_value = {"events": []}  # never matches, never paginates
+
+    # First monotonic() call sets the deadline; simulate several seconds
+    # passing per chunk check thereafter so the 45s budget is exceeded well
+    # before all 28 day-chunks a 4-week window would otherwise require,
+    # without needing to actually sleep in the test.
+    fake_clock = iter([0.0] + [i * 4.0 for i in range(1, 200)])
+    with (
+        patch.object(AWSService, "_client", return_value=mock_logs),
+        patch("app.services.aws.time.monotonic", side_effect=lambda: next(fake_clock)),
+    ):
+        events = service.get_error_logs("/ecs/svc", minutes=40_320, filter_pattern='"app crashed"')
+
+    assert events == []
+    # 45s budget / ~1s per chunk check -> nowhere near the full 28 chunks a
+    # 4-week window would otherwise require.
+    assert mock_logs.filter_log_events.call_count < 28
+
+
+def test_does_not_time_out_when_matches_exist_within_budget():
+    """Sanity check the deadline doesn't fire on a normal, fast-completing call."""
+    service, mock_logs = _service_with_mock_logs_client()
+    mock_logs.filter_log_events.return_value = {
+        "events": [{"timestamp": 1000, "message": "app crashed", "logStreamName": "s"}],
+    }
+    with (
+        patch.object(AWSService, "_client", return_value=mock_logs),
+        patch("app.services.aws.time.monotonic", return_value=0.0),
+    ):
+        events = service.get_error_logs("/ecs/svc", minutes=60, filter_pattern='"app crashed"', limit=1)
+
+    assert len(events) == 1

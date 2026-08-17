@@ -390,7 +390,15 @@ class DetectionService:
         for log_group in log_groups:
             service = log_group.rstrip("/").split("/")[-1]
             try:
-                matches = self._aws.get_error_logs(log_group, minutes=minutes, limit=50, region=region)
+                # Off the event loop thread -- this poller runs on a timer inside
+                # the same process as every other request; a blocking boto3 call
+                # in-line here would stall the whole app for its duration, not
+                # just this poll cycle (see aws.py's get_error_logs docstring and
+                # the incidents.py scan routes for the production incident this
+                # class of bug caused).
+                matches = await asyncio.to_thread(
+                    self._aws.get_error_logs, log_group, minutes=minutes, limit=50, region=region,
+                )
                 if not matches:
                     continue
 
