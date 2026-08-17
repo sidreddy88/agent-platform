@@ -1543,10 +1543,30 @@ class FixGenerationAgent(BaseAgent):
                 secondary_loc = f" ({incident.diagnosis_additional_fix_function} in {incident.diagnosis_additional_fix_file})"
             elif incident.diagnosis_additional_fix_function:
                 secondary_loc = f" ({incident.diagnosis_additional_fix_function})"
+            # This section used to invite the model to `read_file` the secondary
+            # location "for context" — but apply_edit/patch_line can only ever touch
+            # `file_path` (the file already fetched into this call). When a diagnosis
+            # names more affected files than the single diagnosis_additional_fix_file
+            # this pipeline can act on (a live incident found 7 — see PR referencing
+            # this comment), the model would dutifully read_file every one of them
+            # looking for a way to fix them, burn the entire iteration budget on
+            # unreachable files, and never call patch_line/apply_edit on the one file
+            # it actually can fix. diagnosis_additional_fix_file (if set) already gets
+            # its own dedicated _generate_fix() pass after this one returns (see the
+            # "Secondary file fix" step in run()) — so this pass must not attempt it.
             additional_fix_section = (
-                f"\nSECONDARY FIX NEEDED{secondary_loc}: {incident.diagnosis_additional_fix}\n"
-                f"Note: Your primary target is {function_name} in {file_path}. "
-                f"Use read_file to also understand the secondary location and include that context in your analysis.\n"
+                f"\nDIAGNOSIS NOTE (background only — do not act on this in this call): "
+                f"{incident.diagnosis_additional_fix}\n"
+                f"Your ONLY target in this call is {function_name} in {file_path}. "
+                + (
+                    f"The single additional location{secondary_loc} is fixed automatically "
+                    f"in a separate pass right after this one — do not read or touch it here.\n"
+                    if incident.diagnosis_additional_fix_file else
+                    "Any other files named above are NOT fixed automatically and are out of "
+                    "scope for this call.\n"
+                )
+                + f"Do NOT call read_file on any file other than {file_path} because of this "
+                f"note — stay on target and call patch_line/apply_edit for it now.\n"
             )
 
         # Pre-extract the target function so the LLM never needs to reproduce old text.
@@ -1643,7 +1663,11 @@ class FixGenerationAgent(BaseAgent):
         _total_pruned_chars = 0
         import json as _json
 
-        for iteration in range(14):
+        # 14 -> 20: modest headroom now that the prompt above no longer invites
+        # exploring files this loop has no ability to edit (see additional_fix_section
+        # comment). Legitimate single-file work — read tests/callers, patch, then scan
+        # for adjacent issues — can still reasonably need more than 14 turns.
+        for iteration in range(20):
             if iteration > 0 and iteration % 3 == 0:
                 messages, pruned = _prune_tool_results(messages)
                 _total_pruned_chars += pruned
