@@ -249,6 +249,26 @@ class PendingEventStore:
             self._sigs.pop(sig, None)
         return pe
 
+    def forget_matching(self, event: Any) -> Optional[PendingEvent]:
+        """Remove whatever pending event shares this event's content signature.
+
+        Used when a human deletes the incident this signature was promoted into,
+        signalling "I want a fresh look at this" — NOT dismiss(): dismiss() blocks
+        the signature from resurfacing until reset_dismissed() runs, which is the
+        wrong behavior here. Without this, occurrences++/last_seen_at keep
+        absorbing every future recurrence into the deleted incident's now-invisible
+        pending record, and a crash scan reports "no new crashes" for a bug that's
+        still live and recurring (confirmed in production: incident deleted, the
+        same crash recurred the next day, scan still reported nothing new).
+        """
+        if event is None:
+            return None
+        sig = _content_sig(event)
+        event_id = self._sigs.pop(sig, None)
+        if event_id is None:
+            return None
+        return self._events.pop(event_id, None)
+
     def dismiss(self, event_id: str) -> Optional[PendingEvent]:
         """Remove event and prevent its content from resurfacing this session."""
         pe = self._events.pop(event_id, None)
