@@ -15,7 +15,9 @@ Credentials are resolved in the standard boto3 order:
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -24,6 +26,8 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -623,9 +627,25 @@ class AWSService:
         # starting from now, so recent activity always gets priority; older
         # chunks only get queried once there's budget left over.
         _CHUNK_MS = 24 * 60 * 60 * 1000
+        # Wall-clock safety net: the event cap above only bounds the walk when
+        # the filter matches often enough to hit it. A narrow/rare pattern (e.g.
+        # the crash-only override) can legitimately match nothing for weeks,
+        # meaning len(raw_events) < _MAX_EVENTS stays true for the ENTIRE
+        # window -- every single day-chunk gets queried sequentially, each a
+        # blocking network call. Confirmed in production: this hung the whole
+        # process for 10+ minutes with zero progress logged, because callers
+        # run this synchronously with no timeout of their own. Give up after a
+        # fixed budget and return whatever was found so far rather than run
+        # unbounded.
+        _MAX_SECONDS = 45.0
+        deadline = time.monotonic() + _MAX_SECONDS
         raw_events: list[dict] = []
         chunk_end_ms = end_ms
+        timed_out = False
         while chunk_end_ms > start_ms and len(raw_events) < _MAX_EVENTS:
+            if time.monotonic() > deadline:
+                timed_out = True
+                break
             chunk_start_ms = max(start_ms, chunk_end_ms - _CHUNK_MS)
             next_token: str | None = None
             while len(raw_events) < _MAX_EVENTS:
@@ -643,7 +663,18 @@ class AWSService:
                 next_token = resp.get("nextToken")
                 if not next_token:
                     break
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    break
+            if timed_out:
+                break
             chunk_end_ms = chunk_start_ms
+        if timed_out:
+            logger.warning(
+                "[AWSService] get_error_logs hit its %.0fs wall-clock budget for %s "
+                "before exhausting the requested window — returning %d event(s) found so far",
+                _MAX_SECONDS, log_group, len(raw_events),
+            )
         raw_events = raw_events[:_MAX_EVENTS]
 
         events = []
