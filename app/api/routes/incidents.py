@@ -19,7 +19,7 @@ from app.services.aws import AWSService
 from app.services.detection import classify_ecs_log
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
-from app.services.pending_events import pending_event_store
+from app.services.pending_events import content_signature, pending_event_store
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,22 @@ _scan_logger = logging.getLogger("scan")
 async def _scan_log(message: str, level: str = "info") -> None:
     _scan_logger.info("[scan] %s", message)
     await broadcast({"type": "scan_progress", "ts": _scan_ts(), "level": level, "message": message})
+
+
+def _has_active_incident(event: ErrorEvent) -> bool:
+    """True if an incident already exists (any status) for this crash signature.
+
+    A scan should skip re-queuing a signature that's either already resolved (a
+    fix was merged for it) or still actively in flight (awaiting approval, being
+    fixed, sitting in fix_failed) -- there's no value in spawning a second
+    incident for either case. Once a human explicitly deletes the incident
+    (wanting a fresh look -- e.g. an attempt that never actually merged), it
+    drops out of incident_store and this returns False again, so the very next
+    scan treats a real recurrence as new instead of silently absorbing it into
+    pending_events' occurrence counter with no visible incident anywhere.
+    """
+    sig = content_signature(event)
+    return any(content_signature(i.error_event) == sig for i in incident_store.list_all())
 
 
 async def _run_scan(days: int) -> Dict[str, Any]:
@@ -137,6 +153,13 @@ async def _run_scan(days: int) -> Dict[str, Any]:
                         "timestamp": log["timestamp"],
                     },
                 )
+
+                if _has_active_incident(event):
+                    await _scan_log(
+                        f"  ✓ already tracked (incident exists): [{error_type}] {msg[:80].strip()}",
+                        level="info",
+                    )
+                    continue
 
                 pe, is_new = pending_event_store.add(event)
                 if pe is None:
@@ -265,6 +288,13 @@ async def scan_crashes_4_weeks() -> Dict[str, Any]:
                         "timestamp": log["timestamp"],
                     },
                 )
+
+                if _has_active_incident(event):
+                    await _scan_log(
+                        f"  ✓ already tracked (incident exists): [{error_type}] {msg[:80].strip()}",
+                        level="info",
+                    )
+                    continue
 
                 pe, is_new = pending_event_store.add(event)
                 if pe is None:
