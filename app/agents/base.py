@@ -193,6 +193,14 @@ class BaseAgent:
         self._tracing_ctx: TracingContext = TracingContext(trace=None, enabled=False)
         # Harness docs (AGENTS.md + CONSTRAINTS.md) injected into every LLM call.
         self._harness_docs: str = self._load_harness_docs()
+        # Opt-in floor: subclasses whose answers get acted on (e.g. fed to
+        # FixGenerationAgent) can require at least N tool calls before a
+        # final answer is accepted, rather than trusting whatever the LLM
+        # produces on its very first response. 0 (default) preserves the
+        # original behavior for every existing agent. See DiagnosisAgent
+        # for why this exists — a real production diagnosis answered in a
+        # single LLM call with zero tool calls and fabricated its evidence.
+        self._min_tool_calls_before_answer: int = 0
 
     @staticmethod
     def _load_harness_docs() -> str:
@@ -293,6 +301,7 @@ class BaseAgent:
             steps: list[Step] = []
             _total_input_tokens = 0
             _total_output_tokens = 0
+            _tool_calls_made = 0
 
             for i in range(1, MAX_ITERATIONS + 1):
                 # Compress conversation history if the previous call's token count
@@ -317,8 +326,19 @@ class BaseAgent:
                 parsed = _parse(raw)
                 step.thought = parsed.get("thought", "")
 
-                # ── ANSWER → done ──────────────────────────────────────────
+                # ── ANSWER → done (unless this subclass requires evidence first) ──
                 if "answer" in parsed:
+                    if _tool_calls_made < self._min_tool_calls_before_answer and i < MAX_ITERATIONS:
+                        step.observation = (
+                            f"REJECTED: you must call at least "
+                            f"{self._min_tool_calls_before_answer} tool(s) to verify your "
+                            f"claims before answering — you have called {_tool_calls_made} "
+                            f"so far. Use one of your verification tools now, then answer."
+                        )
+                        steps.append(step)
+                        messages.append({"role": "user", "content": f"Observation: {step.observation}"})
+                        continue
+
                     step.answer = parsed["answer"]
                     steps.append(step)
                     return AgentResult(
@@ -332,6 +352,7 @@ class BaseAgent:
                 step.action_input = parsed.get("action_input", "{}")
 
                 observation = await self._execute_tool(step.action, step.action_input)
+                _tool_calls_made += 1
                 step.observation = observation
                 steps.append(step)
 
