@@ -433,3 +433,70 @@ async def test_additional_fix_section_absent_when_no_additional_fix():
 
     assert "DIAGNOSIS NOTE" not in text
     assert "out of scope for this call" not in text
+
+
+# ---------------------------------------------------------------------------
+# _resolve_secondary_targets — every sibling from blast_radius, not just the
+# one legacy diagnosis_additional_fix_file
+# ---------------------------------------------------------------------------
+
+def test_resolve_secondary_targets_uses_full_blast_radius():
+    """A diagnosis naming 7 siblings via blast_radius must yield all 7, not just
+    the single diagnosis_additional_fix_file — this was the actual production bug
+    (incident 4caba3f3: diagnosis found 8 files, only 1 got a committed fix)."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[
+            {"file": "routes/api/inspiringInterviewUsers.js", "function": "handler"},  # primary — excluded
+            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "handler"},
+            {"file": "routes/api/crInterviewUsers.js", "function": "handler"},
+            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "handler"},
+        ],
+        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_function="handler",
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
+
+    files = [f for f, _ in targets]
+    assert "routes/api/inspiringInterviewUsers.js" not in files  # primary excluded
+    assert files == [
+        "routes/api/shoutoutInterviewUsers.js",
+        "routes/api/crInterviewUsers.js",
+        "routes/api/boldJourneyInterviewUsers.js",
+    ]  # shoutout not duplicated even though it's also diagnosis_additional_fix_file
+
+
+def test_resolve_secondary_targets_includes_legacy_field_not_in_blast_radius():
+    """diagnosis_additional_fix_file must still count when blast_radius omits it —
+    don't regress the pre-existing single-secondary-file path."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[],
+        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_function="handler",
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
+
+    assert targets == [("routes/api/shoutoutInterviewUsers.js", "handler")]
+
+
+def test_resolve_secondary_targets_caps_at_max():
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[
+            {"file": f"routes/api/brand{i}.js", "function": "handler"} for i in range(20)
+        ],
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/primary.js")
+
+    assert len(targets) == 10  # _MAX_SECONDARY_FIXES
+
+
+def test_resolve_secondary_targets_empty_when_no_signal():
+    agent = _make_agent()
+    incident = _make_incident(diagnosis_blast_radius=[], diagnosis_additional_fix_file=None)
+
+    assert agent._resolve_secondary_targets(incident, "routes/api/primary.js") == []
