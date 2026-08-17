@@ -79,6 +79,47 @@ def test_cloudwatch_pending_events_dedup_exact_same_log_entry() -> None:
     assert len(store.list_all()) == 1
 
 
+def test_forget_matching_lets_a_deleted_incidents_crash_resurface() -> None:
+    """Regression test for a real production bug: a human deleted an incident,
+    the exact same crash recurred the next day, and a crash scan still reported
+    "no new crashes" because the pending-events dedup signature survived the
+    incident deletion. forget_matching() must reset it so the next occurrence
+    is treated as new.
+    """
+    store = PendingEventStore()
+
+    first = store.add(_cloudwatch_event(timestamp=1000, description="CastError: previewCode"))
+    assert first[1] is True  # first sighting is new
+
+    # Human deletes the incident this pending event was promoted into.
+    forgotten = store.forget_matching(first[0]._event)
+    assert forgotten is not None
+    assert forgotten.id == first[0].id
+    assert store.list_all() == []
+
+    # The exact same crash recurs (different timestamp) — must be treated as new,
+    # not silently absorbed into a now-nonexistent incident's dedup record.
+    recurrence = store.add(_cloudwatch_event(timestamp=2000, description="CastError: previewCode"))
+    assert recurrence[1] is True
+    assert recurrence[0].id != first[0].id
+
+
+def test_forget_matching_is_a_noop_when_signature_unknown() -> None:
+    store = PendingEventStore()
+    assert store.forget_matching(_cloudwatch_event(timestamp=1000)) is None
+
+
+def test_forget_matching_does_not_dismiss_the_signature() -> None:
+    """Unlike dismiss(), forgetting must NOT block the signature from resurfacing —
+    the whole point is to let it come back as a fresh, visible event."""
+    store = PendingEventStore()
+    pe, _ = store.add(_cloudwatch_event(timestamp=1000))
+    store.forget_matching(pe._event)
+
+    again = store.add(_cloudwatch_event(timestamp=1000))
+    assert again[1] is True  # not suppressed like dismiss() would
+
+
 def test_cloudwatch_same_timestamp_different_message_are_distinct() -> None:
     """Two distinct errors emitted at the same millisecond must not collapse to one."""
     store = PendingEventStore()
