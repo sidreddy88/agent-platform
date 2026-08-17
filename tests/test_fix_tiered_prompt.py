@@ -347,3 +347,89 @@ async def test_prompt_falls_back_to_search_callers_when_blast_radius_empty(monke
     text = captured_prompt.get("text", "")
     assert "TIER 2" in text
     assert "src/searched_caller.js" in text
+
+
+# ---------------------------------------------------------------------------
+# additional_fix_section — must not invite exploring files this call can't edit
+# ---------------------------------------------------------------------------
+
+async def _capture_prompt(agent, incident, **kwargs):
+    """Run _generate_fix with a stub LLM that ends the turn immediately, return the prompt."""
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_complete_with_tools(messages=None, tools=None, system=None, **_kwargs):
+        if messages:
+            for m in messages:
+                if isinstance(m, dict) and m.get("role") == "user":
+                    captured_prompt["text"] = (
+                        m.get("content", "") if isinstance(m.get("content"), str) else str(m.get("content"))
+                    )
+                    break
+        return ("", [], "end_turn")
+
+    agent._llm = MagicMock()
+    agent._llm.complete_with_tools = AsyncMock(side_effect=fake_complete_with_tools)
+    agent._with_harness = MagicMock(return_value="(harness)")
+
+    try:
+        await agent._generate_fix(
+            content=kwargs.pop("content", "function target() {}"),
+            function_name=kwargs.pop("function_name", "target"),
+            incident=incident,
+            file_path=kwargs.pop("file_path", "src/target.js"),
+            context_bundle=kwargs.pop("context_bundle", {"callers": [], "tests": [], "imports": []}),
+            **kwargs,
+        )
+    except Exception:
+        pass
+    return captured_prompt.get("text", "")
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_section_forbids_reading_other_files_with_secondary_target():
+    """When a single secondary file IS structurally supported, the prompt must still
+    forbid exploring it here — it gets its own dedicated _generate_fix() pass in run()."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_additional_fix=(
+            "Apply the identical fix to all 7 remaining sibling files: brandA.js, cr.js, "
+            "brandB.js, artistOfTheDay.js, cityNational.js, highlightApp.js, smallBiz.js"
+        ),
+        diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",
+        diagnosis_additional_fix_function="(anonymous route handler)",
+    )
+
+    text = await _capture_prompt(agent, incident)
+
+    assert "SECONDARY FIX NEEDED" not in text  # old wording that invited exploration
+    assert "fixed automatically in a separate pass" in text
+    assert "Do NOT call read_file on any file other than src/target.js" in text
+    assert "brandAInterviewUsers.js" in text  # still surfaced, just as background
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_section_marks_unsupported_siblings_out_of_scope():
+    """When diagnosis names siblings but no single diagnosis_additional_fix_file was set,
+    the prompt must say those files are simply out of scope for this call — not fetchable."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_additional_fix="Same bug exists in 7 sibling *InterviewUsers.js files.",
+        diagnosis_additional_fix_file=None,
+        diagnosis_additional_fix_function=None,
+    )
+
+    text = await _capture_prompt(agent, incident)
+
+    assert "are NOT fixed automatically and are out of scope for this call" in text
+    assert "Do NOT call read_file on any file other than src/target.js" in text
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_section_absent_when_no_additional_fix():
+    agent = _make_agent()
+    incident = _make_incident(diagnosis_additional_fix=None)
+
+    text = await _capture_prompt(agent, incident)
+
+    assert "DIAGNOSIS NOTE" not in text
+    assert "out of scope for this call" not in text
