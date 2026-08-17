@@ -245,7 +245,18 @@ async def scan_crashes_4_weeks() -> Dict[str, Any]:
         service = log_group.rstrip("/").split("/")[-1]
         await _scan_log(f"Scanning {log_group} ...")
         try:
-            matches = aws.get_error_logs(log_group, minutes=_FOUR_WEEKS, region=region)
+            # Scoped to crash-shaped lines only (classify_ecs_log's ONLY crash
+            # trigger is the literal substring "app crashed") -- not the generic
+            # multi-category default. Sharing that default pattern here would
+            # spend the day-chunked fetch's shared event budget on generic
+            # Errors/DeprecationWarnings this scan is about to throw away
+            # anyway, starving out an older, rarer real crash line. Confirmed
+            # in production: a real crash from ~36 hours back never appeared in
+            # a 4-week "crashes only" scan because a noisier recent day
+            # consumed the whole budget before the chunk loop reached that far.
+            matches = aws.get_error_logs(
+                log_group, minutes=_FOUR_WEEKS, region=region, filter_pattern='"app crashed"',
+            )
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
             seen: set[tuple[str, str, str]] = set()
