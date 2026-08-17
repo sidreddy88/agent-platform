@@ -328,16 +328,36 @@ class BaseAgent:
 
                 # ── ANSWER → done (unless this subclass requires evidence first) ──
                 if "answer" in parsed:
-                    if _tool_calls_made < self._min_tool_calls_before_answer and i < MAX_ITERATIONS:
+                    if _tool_calls_made < self._min_tool_calls_before_answer:
+                        if i < MAX_ITERATIONS:
+                            step.observation = (
+                                f"REJECTED: you must call at least "
+                                f"{self._min_tool_calls_before_answer} tool(s) to verify your "
+                                f"claims before answering — you have called {_tool_calls_made} "
+                                f"so far. Use one of your verification tools now, then answer."
+                            )
+                            steps.append(step)
+                            messages.append({"role": "user", "content": f"Observation: {step.observation}"})
+                            continue
+                        # Last iteration and still never verified anything for
+                        # real — do NOT accept this answer at face value.
+                        # Confirmed in production: a model that couldn't (or
+                        # wouldn't) comply fabricated a fake Action/Observation
+                        # pair *inside its own answer* to look compliant,
+                        # rather than ever calling a real tool — the previous
+                        # "always accept on the last iteration" escape hatch
+                        # let that fabrication straight through to a real
+                        # GitHub PR. Fall through to the same "exceeded max
+                        # iterations" result every caller already knows how to
+                        # handle (DiagnosisAgent, for one, degrades this to a
+                        # confidence=0.0/escalate=True result) instead of
+                        # trusting a claim with zero real evidence behind it.
                         step.observation = (
-                            f"REJECTED: you must call at least "
-                            f"{self._min_tool_calls_before_answer} tool(s) to verify your "
-                            f"claims before answering — you have called {_tool_calls_made} "
-                            f"so far. Use one of your verification tools now, then answer."
+                            f"Never verified any claim via a real tool call after "
+                            f"{MAX_ITERATIONS} attempts."
                         )
                         steps.append(step)
-                        messages.append({"role": "user", "content": f"Observation: {step.observation}"})
-                        continue
+                        break
 
                     step.answer = parsed["answer"]
                     steps.append(step)
