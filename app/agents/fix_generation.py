@@ -415,7 +415,8 @@ class FixGenerationAgent(BaseAgent):
         steps.append(f"✓ Blast radius OK ({len(files_to_touch)} files, +{additions}/-{deletions} lines)")
 
         # ── 3c. Self-critique — verify fix addresses root cause ────────
-        critique = await self._critique_fix(old_function, new_function, incident, file_path)
+        critique_old, critique_new = self._critique_content(old_function, new_function, patches)
+        critique = await self._critique_fix(critique_old, critique_new, incident, file_path)
         steps.append(f"✓ Self-critique: {critique[:120]}")
         logger.info("[FixGen] Self-critique: %s", critique[:200])
 
@@ -453,7 +454,8 @@ class FixGenerationAgent(BaseAgent):
                         new_function = alt_new
                         patches = alt_patches
                         fix_verdict = alt_verdict
-                        critique = await self._critique_fix(old_function, new_function, incident, file_path)
+                        critique_old, critique_new = self._critique_content(old_function, new_function, patches)
+                        critique = await self._critique_fix(critique_old, critique_new, incident, file_path)
                         steps.append(f"✓ Alt-frame critique: {critique[:120]}")
                     else:
                         steps.append("⚠ Alt-frame fix generation failed — proceeding with original")
@@ -1827,6 +1829,29 @@ class FixGenerationAgent(BaseAgent):
         result = keep if len(keep) >= 5 else lines[-60:]
         return "\n".join(result[:80])
 
+    @staticmethod
+    def _critique_content(old_function: str, new_function: str, patches: list[tuple[str, str]]) -> tuple[str, str]:
+        """Return (old_code, new_code) text to hand to _critique_fix.
+
+        A fix can be represented two ways: a full old_function/new_function
+        replacement, or a list of (old_snippet, new_snippet) line-level
+        patches (patches path) -- and it's valid for a fix to use ONLY the
+        patches path, leaving old_function/new_function as empty strings
+        (see the `if not old_function and not patches` guard above). Confirmed
+        in production: _critique_fix was called with those empty strings
+        whenever a fix used patches, so the reviewer had nothing to look at
+        ("I don't see the OLD CODE or NEW CODE sections populated") and that
+        confused response leaked verbatim into a real GitHub PR body. Render
+        the patches into the same shape when the whole-function fields are
+        empty, so the critique always has real content to review.
+        """
+        if old_function or new_function or not patches:
+            return old_function, new_function
+        return (
+            "\n\n".join(old for old, _new in patches),
+            "\n\n".join(new for _old, new in patches),
+        )
+
     async def _critique_fix(
         self, old_code: str, new_code: str, incident: IncidentState, file_path: str = ""
     ) -> str:
@@ -1909,10 +1934,23 @@ class FixGenerationAgent(BaseAgent):
             f"FINAL LINE — must be exactly one of: LOOKS CORRECT / NEEDS REVIEW / LIKELY WRONG"
         )
         try:
-            return await self._llm_haiku.complete(
+            result = await self._llm_haiku.complete(
                 messages=[{"role": "user", "content": prompt}],
                 system=self._with_harness("You are a skeptical senior engineer reviewing an AI-generated fix. Be concise and critical."),
             )
         except Exception as exc:
             logger.warning("[FixGen] Critique failed: %s", exc)
             return "Critique unavailable"
+
+        # A response with none of the three required verdict words means
+        # something went wrong upstream (e.g. the reviewer had nothing real
+        # to look at, as above) rather than a genuine assessment. Without
+        # this check the raw confused response — once, literally "I cannot
+        # review a fix I cannot see... Please provide: 1. OLD CODE..." —
+        # just flows through unchanged into steps, the retry-verdict check,
+        # and a real GitHub PR body.
+        if not any(v in result.upper() for v in ("LOOKS CORRECT", "NEEDS REVIEW", "LIKELY WRONG")):
+            logger.warning("[FixGen] Critique had no valid verdict — treating as failed: %s", result[:200])
+            return "Critique inconclusive — reviewer did not return a valid verdict. Manual review recommended."
+
+        return result
