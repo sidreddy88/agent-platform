@@ -81,9 +81,22 @@ async def index_code_graph(background_tasks: BackgroundTasks):
                     return
                 cloned_dir = tempfile.mkdtemp(prefix="code_graph_clone_")
                 url = f"https://x-access-token:{token}@github.com/{repo}.git"
-                log.info("[CodeGraph] Cloning %s ...", repo)
+
+                # Plain `git clone` checks out whatever GitHub's *default*
+                # branch is configured to be, which isn't necessarily where
+                # active development happens (DiagnosisAgent's grounding hit
+                # this exact issue in PR #129 -- this repo's active branch
+                # is 'staging', not 'main'). Clone the real default branch
+                # explicitly rather than assuming; a stale/wrong branch here
+                # silently produces a code graph missing whole files, with
+                # find_callers() just returning empty results instead of an
+                # error.
+                from app.services.github import GitHubService
+                owner, name = repo.split("/", 1)
+                default_branch = await GitHubService().get_default_branch(owner, name)
+                log.info("[CodeGraph] Cloning %s (branch: %s) ...", repo, default_branch)
                 result = subprocess.run(
-                    ["git", "clone", "--depth=1", url, cloned_dir],
+                    ["git", "clone", "--depth=1", "--branch", default_branch, url, cloned_dir],
                     capture_output=True, text=True,
                 )
                 if result.returncode != 0:
