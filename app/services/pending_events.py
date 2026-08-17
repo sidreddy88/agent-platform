@@ -54,6 +54,12 @@ def _content_sig(event: Any) -> str:
     return f"{service}|{error_type}|{normalized}"
 
 
+def content_signature(event: Any) -> str:
+    """Public alias for _content_sig — used outside this module (incident_store
+    lookups) to match an ErrorEvent against the same dedup signature."""
+    return _content_sig(event)
+
+
 _UNCAUGHT_MARKERS = (
     "traceback (most recent call last)",
     "uncaught exception",
