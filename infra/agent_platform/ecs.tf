@@ -54,6 +54,15 @@ locals {
     # secret -- this file already names the target app in plain text above
     # (ECS_LOG_GROUPS) -- so it's a plain env var, not routed through SSM.
     { name = "FIX_TARGET_REPO", value = "VoyageGroupMag/AllInterviews" },
+    # Langfuse's generic host (settings.langfuse_host's default,
+    # "https://cloud.langfuse.com") does not accept this project's keys --
+    # this specific project lives on the US-region-specific ingest host.
+    # This was never set here (confirmed: absent from both this file and
+    # secrets.tf), so every span export from prod has been failing with a
+    # 401 the entire time, on top of (and independent from) the
+    # LANGFUSE_SECRET_KEY placeholder-value issue found the same session.
+    # Not a secret -- just a URL.
+    { name = "LANGFUSE_BASE_URL", value = "https://us.cloud.langfuse.com" },
   ]
 
   # Every SSM parameter the container should pull at start. The ECS
