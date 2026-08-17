@@ -136,6 +136,40 @@ def _trim_to_stack_frames(ctx_lines: list[str]) -> list[str]:
     return kept
 
 
+def _as_exact_phrase(pattern: str) -> str:
+    """
+    Wrap a plain-text search term as a CloudWatch Logs exact-phrase match.
+
+    CloudWatch's (non-JSON) filter pattern syntax tokenizes an unquoted
+    pattern into space-separated "terms" and rejects most punctuation
+    inside them — confirmed empirically against a real log group:
+    "Cannot read properties of null.*reading 'data'" -> InvalidParameterException:
+    "Invalid character(s) in term '*'" (and separately, a ':' in another
+    pattern triggered the same error). Every tool that calls
+    search_log_events() (TriageAgent.get_occurrence_count,
+    DiagnosisAgent.get_error_samples/check_still_occurring/
+    get_occurrence_timeline) passes an LLM-generated error string — stack
+    trace fragments and error messages routinely contain exactly this kind
+    of punctuation. The failure doesn't crash anything: search_log_events
+    raises AWSError, which each tool catches and returns as a formatted
+    "Could not fetch CloudWatch logs: ..." string to the LLM instead of
+    real data — degrading (not blocking) triage/diagnosis quality, and
+    invisible in Langfuse's error-level view since nothing actually raises
+    past the tool boundary.
+
+    Wrapping the whole pattern in double quotes turns it into a single
+    exact-phrase match instead of tokenized terms, which CloudWatch accepts
+    regardless of internal punctuation — confirmed identical result sets
+    for an already-valid plain pattern ("NoSuchKey"), quoted vs unquoted,
+    so this is safe to apply unconditionally. A literal `"` inside the
+    pattern must be stripped first — a naive wrap still breaks on it
+    (confirmed empirically); this syntax has no escape mechanism for it.
+    """
+    if not pattern:
+        return pattern
+    return '"{}"'.format(pattern.replace('"', ""))
+
+
 # ---------------------------------------------------------------------------
 # AWSService
 # ---------------------------------------------------------------------------
@@ -493,6 +527,10 @@ class AWSService:
 
         filter_pattern uses CloudWatch filter syntax — plain strings like "NoSuchKey"
         work as substring matches. Returns events newest-first.
+
+        Every caller passes an LLM-generated error string (stack trace
+        fragments, error messages) — see _as_exact_phrase for why that
+        needs sanitizing before it reaches CloudWatch.
         """
         logs = self._client("logs")
         from datetime import timedelta
@@ -506,7 +544,7 @@ class AWSService:
                 logGroupName=log_group,
                 startTime=start_ms,
                 endTime=end_ms,
-                filterPattern=filter_pattern,
+                filterPattern=_as_exact_phrase(filter_pattern),
                 limit=limit,
             )
         except (BotoCoreError, ClientError) as exc:
