@@ -567,6 +567,7 @@ class AWSService:
         *,
         limit: int | None = None,
         region: str | None = None,
+        filter_pattern: str | None = None,
     ) -> list[dict]:
         """Fetch error-level log events from a CloudWatch log group.
 
@@ -579,6 +580,18 @@ class AWSService:
         useful when the log group lives in a different region than the
         agent-platform's own infrastructure (e.g. the target app in us-east-2
         while agent-platform runs in us-east-1).
+
+        `filter_pattern` overrides the default multi-category pattern below.
+        Matters more than it looks: the day-chunked fetch this feeds into caps
+        total events at `limit`/400 total, shared across every category the
+        pattern matches. A noisy recent day full of generic Errors/Deprecation-
+        Warnings can consume the entire budget before the chunk loop ever walks
+        back far enough to reach an older, rarer crash line -- confirmed in
+        production: a real "app crashed" line from ~36 hours back never
+        appeared in a 4-week crash-only scan because that day's fetch never got
+        that far. Callers that only care about one category (e.g. the crash
+        scan) should pass a pattern scoped to just that category so the budget
+        isn't spent on categories they're about to filter out anyway.
         """
         logs = self._client("logs", region=region)
         from datetime import timedelta
@@ -591,7 +604,10 @@ class AWSService:
             logGroupName=log_group,
             startTime=start_ms,
             endTime=end_ms,
-            filterPattern='?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" ?"Traceback" ?"DeprecationWarning" ?"Failed to " ?"app crashed"',
+            filterPattern=filter_pattern or (
+                '?"ERROR" ?"Error" ?"EXCEPTION" ?"Exception" ?"FATAL" ?"CRITICAL" '
+                '?"Traceback" ?"DeprecationWarning" ?"Failed to " ?"app crashed"'
+            ),
         )
 
         _MAX_EVENTS = limit if limit is not None else 400
