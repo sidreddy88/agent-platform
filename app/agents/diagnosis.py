@@ -763,6 +763,39 @@ class DiagnosisAgent(BaseAgent):
                 setattr(result, file_attr, None)
                 setattr(result, fn_attr, None)
 
+        # Verify file↔function PAIRING. The two checks above are each
+        # independently true-or-false — "does this file exist" and "does
+        # this symbol exist ANYWHERE in the repo" — but neither confirms
+        # the symbol actually lives in THIS specific file. A real
+        # fabrication slipped through exactly this gap in production: the
+        # LLM claimed `REFERRAL_MODEL_MAP` (a real symbol, found via
+        # search_code — just in a different file) was defined in
+        # `create-post-fargate.js` (a real file — just without that
+        # symbol). Both individual checks passed; the pairing was never
+        # verified. Read the claimed file's actual content and confirm the
+        # claimed symbol appears in it before trusting the pairing.
+        for file_attr, fn_attr in (
+            ("affected_file", "affected_function"),
+            ("additional_fix_file", "additional_fix_function"),
+        ):
+            path = getattr(result, file_attr)
+            fn = getattr(result, fn_attr)
+            if not (path and fn):
+                continue  # one or both already nulled above, or fn wasn't claimed
+            try:
+                content = self._local_repo.read_file(path) if self._local_repo.ready else None
+            except Exception:
+                content = None
+            if content is not None and fn not in content:
+                logger.warning(
+                    "DiagnosisAgent: %s '%s' not found inside %s '%s' — file and symbol each "
+                    "exist somewhere in the repo, but not together — nulling both",
+                    fn_attr, fn, file_attr, path,
+                )
+                ungrounded.append(f"{fn} in {path}")
+                setattr(result, file_attr, None)
+                setattr(result, fn_attr, None)
+
         # Verify blast_radius entries — each has a "file" key that may be hallucinated.
         if result.blast_radius:
             verified = []
