@@ -16,6 +16,14 @@ on:
     branches: [main]
     paths-ignore:
       - "**.md"
+      # Exception: targets/allinterviews/AGENTS.md and CONSTRAINTS.md are not
+      # just docs -- BaseAgent._load_harness_docs() (app/agents/base.py) reads
+      # them off the deployed container's filesystem and injects them into
+      # every LLM call. A **.md ignore above silently means a change to
+      # either file never reaches prod. Every other *.md under targets/ is
+      # inert human documentation and stays ignored.
+      - "!targets/allinterviews/AGENTS.md"
+      - "!targets/allinterviews/CONSTRAINTS.md"
       - "infra/**"
       - ".github/ISSUE_TEMPLATE/**"
   workflow_dispatch:
