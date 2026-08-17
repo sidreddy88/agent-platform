@@ -337,7 +337,13 @@ async def get_metrics() -> Dict[str, Any]:
 @router.delete("")
 async def clear_incidents() -> Dict[str, Any]:
     """Delete all non-resolved incidents from the store (memory + disk). Resolved incidents are preserved."""
+    # Capture before clear() — its return value is just a count, and once an
+    # incident is gone we lose the error_event needed to forget its pending-events
+    # dedup fingerprint (see delete_incident's comment for why that matters).
+    to_forget = [i for i in incident_store.list_all() if i.status != IncidentStatus.RESOLVED]
     count = incident_store.clear()
+    for incident in to_forget:
+        pending_event_store.forget_matching(incident.error_event)
     remaining = [_serialize(i) for i in incident_store.list_all()]
     await broadcast({"type": "incidents_cleared", "incidents": remaining, "deleted": count})
     return {"deleted": count}
@@ -583,6 +589,11 @@ async def delete_incident(incident_id: str) -> Dict[str, Any]:
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     incident_store.delete(incident_id)
+    # Also forget the pending-events dedup fingerprint for this incident's error —
+    # otherwise a real recurrence of the exact same crash gets silently absorbed as
+    # "occurrences++" on a pending record with no visible incident, and a future
+    # crash scan reports "no new crashes" even though this is still live.
+    pending_event_store.forget_matching(incident.error_event)
     await broadcast({"type": "incident_deleted", "id": incident_id})
     return {"status": "deleted", "incident_id": incident_id}
 
