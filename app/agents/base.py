@@ -148,10 +148,24 @@ def _extract_json_block(text: str) -> str:
 def _parse(text: str) -> dict[str, str]:
     thought = (_THOUGHT_RE.search(text) or type("", (), {"group": lambda s, n: ""})()).group(1).strip()
     answer_match = _ANSWER_RE.search(text)
-    if answer_match:
-        return {"thought": thought, "answer": answer_match.group(1).strip()}
-
     action_match = _ACTION_RE.search(text)
+
+    # A single response can contain both markers -- either the model "ran
+    # ahead" and pre-wrote an answer in the same turn as a real action, or
+    # (confirmed in production) fabricated a fake Action/Observation pair
+    # ahead of its answer to look like it had done verification it never
+    # actually did. Treating "Answer:" as authoritative whenever it appears
+    # ANYWHERE, unconditionally, let that fabrication bypass tool-call
+    # enforcement entirely for any agent that hasn't opted into
+    # _min_tool_calls_before_answer (BaseAgent.run() has its own defense
+    # for agents that DO opt in, but every other agent had no protection at
+    # all against this exact pattern). Whichever marker appears FIRST is
+    # what the model actually intended this turn: an Action appearing
+    # before Answer means the trailing answer text is premature and gets
+    # discarded in favor of actually running the tool and letting the model
+    # answer for real on a later turn, once it has a genuine observation.
+    if answer_match and (action_match is None or answer_match.start() < action_match.start()):
+        return {"thought": thought, "answer": answer_match.group(1).strip()}
 
     # Find Action Input and extract JSON with brace-counting (not regex)
     action_input = "{}"
