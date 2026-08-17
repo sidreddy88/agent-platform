@@ -373,6 +373,14 @@ class DiagnosisAgent(BaseAgent):
         self._repo = _repo
         self._local_repo = LocalRepoService(self._owner, self._repo)
         self._register_tools()
+        # A real production diagnosis once answered in a single LLM call
+        # with zero tool calls, fabricating file/schema content it never
+        # looked at (_enforce_grounding() catches some shapes of this
+        # after the fact, but can't catch fabricated content when no
+        # symbol/file pairing was even claimed). Require at least one real
+        # tool call — evidence of *some* kind — before an answer is
+        # accepted at all.
+        self._min_tool_calls_before_answer = 1
 
     def _register_tools(self) -> None:
         aws = self._aws
