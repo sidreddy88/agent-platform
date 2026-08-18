@@ -566,6 +566,8 @@ class IncidentLoop:
         incident.diagnosis_additional_fix = diagnosis.additional_fix
         incident.diagnosis_additional_fix_file = diagnosis.additional_fix_file
         incident.diagnosis_additional_fix_function = diagnosis.additional_fix_function
+        incident.diagnosis_additional_fix_snippet = diagnosis.additional_fix_snippet
+        incident.diagnosis_additional_fix_targets = list(diagnosis.additional_fix_targets or [])
         incident.diagnosis_blast_radius = list(diagnosis.blast_radius or [])
         incident.diagnosis_contract_change = diagnosis.contract_change
         incident.diagnosis_contract_change_detail = diagnosis.contract_change_detail

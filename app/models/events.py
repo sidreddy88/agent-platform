@@ -83,6 +83,17 @@ class IncidentState(BaseModel):
     diagnosis_additional_fix: Optional[str] = None         # secondary fix description
     diagnosis_additional_fix_file: Optional[str] = None    # secondary fix file
     diagnosis_additional_fix_function: Optional[str] = None  # secondary fix function
+    diagnosis_additional_fix_snippet: Optional[str] = None  # grounded snippet backing
+    # ^ additional_fix_file -- was added to DiagnosisResult in PR #178 but never
+    # persisted here, so it never reached FixGenerationAgent's secondary-fix anchor
+    # search for the single-file case (blast_radius entries got this from day one).
+    diagnosis_additional_fix_targets: List[Dict[str, Any]] = Field(default_factory=list)
+    # ^ each entry: {"file": str, "function": str|None, "snippet": str|None} -- the
+    # multi-file counterpart to diagnosis_additional_fix_file/_function, for the
+    # copy-pasted-per-brand/tenant duplication case where MULTIPLE sibling files need
+    # the identical fix (diagnosis_additional_fix_file only ever carries one). Each
+    # entry is grounded the same way as diagnosis_blast_radius entries -- see
+    # DiagnosisAgent._enforce_grounding.
     # Pre-fix-reasoning fields (populated by DiagnosisAgent, consumed by FixGenerationAgent
     # as Tier 2 constraints in the fix prompt).
     diagnosis_blast_radius: List[Dict[str, Any]] = Field(default_factory=list)
