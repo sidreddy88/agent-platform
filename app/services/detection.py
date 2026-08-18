@@ -483,11 +483,16 @@ class DetectionService:
             category = f.get("category", "error")
 
             try:
+                # Same region fix as TriageAgent/DiagnosisAgent's log tools --
+                # search_log_events() had no region param at all until this fix,
+                # so this always queried agent-platform's own region (us-east-1)
+                # regardless of where the configured log_group actually lives.
                 matches = self._aws.search_log_events(
                     log_group=log_group,
                     filter_pattern=pattern,
                     minutes=window_minutes,
                     limit=10,
+                    region=settings.ecs_log_groups_region or None,
                 )
                 if not matches:
                     continue

@@ -403,6 +403,13 @@ class DiagnosisAgent(BaseAgent):
         github = self._github
         owner = self._owner
         repo = self._repo
+        # TargetApp' logs live in a different AWS region than agent-platform's
+        # own infra (us-east-2 vs us-east-1) -- get_error_logs() already threads
+        # this through everywhere else, but search_log_events() (used by all three
+        # log tools below) never had a region param at all, so every call here
+        # silently queried the wrong region and failed. See search_log_events's
+        # docstring for the full story.
+        log_region = settings.ecs_log_groups_region or None
 
         async def _get_error_samples(
             log_group: str,
@@ -417,6 +424,7 @@ class DiagnosisAgent(BaseAgent):
                     filter_pattern=pattern,
                     minutes=minutes,
                     limit=limit,
+                    region=log_region,
                 )
                 if not events:
                     return f"No '{pattern}' events in the last {minutes} min."
@@ -436,6 +444,7 @@ class DiagnosisAgent(BaseAgent):
                     filter_pattern=pattern,
                     minutes=10,
                     limit=5,
+                    region=log_region,
                 )
                 if events:
                     return f"CONFIRMED: {len(events)} occurrence(s) in the last 10 min. Error is ongoing."
@@ -455,6 +464,7 @@ class DiagnosisAgent(BaseAgent):
                     filter_pattern=pattern,
                     minutes=hours * 60,
                     limit=1000,
+                    region=log_region,
                 )
                 if not events:
                     return f"No '{pattern}' events in the last {hours}h."

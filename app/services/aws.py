@@ -526,6 +526,7 @@ class AWSService:
         filter_pattern: str,
         minutes: int = 5,
         limit: int = 100,
+        region: str | None = None,
     ) -> list[dict]:
         """Search a CloudWatch log group for events matching a filter pattern.
 
@@ -535,8 +536,20 @@ class AWSService:
         Every caller passes an LLM-generated error string (stack trace
         fragments, error messages) — see _as_exact_phrase for why that
         needs sanitizing before it reaches CloudWatch.
+
+        `region` overrides the session-wide AWS region for this call only —
+        same purpose as get_error_logs()'s region param. Confirmed in
+        production: this parameter was missing entirely, so every caller
+        (DiagnosisAgent's get_error_samples / check_still_occurring /
+        get_occurrence_timeline tools) always queried agent-platform's own
+        region (us-east-1) regardless of where the target log group actually
+        lives (us-east-2 for TargetApp) -- silently hitting
+        AccessDenied/no-such-resource on every single call, degrading
+        diagnosis quality (empty evidence, "Unknown" root causes) without
+        ever surfacing a clear top-level error, since each tool wraps the
+        failure in a plain string return instead of raising.
         """
-        logs = self._client("logs")
+        logs = self._client("logs", region=region)
         from datetime import timedelta
 
         now = datetime.now(timezone.utc)
