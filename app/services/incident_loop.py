@@ -478,6 +478,12 @@ class IncidentLoop:
 
         # ── Triage ────────────────────────────────────────────────────
         incident = incident_store.create(event)
+        # restart_incident() (routes/incidents.py) carries operator notes forward
+        # via event.metadata rather than mutating an existing incident in place —
+        # see that endpoint's docstring for why. Surface them the same way a
+        # normal human_notes value would be: read by FixGenerationAgent's prompt.
+        if event.metadata.get("restart_notes"):
+            incident.human_notes = event.metadata["restart_notes"]
         sess = session_logger.start(incident.id, event.title, event.error_type)
         # Mark harness compliance immediately — docs are loaded once at agent init
         # and injected into every LLM call for this incident.
