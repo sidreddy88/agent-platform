@@ -153,6 +153,21 @@ _BUILTIN_CAMEL = frozenset({
 _MAX_PROSE_CANDIDATES = 8
 
 
+_PASCAL_CASE_RE = re.compile(r"\b[A-Z][A-Za-z0-9]*\b")
+
+
+def _snippet_skeleton(text: str) -> str:
+    """Normalize a code snippet for fuzzy containment checks.
+
+    Strips PascalCase identifiers (Mongoose model names, class names -- the one
+    thing legitimately different between brand-specific sibling files copy-pasting
+    the same handler) and collapses whitespace. Two snippets that are the same
+    handler with only the model name swapped normalize to the same skeleton;
+    snippets with a genuinely different route, method, or structure don't.
+    """
+    return re.sub(r"\s+", " ", _PASCAL_CASE_RE.sub("", text or "")).strip()
+
+
 def _extract_prose_symbols(text: str) -> list[str]:
     """Pull candidate function-name tokens from prose for grounding verification."""
     if not text:
@@ -710,6 +725,40 @@ class DiagnosisAgent(BaseAgent):
             return True  # can't verify — assume it exists
         return self._local_repo.file_exists(p)
 
+    async def _snippet_is_grounded(self, path: str, snippet: str) -> bool:
+        """Check whether a blast_radius snippet's actual code shape appears in `path`.
+
+        _file_exists_in_repo only confirms the FILE is real -- it says nothing about
+        whether the snippet is. Confirmed in production: a diagnosis correctly read
+        crInterviewUsers.js and found its real, still-vulnerable handler, then listed
+        3 sibling files (shoutoutInterviewUsers.js, cityNationalInterviewUsers.js,
+        smallBusinessOfTheDayInterviewUsers.js) as having "the identical missing
+        guard" with detailed, plausible-looking snippets -- one per file, each just
+        the crInterviewUsers.js snippet with the Mongoose model name swapped. All 3
+        files are real and all 3 snippets passed the file-existence check. All 3
+        were also completely fabricated: those files were fixed via earlier, separate
+        incidents and no longer contain anything resembling that code -- different
+        route path, different query method, different structure entirely. The model
+        pattern-completed a plausible sibling from the one file it actually read,
+        rather than calling read_file on the other three, and nothing caught it.
+
+        Not a verbatim match (that would reject legitimate paraphrasing / minor
+        formatting differences) -- uses _snippet_skeleton to tolerate exactly the one
+        thing that legitimately differs between real sibling files (the model name)
+        while still rejecting a snippet whose route, method, or structure isn't
+        actually present anywhere in the file.
+        """
+        if not self._local_repo.ready:
+            return True  # can't verify — fail open, same policy as _file_exists_in_repo
+        try:
+            content = self._local_repo.read_file(path)
+        except Exception:
+            return True  # read failed for a reason unrelated to the snippet — don't punish it
+        skeleton = _snippet_skeleton(snippet)
+        if len(skeleton) < 20:
+            return True  # too short to meaningfully verify — avoid false positives
+        return skeleton in _snippet_skeleton(content)
+
     async def _symbol_exists_in_repo(self, symbol: str) -> bool:
         """Check whether `symbol` appears in the target repo on the default branch.
 
@@ -804,20 +853,33 @@ class DiagnosisAgent(BaseAgent):
                 setattr(result, file_attr, None)
                 setattr(result, fn_attr, None)
 
-        # Verify blast_radius entries — each has a "file" key that may be hallucinated.
+        # Verify blast_radius entries — each has a "file" key AND a "snippet" that may
+        # be hallucinated independently of each other (see _snippet_is_grounded).
         if result.blast_radius:
             verified = []
             dropped = []
             for entry in result.blast_radius:
                 path = entry.get("file", "")
-                if not path or await self._file_exists_in_repo(path):
+                snippet = entry.get("snippet", "")
+                if not path:
                     verified.append(entry)
-                else:
+                    continue
+                if not await self._file_exists_in_repo(path):
                     dropped.append(path)
                     logger.warning(
                         "DiagnosisAgent: blast_radius file '%s' not found in %s/%s — removing entry",
                         path, self._owner, self._repo,
                     )
+                elif snippet and not await self._snippet_is_grounded(path, snippet):
+                    dropped.append(path)
+                    logger.warning(
+                        "DiagnosisAgent: blast_radius snippet for '%s' not found in the file's actual "
+                        "content — likely pattern-completed from another file rather than read — "
+                        "removing entry",
+                        path,
+                    )
+                else:
+                    verified.append(entry)
             result.blast_radius = verified
             if dropped:
                 ungrounded.extend(dropped)
