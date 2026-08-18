@@ -458,7 +458,7 @@ def test_resolve_secondary_targets_uses_full_blast_radius():
 
     targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
 
-    files = [f for f, _ in targets]
+    files = [f for f, _, _ in targets]
     assert "routes/api/inspiringInterviewUsers.js" not in files  # primary excluded
     assert files == [
         "routes/api/shoutoutInterviewUsers.js",
@@ -479,7 +479,38 @@ def test_resolve_secondary_targets_includes_legacy_field_not_in_blast_radius():
 
     targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
 
-    assert targets == [("routes/api/shoutoutInterviewUsers.js", "handler")]
+    assert targets == [("routes/api/shoutoutInterviewUsers.js", "handler", None)]
+
+
+def test_resolve_secondary_targets_carries_the_blast_radius_snippet():
+    """Real production bug (AllInterviews PR #2552): 3 of 5 secondary files got a
+    fabricated new route instead of the real fix, because the secondary pass had
+    only a vague function label and free-text prose to go on -- no actual code to
+    search for. The blast_radius snippet is the concrete anchor that fixes this;
+    it must actually flow through, not get dropped."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[
+            {
+                "file": "routes/api/inspiringInterviewUsers.js",
+                "function": "handler",
+                "snippet": "primary — excluded",
+            },
+            {
+                "file": "routes/api/shoutoutInterviewUsers.js",
+                "function": "(anonymous route handler)",
+                "snippet": "ShoutoutInterviewUser.find({ previewCode: id }).then(users => {",
+            },
+        ],
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
+
+    assert targets == [(
+        "routes/api/shoutoutInterviewUsers.js",
+        "(anonymous route handler)",
+        "ShoutoutInterviewUser.find({ previewCode: id }).then(users => {",
+    )]
 
 
 def test_resolve_secondary_targets_caps_at_max():
