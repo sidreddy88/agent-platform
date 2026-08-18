@@ -230,17 +230,17 @@ async def scan_last_6_weeks() -> Dict[str, Any]:
 
 
 @router.post("/scan/crashes")
-async def scan_crashes_4_weeks() -> Dict[str, Any]:
-    """Scan the last 4 weeks of ECS logs, returning APP_CRASHED events only."""
+async def scan_crashes_5_weeks() -> Dict[str, Any]:
+    """Scan the last 5 weeks of ECS logs, returning APP_CRASHED events only."""
     aws = AWSService()
     raw: str = getattr(settings, "ecs_log_groups", "")
     log_groups = [g.strip() for g in raw.split(",") if g.strip()] if raw else []
     region = getattr(settings, "ecs_log_groups_region", "") or None
 
     _SCAN_CAP = 200
-    _FOUR_WEEKS = 40_320  # 28 * 24 * 60 minutes
+    _FIVE_WEEKS = 50_400  # 35 * 24 * 60 minutes
     await _scan_log(
-        f"Crash scan started — checking {len(log_groups)} log group(s) over last 4 weeks "
+        f"Crash scan started — checking {len(log_groups)} log group(s) over last 5 weeks "
         f"(crashes only, cap: {_SCAN_CAP})"
     )
 
@@ -269,7 +269,7 @@ async def scan_crashes_4_weeks() -> Dict[str, Any]:
             # pattern above stopped hitting the event cap early).
             matches = await asyncio.to_thread(
                 aws.get_error_logs,
-                log_group, minutes=_FOUR_WEEKS, region=region, filter_pattern='"app crashed"',
+                log_group, minutes=_FIVE_WEEKS, region=region, filter_pattern='"app crashed"',
             )
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
