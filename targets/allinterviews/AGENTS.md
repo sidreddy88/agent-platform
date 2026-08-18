@@ -52,17 +52,36 @@ surfaces raw text matches) to search for the same function signature, route path
 vulnerable code shape across the whole repo — not just the one file the stack trace
 pointed at — before finalizing a diagnosis.
 
-For calibration, here's what this looked like in a real incident (illustrative, not an
-exhaustive or current list — always search rather than trust this): an unvalidated
-`previewCode` param cast to `Number` with no `.catch()` crashed the process from
-`inspiringInterviewUsers.js`, and a proper search found the identical handler verbatim
-in 7 more `routes/api/*InterviewUsers.js` siblings (artistOfTheDay, boldJourney,
-cityNational, cr, highlightApp, shoutout, smallBusinessOfTheDay) — none of which had
-crashed yet, but all of which had the same bug waiting to. The agent that shipped the
-fix only found and fixed the one file; the other 7 were found afterward, manually,
-outside the pipeline.
+**Finding the same code shape is not enough — confirm the bug is still there.** Two
+separate checks are both required before you list a file in `blast_radius` or
+`additional_fix`, not just one:
+  1. Does this file contain the same code shape (same route, same query, same
+     structure)?
+  2. Does it *currently* still have the vulnerability — or has this specific
+     occurrence already been fixed? Siblings get patched independently and
+     asynchronously — a prior incident, a manual fix, an earlier PR that only touched
+     some of them. A file matching the route/model naming pattern is not automatically
+     still broken. Read the actual current code at that location (`get_file_contents`
+     / `read_file`, not a memory of what it looked like earlier in this session) and
+     check whether the SAME missing safeguard (validation, type check, `.catch()`) is
+     genuinely still absent. A file that already has the fix is not part of the blast
+     radius — recommending a "fix" for code that's already fixed wastes a real PR and
+     confuses whoever reviews it.
 
-List every affected file you actually find in `blast_radius`, not just the one from the
+For calibration, here's what this looked like in a real incident (illustrative, not an
+exhaustive or current list — always search AND verify current state rather than trust
+this): an unvalidated `previewCode` param cast to `Number` with no `.catch()` crashed
+the process from `inspiringInterviewUsers.js`, and a proper search found the identical
+handler verbatim in 7 more `routes/api/*InterviewUsers.js` siblings (artistOfTheDay,
+boldJourney, cityNational, cr, highlightApp, shoutout, smallBusinessOfTheDay) — at the
+time, none had crashed yet but all had the same bug waiting to. By the time a later
+incident re-diagnosed this exact bug, 5 of those 7 had already been fixed (in earlier,
+separate incidents) and only 2 were still genuinely vulnerable — but the diagnosis
+listed all 7 as needing the fix again, because it matched on route/naming pattern
+without re-checking each file's current code for the actual guard.
+
+List every affected file you actually find AND confirm is still vulnerable in
+`blast_radius` — not files that already have the fix, and not just the one from the
 stack trace.
 
 ## Content Moderation Pipeline
