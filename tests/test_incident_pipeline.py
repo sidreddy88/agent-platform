@@ -160,6 +160,37 @@ class TestIncidentPipeline:
         assert store.get_pr_for_resource(dedup_key) == "https://github.com/org/repo/pull/11"
 
     @pytest.mark.asyncio
+    async def test_restart_notes_metadata_becomes_human_notes(self):
+        """restart_incident() (routes/incidents.py) carries operator notes forward
+        via event.metadata["restart_notes"] rather than mutating an existing
+        incident in place (see that endpoint's docstring for why). _process()
+        must surface them as incident.human_notes the same way a real human note
+        would be, so FixGenerationAgent's prompt actually sees them."""
+        store = IncidentStore.__new__(IncidentStore)
+        store._incidents = {}
+        store._monitor_pr_map = {}
+
+        loop = self._make_loop(
+            triage_result=make_triage_result("real"),
+            diagnosis_result=make_diagnosis_result(0.85),
+            fix_result=make_fix_result(),
+        )
+
+        with (
+            patch("app.services.incident_loop.incident_store", store),
+            patch("app.services.incident_loop.alerting_service") as mock_alert,
+            patch("app.services.incident_loop.approval_service") as mock_approval,
+        ):
+            mock_alert.send_alert = AsyncMock()
+            mock_approval.request_approval = AsyncMock(return_value=MagicMock(id="appr-001"))
+
+            event = make_error_event(metadata={"restarted": True, "restart_notes": "please also handle nulls"})
+            await loop._process(event)
+
+        incident = list(store._incidents.values())[0]
+        assert incident.human_notes == "please also handle nulls"
+
+    @pytest.mark.asyncio
     async def test_noise_event_terminates_at_triage(self):
         """Noise events are terminated without running diagnosis or fix."""
         store = IncidentStore.__new__(IncidentStore)

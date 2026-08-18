@@ -424,39 +424,69 @@ async def restart_incident(incident_id: str, body: RestartBody = RestartBody()) 
     """
     Restart the pipeline for a stuck or failed incident.
 
-    Resets the incident status to OPEN, clears all pipeline fields,
-    and re-queues the original error event so the full pipeline runs again.
-    Optional notes are stored on the incident and injected into the fix prompt.
+    Deletes the existing incident record and re-queues a fresh copy of its error
+    event so the full pipeline runs again as a brand new incident. Optional notes
+    are carried onto the new incident's human_notes and injected into the fix
+    prompt (see IncidentLoop._process's event.metadata["restart_notes"] handling).
+
+    This used to reset the SAME incident's fields in place (status -> OPEN,
+    pr_url -> None, etc.) and re-enqueue its original error_event unchanged.
+    Two compounding real bugs made that never actually work:
+      1. Resetting status to OPEN *before* re-enqueueing made the SQL open-PR
+         dedup gate (incident_store.get_open_pr_for_error, IncidentLoop's
+         "Layer 1") match the incident against ITSELF the instant its event
+         reached _process() -- same error_type/service/description as a
+         non-terminal incident it could find was, of course, always true,
+         since that incident WAS the one it just reset. The re-enqueued event
+         was silently dropped as a duplicate of the very incident being
+         restarted, every single time -- confirmed live: an incident restarted
+         this way sat at status=open forever, zero triage/diagnosis activity,
+         zero errors logged, zero Langfuse traces.
+      2. Even without that self-match, IncidentLoop._process() unconditionally
+         calls incident_store.create() for every event that clears the dedup
+         gates -- it never updates an existing incident by ID. So the freshly
+         reset fields on this incident would never have been populated by the
+         restarted run anyway; a brand new incident row would appear instead,
+         leaving this one permanently orphaned at OPEN.
+      3. Separately (see IncidentStore.forget_pr_mapping's docstring): nulling
+         incident.pr_url in place, without forgetting its monitor_pr_map entry
+         first, orphans that mapping forever -- neither this endpoint nor a
+         later delete_incident() ever gets a chance to clean it up, since by
+         the time delete runs, pr_url is already None. Confirmed live: a
+         restarted-then-deleted incident's stale PR mapping caused the very
+         next fresh trigger for the same bug to be wrongly marked "duplicate"
+         of a long-closed PR.
+    Delete + fresh-trigger (the exact pattern delete_incident + POST /trigger
+    already use, and manually verified end-to-end) sidesteps all three at once.
     """
     incident = incident_store.get(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
 
-    incident.status = IncidentStatus.OPEN
-    incident.triage_decision = None
-    incident.diagnosis = None
-    incident.confidence = None
-    incident.pr_url = None
-    incident.pr_number = None
-    incident.pr_branch = None
-    incident.pr_files_changed = []
-    incident.pr_test_added = False
-    incident.fix_description = None
-    incident.fix_attempted = None
-    incident.human_decision = None
-    incident.outcome = None
-    incident.resolved_at = None
-    incident.triage_completed_at = None
-    incident.diagnosis_completed_at = None
-    incident.pr_created_at = None
-    incident.human_notes = body.notes or None
-    incident_store.update(incident)
+    pending_event_store.forget_matching(incident.error_event)
+    if incident.pr_url:
+        incident_store.forget_pr_mapping(incident.pr_url)
+    incident_store.delete(incident_id)
+    await broadcast({"type": "incident_deleted", "incident_id": incident_id})
 
-    # Mark as restarted so the staleness gate doesn't drop it
-    incident.error_event.metadata["restarted"] = True
-    incident.error_event.detected_at = datetime.now(timezone.utc)
-    await event_queue.enqueue(incident.error_event)
-    return {"status": "restarted", "incident_id": incident_id}
+    event = ErrorEvent(
+        source=incident.error_event.source,
+        error_type=incident.error_event.error_type,
+        title=incident.error_event.title,
+        description=incident.error_event.description,
+        service=incident.error_event.service,
+        resource_id=incident.error_event.resource_id,
+        category=incident.error_event.category,
+        metadata={
+            **incident.error_event.metadata,
+            "restarted": True,
+            "restarted_from_incident_id": incident_id,
+        },
+    )
+    if body.notes:
+        event.metadata["restart_notes"] = body.notes
+    await event_queue.enqueue(event)
+    return {"status": "restarted", "original_incident_id": incident_id, "new_event_id": event.id}
 
 
 @router.post("/{incident_id}/approve-fix")
