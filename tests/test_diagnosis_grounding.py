@@ -16,8 +16,16 @@ import pytest
 from app.agents.diagnosis import CONFIDENCE_THRESHOLD, DiagnosisAgent, DiagnosisResult
 
 
-def _make_agent(search_code_side_effect):
-    """Build a DiagnosisAgent with stubbed external services."""
+def _make_agent(search_code_side_effect, local_repo=None):
+    """Build a DiagnosisAgent with stubbed external services.
+
+    local_repo defaults to a mock with ready=False, which makes
+    _file_exists_in_repo / _snippet_is_grounded fail open (return True) —
+    i.e. "can't verify, assume it's fine" — matching this file's original
+    tests, which only exercise function-name grounding via _github.search_code,
+    not the local-clone-backed file/snippet checks. Pass an explicit local_repo
+    (ready=True, with a real read_file) to test those checks directly.
+    """
     agent = DiagnosisAgent.__new__(DiagnosisAgent)
     agent._owner = "owner"
     agent._repo = "repo"
@@ -25,6 +33,7 @@ def _make_agent(search_code_side_effect):
     agent._rag = None
     agent._github = MagicMock()
     agent._github.search_code = AsyncMock(side_effect=search_code_side_effect)
+    agent._local_repo = local_repo if local_repo is not None else MagicMock(ready=False)
     return agent
 
 
@@ -52,7 +61,14 @@ async def test_grounding_passes_when_function_exists():
 
 @pytest.mark.asyncio
 async def test_grounding_nulls_fabricated_function():
-    """Reproduces the processAndStoreImage failure: name doesn't exist → must be nulled."""
+    """Reproduces the processAndStoreImage failure: name doesn't exist → nulled.
+
+    Per commit 3599fb0 ("decouple function/file grounding"), a bad function name
+    nulls ONLY the function field — not affected_file. Express anonymous route
+    handlers have no searchable symbol, and the file path alone is still useful
+    to the fix agent, so it's kept rather than thrown away. Confidence is only
+    capped when affected_file is ALSO null.
+    """
     async def not_found(owner, repo, query):
         return []
 
@@ -68,14 +84,16 @@ async def test_grounding_nulls_fabricated_function():
     out = await agent._enforce_grounding(result)
 
     assert out.affected_function is None
-    assert out.affected_file is None
-    assert out.confidence <= 0.65
-    assert out.escalate is True  # 0.65 < CONFIDENCE_THRESHOLD (0.70)
-    assert any("GROUNDING FAILURE" in e and "processAndStoreImage" in e for e in out.evidence)
+    assert out.affected_file == "routes/services/image-service.js"  # kept, not nulled
+    assert out.confidence == 0.91  # not capped — the file is still verified
+    assert out.escalate is False
+    assert any("GROUNDING NOTE" in e and "processAndStoreImage" in e for e in out.evidence)
 
 
 @pytest.mark.asyncio
 async def test_grounding_nulls_fabricated_secondary_function():
+    """A fabricated additional_fix_function nulls only itself, not additional_fix_file
+    (same decoupled-grounding rule as the primary field — see commit 3599fb0)."""
     async def selective(owner, repo, query):
         # Primary function exists; secondary does not.
         if "primaryFn" in query:
@@ -97,10 +115,10 @@ async def test_grounding_nulls_fabricated_secondary_function():
 
     assert out.affected_function == "primaryFn"  # primary survives
     assert out.affected_file == "a.js"
-    assert out.additional_fix_function is None  # secondary nulled
-    assert out.additional_fix_file is None
-    assert out.confidence <= 0.65
-    assert out.escalate is True
+    assert out.additional_fix_function is None  # secondary function nulled
+    assert out.additional_fix_file == "b.js"  # secondary file kept — affected_file also verified
+    assert out.confidence == 0.85  # not capped — affected_file is verified
+    assert out.escalate is False
 
 
 @pytest.mark.asyncio
@@ -378,6 +396,109 @@ async def test_grounding_no_blast_radius_warning_when_callers_present():
 
     out = await agent._enforce_grounding(result)
     assert all("BLAST RADIUS WARNING" not in e for e in out.evidence)
+
+
+# ---------------------------------------------------------------------------
+# additional_fix_file content-currency grounding (PR #178)
+#
+# Real production bug: the diagnosis claimed "Apply the identical guard to
+# brandAInterviewUsers.js and smallBusinessOfTheDayInterviewUsers.js — both
+# confirmed by grep to still have the unguarded pattern," but both files had
+# already been fixed by earlier, unrelated incidents. additional_fix_file only
+# checked file EXISTENCE (always true — the file is real), never whether the
+# claimed vulnerability was still CURRENTLY there. blast_radius entries already
+# had this protection via _snippet_is_grounded; additional_fix_file did not.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_additional_fix_nulled_when_snippet_not_grounded():
+    """A claimed-still-vulnerable file that no longer contains the snippet is nulled."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        "router.get('/getPreviewUser/:id', (req, res) => {\n"
+        "  const { id } = req.params;\n"
+        "  if (!/^\\d+$/.test(id)) { return res.status(400).json({message: 'Invalid'}); }\n"
+        "  Model.find({ previewCode: Number(id) }).then(users => res.json(users));\n"
+        "});"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix="apply identical guard",
+        additional_fix_file="routes/api/brandAInterviewUsers.js",
+        additional_fix_snippet=(
+            "router.get('/getPreviewUser/:id', (req, res) => {\n"
+            "  const { id } = req.params;\n"
+            "  Model.find({ previewCode: id }).then(users => res.json(users));\n"
+            "});"
+        ),
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.additional_fix_file is None
+    assert out.additional_fix_snippet is None
+    assert out.additional_fix_function is None
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_survives_when_snippet_grounded():
+    """A claimed-still-vulnerable file that genuinely still has the pattern survives."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    vulnerable_snippet = (
+        "router.get('/getPreviewUser/:id', (req, res) => {\n"
+        "  const { id } = req.params;\n"
+        "  Model.find({ previewCode: id }).then(users => res.json(users));\n"
+        "});"
+    )
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = vulnerable_snippet
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix="apply identical guard",
+        additional_fix_file="routes/api/brandBInterviewUsers.js",
+        additional_fix_snippet=vulnerable_snippet,
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.additional_fix_file == "routes/api/brandBInterviewUsers.js"
+    assert out.additional_fix_snippet == vulnerable_snippet
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_not_penalized_when_snippet_omitted():
+    """No snippet supplied at all falls back to the pre-existing (file-existence-only)
+    behavior — doesn't retroactively break the narrower "another entry point needs the
+    same top-level fix" use of this field, which never carried a snippet."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    agent = _make_agent(found)  # default local_repo: ready=False, fails open
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix="add strictQuery to server.js too",
+        additional_fix_file="server.js",
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.additional_fix_file == "server.js"
 
 
 @pytest.mark.asyncio
