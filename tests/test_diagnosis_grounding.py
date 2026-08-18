@@ -479,10 +479,10 @@ async def test_additional_fix_survives_when_snippet_grounded():
 
 
 @pytest.mark.asyncio
-async def test_additional_fix_not_penalized_when_snippet_omitted():
-    """No snippet supplied at all falls back to the pre-existing (file-existence-only)
-    behavior — doesn't retroactively break the narrower "another entry point needs the
-    same top-level fix" use of this field, which never carried a snippet."""
+async def test_additional_fix_survives_when_cannot_verify_at_all():
+    """When _local_repo isn't ready (can't verify anything), fail open — same
+    policy as every other check in this file. This is the ONLY case a missing
+    snippet doesn't cost the claim its file."""
     async def found(owner, repo, query):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
@@ -499,6 +499,87 @@ async def test_additional_fix_not_penalized_when_snippet_omitted():
     out = await agent._enforce_grounding(result)
 
     assert out.additional_fix_file == "server.js"
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_nulled_when_snippet_omitted_but_verifiable():
+    """Real production bug, recurred AFTER the snippet-grounding check above already
+    existed: the model just left additional_fix_snippet out entirely, which skipped
+    the check completely and let an unverified "confirmed still-vulnerable" claim
+    through. A missing snippet is no more trustworthy than a wrong one when we CAN
+    verify — both must be discarded, not just the wrong one."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "router.get('/getPreviewUser/:id', ...) { /* already has guard */ }"
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix="apply identical guard to brandAInterviewUsers.js — confirmed still vulnerable",
+        additional_fix_file="routes/api/brandAInterviewUsers.js",
+        # no additional_fix_snippet supplied
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.additional_fix_file is None
+    assert out.additional_fix_function is None
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_prose_flagged_when_file_field_null_but_prose_names_files():
+    """Real production bug: additional_fix_file correctly came back null (no wrong
+    commit followed), but additional_fix prose still asserted specific files were
+    'confirmed still-vulnerable' with nothing backing it — displayed verbatim on the
+    incident dashboard as if it were checked. Prose making an unverifiable per-file
+    claim must be flagged, not presented as fact."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix=(
+            "Apply the identical isNaN guard to brandAInterviewUsers.js and "
+            "smallBusinessOfTheDayInterviewUsers.js — both confirmed still-vulnerable."
+        ),
+        additional_fix_file=None,
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert any("ADDITIONAL_FIX UNVERIFIED" in e for e in out.evidence)
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_prose_not_flagged_without_file_mentions():
+    """Prose that doesn't name a specific file (e.g. a pure conceptual description)
+    isn't penalized — the flag is specifically for unverifiable per-file claims."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix="Also validate the same field server-side on the client form.",
+        additional_fix_file=None,
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert all("ADDITIONAL_FIX UNVERIFIED" not in e for e in out.evidence)
 
 
 @pytest.mark.asyncio
