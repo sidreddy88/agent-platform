@@ -1383,6 +1383,21 @@ If non-"none", populate `contract_change_detail` with one short
 sentence describing what changes. The fix agent will surface this
 loudly so every caller is updated.
 
+`root_cause` MUST quote route paths, endpoint names, and other identifying
+strings VERBATIM from the code you actually read — never paraphrase or
+invent a "cleaner-looking" version. Real production bug: a diagnosis wrote
+"GET /get-preview/:previewCode route handler" when the real route (visible
+in the file it correctly diagnosed and fixed) was "/getPreviewUser/:id" —
+a fabricated path that never appeared anywhere in the codebase. The
+structured affected_file/affected_function fields were still correctly
+grounded, so the actual code change was right, but the self-critique step
+(which sees root_cause alongside the real diff) read the fabricated route
+name, couldn't find it anywhere near the diff, and flagged a false
+"targets the wrong route" failure on an otherwise-correct fix — wasting a
+review cycle on a problem that didn't exist. Copy the exact string as it
+appears in the file; if you're describing it from memory rather than
+something you just read, that's the signal to go re-read the file first.
+
 Answer with ONLY a valid JSON object:
 {{
   "root_cause": "precise description of WHY the error occurs — name the upstream cause",

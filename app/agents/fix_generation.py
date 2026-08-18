@@ -2074,7 +2074,9 @@ class FixGenerationAgent(BaseAgent):
 
         prompt = (
             f"A production fix was generated. Critique it as a skeptical senior reviewer.\n\n"
-            f"ROOT CAUSE: {incident.diagnosis}\n"
+            f"FILE: {file_path or '(not specified)'}\n"
+            f"ROOT CAUSE (diagnosis's own description — may be imprecise; the code below is "
+            f"ground truth if the two ever disagree): {incident.diagnosis}\n"
             f"ERROR: {incident.error_event.description or incident.error_event.title}\n\n"
             f"OLD CODE:\n{old_code[:800]}\n\n"
             f"NEW CODE:\n{new_code[:800]}\n"
@@ -2097,6 +2099,11 @@ class FixGenerationAgent(BaseAgent):
             f"Then answer:\n"
             f"5. Does the fix address the root cause, or does it just suppress/convert the error? "
             f"Apply the symptom-fix checklist above.\n\n"
+            f"Do NOT fail the fix solely because a route path, endpoint name, or other string in "
+            f"ROOT CAUSE's wording doesn't literally appear in the OLD/NEW CODE shown above — the "
+            f"code is ground truth, ROOT CAUSE is a paraphrase that can be imprecise even when the "
+            f"code change itself is correct. Judge the CODE change against the ERROR, not against "
+            f"ROOT CAUSE's exact wording.\n\n"
             f"FINAL LINE — must be exactly one of: LOOKS CORRECT / NEEDS REVIEW / LIKELY WRONG"
         )
         try:
