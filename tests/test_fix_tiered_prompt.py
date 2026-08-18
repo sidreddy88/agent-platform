@@ -566,3 +566,29 @@ def test_skipped_secondary_files_empty_when_all_fixed():
     )
 
     assert skipped == []
+
+
+# ---------------------------------------------------------------------------
+# ROOT CAUSE RULE 6 — reason about validation shape, don't reach for
+# isNaN(Number(x)) as a reflexive habit
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_prompt_warns_against_loose_number_coercion_validation():
+    """Real feedback on a shipped fix: FixGenerationAgent used isNaN(Number(id))
+    to validate a previewCode param. That accepts '1e5' (-> 100000) and '0x1A'
+    (-> 26) as 'valid numbers', neither of which is the plain digit string the
+    field actually expects -- a materially weaker guard than what's already
+    correct elsewhere in this codebase. The prompt must make the agent reason
+    about the actual expected shape rather than hardcoding one 'correct' regex."""
+    agent = _make_agent()
+    incident = _make_incident(diagnosis="x")
+
+    text = await _capture_prompt(agent, incident)
+
+    assert "isNaN(Number(x))" in text
+    assert "1e5" in text and "100000" in text  # scientific notation pitfall
+    assert "0x1A" in text  # hex pitfall
+    # Must not mandate one specific regex as THE answer -- the point is to
+    # teach the reasoning, not hardcode a pattern for the agent to parrot.
+    assert "/^\\d+$/" not in text
