@@ -581,6 +581,15 @@ class IncidentLoop:
                 try:
                     from app.agents.error_clarity import ErrorClarityAgent
                     clarity_agent = ErrorClarityAgent()
+                    # Without this, clarity_agent._llm is a bare LLMService (only
+                    # has complete()) and every complete_with_tools() call inside
+                    # analyze()'s tool loop raises AttributeError on iteration 0 --
+                    # confirmed in production: every real invocation silently
+                    # produced 0 additions/patterns and fell back to the generic
+                    # "could not identify observability gaps" message, masking a
+                    # total failure as a legitimate "nothing found" conclusion.
+                    # Mirrors the same override already done for self._fix_agent.
+                    clarity_agent._llm = llm_gateway.get_llm_service_for("clarity")
                     clarity = await clarity_agent.analyze(incident)
                     incident.clarity_summary = clarity.summary
                     incident.clarity_pr_url = clarity.pr_url

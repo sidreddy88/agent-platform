@@ -1,6 +1,7 @@
 """
 Logs API — fetch recent error logs from CloudWatch log groups.
 """
+import asyncio
 from typing import Any, Dict
 
 from fastapi import APIRouter, Query
@@ -22,7 +23,9 @@ async def get_ecs_logs(minutes: int = Query(default=60, ge=5, le=1440)) -> Dict[
     results = []
     for group in log_groups:
         try:
-            events = aws.get_error_logs(group, minutes=minutes, region=region)
+            # Off the event loop thread -- synchronous boto3, see aws.py's
+            # get_error_logs docstring.
+            events = await asyncio.to_thread(aws.get_error_logs, group, minutes=minutes, region=region)
             results.append({
                 "log_group": group,
                 "error_count": len(events),
