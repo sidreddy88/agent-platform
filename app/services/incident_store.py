@@ -197,6 +197,40 @@ class IncidentStore:
         except Exception as exc:
             logger.warning("[IncidentStore] DB write (monitor_pr_map) failed: %s", exc)
 
+    def forget_pr_mapping(self, pr_url: str) -> int:
+        """Remove every monitor_pr_map entry pointing at `pr_url`.
+
+        Real production bug: TriageAgent.get_occurrence_count's duplicate check
+        (_check_duplicate_pr in triage.py) reads this map by (error_type, service,
+        description-prefix) key and, separately, by monitor_id -- but nothing ever
+        writes to it EXCEPT set_pr_for_resource, called once when a PR is first
+        created. Closing that PR later (it was never merged, e.g. because
+        FixGenerationAgent's fix was wrong or incomplete) doesn't touch this map at
+        all. Confirmed live: a PR was closed, its incident deleted, and the very
+        next occurrence of the exact same crash was still triaged "duplicate --
+        open PR already covers this" citing that same closed PR, because the
+        composite key (same error_type + service + near-identical description
+        prefix for a recurring crash) still resolved to the stale URL. Deleting the
+        incident alone doesn't fix this -- the map is a separate table, keyed
+        differently, with no wiring back to incident deletion until this method.
+
+        Returns the number of entries removed.
+        """
+        stale_keys = [k for k, v in self._monitor_pr_map.items() if v == pr_url]
+        for k in stale_keys:
+            del self._monitor_pr_map[k]
+        if stale_keys:
+            from sqlalchemy import delete as sa_delete
+            from app.services.database import engine, tables
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        sa_delete(tables.monitor_pr_map).where(tables.monitor_pr_map.c.pr_url == pr_url)
+                    )
+            except Exception as exc:
+                logger.warning("[IncidentStore] DB delete (monitor_pr_map) failed: %s", exc)
+        return len(stale_keys)
+
     # ------------------------------------------------------------------
     # Metrics
     # ------------------------------------------------------------------
