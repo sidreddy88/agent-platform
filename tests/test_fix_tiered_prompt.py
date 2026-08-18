@@ -533,6 +533,79 @@ def test_resolve_secondary_targets_empty_when_no_signal():
     assert agent._resolve_secondary_targets(incident, "routes/api/primary.js") == []
 
 
+def test_resolve_secondary_targets_uses_additional_fix_targets():
+    """The actual real-world trigger for this whole field: a diagnosis correctly
+    identified 3 vulnerable sibling files, but diagnosis_additional_fix_file could
+    only ever carry one of them. additional_fix_targets must surface ALL of them."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_additional_fix_targets=[
+            {
+                "file": "routes/api/brandBInterviewUsers.js",
+                "function": "",
+                "snippet": "Model.find({ previewCode: id })",
+            },
+            {
+                "file": "routes/api/inspiringInterviewUsers.js",
+                "function": "",
+                "snippet": "Model.find({ previewCode: id })",
+            },
+        ],
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/brandCInterviewUsers.js")
+
+    files = [f for f, _, _ in targets]
+    assert files == [
+        "routes/api/brandBInterviewUsers.js",
+        "routes/api/inspiringInterviewUsers.js",
+    ]
+
+
+def test_resolve_secondary_targets_dedups_across_all_three_sources():
+    """blast_radius, additional_fix_targets, and the legacy additional_fix_file can
+    all name the same file — it must appear once, not three times."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[
+            {"file": "routes/api/brandAInterviewUsers.js", "function": "handler", "snippet": "s1"},
+        ],
+        diagnosis_additional_fix_targets=[
+            {"file": "routes/api/brandAInterviewUsers.js", "function": "handler", "snippet": "s2"},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": "s3"},
+        ],
+        diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",
+        diagnosis_additional_fix_function="handler",
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/brandCInterviewUsers.js")
+
+    files = [f for f, _, _ in targets]
+    assert files == ["routes/api/brandAInterviewUsers.js", "routes/api/brandBInterviewUsers.js"]
+    # blast_radius's entry wins for the duplicate — first source checked, not overwritten later
+    assert targets[0] == ("routes/api/brandAInterviewUsers.js", "handler", "s1")
+
+
+def test_resolve_secondary_targets_carries_additional_fix_file_snippet():
+    """diagnosis_additional_fix_snippet (PR #178) must actually reach the secondary
+    pass's anchor search for the single-file legacy path, same as blast_radius
+    entries always could -- this was dropped on the floor when the field was added."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",
+        diagnosis_additional_fix_function="handler",
+        diagnosis_additional_fix_snippet="Model.find({ previewCode: id })",
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/brandCInterviewUsers.js")
+
+    assert targets == [(
+        "routes/api/brandAInterviewUsers.js",
+        "handler",
+        "Model.find({ previewCode: id })",
+    )]
+
+
 # ---------------------------------------------------------------------------
 # _skipped_secondary_files — regression test for a real production crash
 # ---------------------------------------------------------------------------

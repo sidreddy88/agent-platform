@@ -1352,10 +1352,19 @@ class FixGenerationAgent(BaseAgent):
         now that DiagnosisAgent's search-driven grounding (see targets/target-app/
         AGENTS.md) routinely finds every sibling in a copy-pasted-per-brand bug — a
         real incident found 7 additional files, but the pipeline only ever committed
-        a fix to 1 of them. diagnosis_blast_radius is the structured, already-searched
-        list of affected (file, function) pairs — use ALL of it, not just the one
-        legacy field, deduped and capped so a runaway diagnosis can't fan out into an
-        unbounded number of commits.
+        a fix to 1 of them. Three sources feed this now, all deduped by path and
+        capped so a runaway diagnosis can't fan out into an unbounded number of
+        commits:
+          - diagnosis_blast_radius — structured caller list (populated for functions
+            with real callers; usually empty for top-level route handlers).
+          - diagnosis_additional_fix_targets — structured multi-file list, purpose-
+            built for the copy-pasted-per-brand case (see DiagnosisAgent's
+            additional_fix_targets/_enforce_grounding): a real incident correctly
+            identified 3 vulnerable sibling files in one diagnosis, but
+            diagnosis_additional_fix_file could only ever carry one of them — this
+            field exists so ALL of them can actually get fixed in the same PR.
+          - diagnosis_additional_fix_file — legacy single-file field, kept for the
+            narrower "one other entry point" case.
 
         Returns (file, function, snippet) — the snippet (when the diagnosis captured
         one) is what actually lets a secondary pass locate real code instead of
@@ -1369,9 +1378,19 @@ class FixGenerationAgent(BaseAgent):
             fn = entry.get("function") or None
             snippet = entry.get("snippet") or None
             seen[file] = (fn, snippet)
+        for entry in incident.diagnosis_additional_fix_targets or []:
+            file = entry.get("file")
+            if not file or file == primary_file or file in seen:
+                continue
+            fn = entry.get("function") or None
+            snippet = entry.get("snippet") or None
+            seen[file] = (fn, snippet)
         secondary_path = incident.diagnosis_additional_fix_file
         if secondary_path and secondary_path != primary_file and secondary_path not in seen:
-            seen[secondary_path] = (incident.diagnosis_additional_fix_function, None)
+            seen[secondary_path] = (
+                incident.diagnosis_additional_fix_function,
+                incident.diagnosis_additional_fix_snippet,
+            )
         return [(f, fn, snip) for f, (fn, snip) in list(seen.items())[:_MAX_SECONDARY_FIXES]]
 
     @staticmethod
