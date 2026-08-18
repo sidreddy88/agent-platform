@@ -243,6 +243,17 @@ class DiagnosisResult:
     # even when that file was fixed by an earlier, separate incident — the exact failure
     # mode blast_radius entries were already protected against, replayed through this
     # sibling field instead.
+    additional_fix_targets: list[dict] = field(default_factory=list)
+    # ^ each entry: {"file": str, "function": str|None, "snippet": str|None}. The
+    # multi-file counterpart to additional_fix_file/_function/_snippet above. Real
+    # production bug: a diagnosis correctly identified 3 sibling files needing the
+    # identical per-brand-duplication fix in its PROSE, but additional_fix_file can
+    # only ever carry ONE — FixGenerationAgent structurally never had a path to attempt
+    # more than one secondary fix, even when the diagnosis got every file right.
+    # additional_fix_file/_function/_snippet remain for the single-file case (e.g.
+    # "this other top-level entry point also needs the fix"); use this list instead
+    # whenever more than one sibling file is genuinely affected. Grounded the same way
+    # as blast_radius entries — see _enforce_grounding.
     reproduction_confirmed: bool = False
     escalate: bool = False      # True when confidence < CONFIDENCE_THRESHOLD
     # Pre-fix-reasoning fields. FixGenerationAgent reads these as constraints
@@ -254,6 +265,24 @@ class DiagnosisResult:
     contract_change: str = "none"  # "none" | "signature" | "return_type" | "side_effect"
     contract_change_detail: str | None = None
     raw_llm: str = ""
+
+
+def _parse_file_entries(raw: object) -> list[dict]:
+    """Normalise a {file, function, snippet} entry list from parsed JSON.
+
+    Shared by blast_radius and additional_fix_targets — both use the identical shape.
+    Drops entries missing a usable file path rather than raising.
+    """
+    entries: list[dict] = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, dict) and entry.get("file"):
+                entries.append({
+                    "file": str(entry["file"]),
+                    "function": str(entry.get("function", "") or ""),
+                    "snippet": str(entry.get("snippet", "") or "")[:400],
+                })
+    return entries
 
 
 def _extract_json_object(text: str) -> str | None:
@@ -311,18 +340,11 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
                 continue
             confidence = float(data.get("confidence", 0.5))
 
-            # Normalise blast_radius — accept the structured form from the
-            # prompt schema, drop entries that don't have a usable file path.
-            raw_br = data.get("blast_radius", []) or []
-            blast_radius: list[dict] = []
-            if isinstance(raw_br, list):
-                for entry in raw_br:
-                    if isinstance(entry, dict) and entry.get("file"):
-                        blast_radius.append({
-                            "file": str(entry["file"]),
-                            "function": str(entry.get("function", "") or ""),
-                            "snippet": str(entry.get("snippet", "") or "")[:400],
-                        })
+            # Normalise blast_radius / additional_fix_targets — both accept the same
+            # {file, function, snippet} shape from the prompt schema; drop entries
+            # missing a usable file path.
+            blast_radius = _parse_file_entries(data.get("blast_radius"))
+            additional_fix_targets = _parse_file_entries(data.get("additional_fix_targets"))
 
             contract_change = str(data.get("contract_change", "none") or "none").lower()
             if contract_change not in ("none", "signature", "return_type", "side_effect"):
@@ -342,6 +364,7 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
                 additional_fix_function=data.get("additional_fix_function"),
                 additional_fix_file=data.get("additional_fix_file"),
                 additional_fix_snippet=data.get("additional_fix_snippet"),
+                additional_fix_targets=additional_fix_targets,
                 reproduction_confirmed=bool(data.get("reproduction_confirmed", False)),
                 escalate=confidence < CONFIDENCE_THRESHOLD,
                 blast_radius=blast_radius,
@@ -909,41 +932,6 @@ class DiagnosisAgent(BaseAgent):
                 result.additional_fix_function = None
                 result.additional_fix_snippet = None
 
-        # additional_fix (prose) can still assert "file X is confirmed still
-        # vulnerable" even after the structured field above ends up None — either
-        # because it just got nulled for lacking evidence, or because the model
-        # never populated additional_fix_file in the first place and only ever put
-        # its claim in prose. Real production bug: this is exactly what happened —
-        # additional_fix_file came back null (correctly; no wrong commit followed),
-        # but additional_fix still read "...confirmed still-vulnerable by reading
-        # current code" naming two files, displayed verbatim on the incident
-        # dashboard with nothing to indicate it was never verified. A claim with no
-        # structured, checkable file attached is not more trustworthy for being in
-        # prose instead — same policy as above: no verified file/snippet pairing
-        # means don't assert "confirmed" in what a human reads.
-        if (
-            result.additional_fix_file is None
-            and result.additional_fix
-            and self._local_repo.ready
-            and _FILE_MENTION_RE.search(result.additional_fix)
-        ):
-            logger.warning(
-                "DiagnosisAgent: additional_fix prose names file(s) with no verified "
-                "additional_fix_file/_snippet backing the claim — %r — flagging as unconfirmed",
-                result.additional_fix,
-            )
-            ungrounded.append(f"additional_fix prose: {result.additional_fix[:120]}")
-            result.evidence = [
-                *result.evidence,
-                (
-                    "ADDITIONAL_FIX UNVERIFIED: the additional_fix text names specific file(s) "
-                    "as still vulnerable, but no additional_fix_file/additional_fix_snippet "
-                    "survived grounding to back that claim — treat the file list in "
-                    "additional_fix as unconfirmed, not as evidence any of them are actually "
-                    "still broken."
-                ),
-            ]
-
         # Verify blast_radius entries — each has a "file" key AND a "snippet" that may
         # be hallucinated independently of each other (see _snippet_is_grounded).
         if result.blast_radius:
@@ -974,6 +962,74 @@ class DiagnosisAgent(BaseAgent):
             result.blast_radius = verified
             if dropped:
                 ungrounded.extend(dropped)
+
+        # Verify additional_fix_targets entries — the multi-file counterpart to
+        # additional_fix_file. Same fabrication risk, so same policy as the
+        # single-file check above: a snippet is MANDATORY here (not merely checked
+        # when present, like blast_radius above) whenever we can verify at all,
+        # since this field exists specifically to replace the hallucination-prone
+        # "name some sibling files in prose" pattern with something checkable.
+        if result.additional_fix_targets and self._local_repo.ready:
+            verified_targets = []
+            dropped_targets = []
+            for entry in result.additional_fix_targets:
+                path = entry.get("file", "")
+                snippet = entry.get("snippet", "")
+                if not path:
+                    continue
+                if not snippet or not await self._snippet_is_grounded(path, snippet):
+                    dropped_targets.append(path)
+                    logger.warning(
+                        "DiagnosisAgent: additional_fix_targets entry for '%s' has no "
+                        "verifiable snippet (missing, or doesn't match the file's actual "
+                        "current content) — claim is unconfirmed — removing entry",
+                        path,
+                    )
+                else:
+                    verified_targets.append(entry)
+            result.additional_fix_targets = verified_targets
+            if dropped_targets:
+                ungrounded.extend(dropped_targets)
+
+        # additional_fix (prose) can still assert "file X is confirmed still
+        # vulnerable" even after BOTH structured channels above end up empty —
+        # either because they just got nulled/dropped for lacking evidence, or
+        # because the model never populated either in the first place and only
+        # ever put its claim in prose. Real production bug: this is exactly what
+        # happened — additional_fix_file came back null (correctly; no wrong
+        # commit followed), but additional_fix still read "...confirmed
+        # still-vulnerable by reading current code" naming two files, displayed
+        # verbatim on the incident dashboard with nothing to indicate it was never
+        # verified. A claim with no structured, checkable file attached is not
+        # more trustworthy for being in prose instead — same policy as above: no
+        # verified file/snippet pairing means don't assert "confirmed" in what a
+        # human reads. Checked against the POST-verification state of both fields
+        # (not the raw parse) — a claim backed by a genuinely-grounded
+        # additional_fix_targets entry isn't flagged.
+        if (
+            result.additional_fix_file is None
+            and not result.additional_fix_targets
+            and result.additional_fix
+            and self._local_repo.ready
+            and _FILE_MENTION_RE.search(result.additional_fix)
+        ):
+            logger.warning(
+                "DiagnosisAgent: additional_fix prose names file(s) with no verified "
+                "additional_fix_file/additional_fix_targets backing the claim — %r — "
+                "flagging as unconfirmed",
+                result.additional_fix,
+            )
+            ungrounded.append(f"additional_fix prose: {result.additional_fix[:120]}")
+            result.evidence = [
+                *result.evidence,
+                (
+                    "ADDITIONAL_FIX UNVERIFIED: the additional_fix text names specific file(s) "
+                    "as still vulnerable, but no additional_fix_file/additional_fix_targets "
+                    "survived grounding to back that claim — treat the file list in "
+                    "additional_fix as unconfirmed, not as evidence any of them are actually "
+                    "still broken."
+                ),
+            ]
 
         if ungrounded:
             note = (
@@ -1190,31 +1246,39 @@ Complete each step before moving to the next.
        the incident — e.g. the Fargate task file for a scheduled-task warning)
      - After identifying the primary, explicitly check whether server.js, index.js,
        or app.js ALSO contains the same issue (call get_file_contents on each if grep
-       returned them). If they do, put the most important one in additional_fix_file.
+       returned them). If EXACTLY ONE other file needs the fix, put it in
+       additional_fix_file. If TWO OR MORE files need it (e.g. a copy-pasted-per-
+       brand/tenant/region duplication convention — check the target's own agent
+       guide/notes for this), use additional_fix_targets instead — a list, one
+       entry per file: {{"file": ..., "function": ... or null, "snippet": ...}}.
+       additional_fix_file can only ever carry ONE file; naming several files in its
+       prose description while leaving the structured field singular means the fix
+       agent structurally cannot act on any but (at most) one of them.
      - Set additional_fix to a short description of the identical change needed
        (e.g. "Add mongoose.set('strictQuery', true) before mongoose.connect in server.js")
    Do NOT list worker files (routes/workers/**) as the primary or secondary unless
    the incident is specifically about a worker. Focus on top-level entry points.
-   The fix agent will commit both files in the same PR.
+   The fix agent will commit every file named in additional_fix_file /
+   additional_fix_targets in the same PR.
 
-   MANDATORY, for ANY additional_fix_file, not only per-target duplication cases:
-   naming it requires PROOF, not a name-pattern guess or a memory of an earlier
-   incident. Call get_file_contents on that EXACT file and copy a real excerpt of
-   its CURRENT vulnerable code into additional_fix_snippet — do NOT reuse or adapt
-   the primary file's snippet with names swapped; that is pattern-completion, not
-   reading. This matters most when the codebase has a copy-pasted-per-target
-   duplication convention (check the target's own agent guide/notes — e.g. one
-   near-identical file per brand/tenant/region): a file matching the naming
-   convention is not automatically still broken. Siblings get patched
-   independently by earlier, separate incidents, so the same file you "remember"
-   being vulnerable may already be fixed. additional_fix_file with no
-   additional_fix_snippet, or a snippet that isn't verbatim from that file, is
+   MANDATORY, for every entry in additional_fix_file/additional_fix_targets, not
+   only per-target duplication cases: naming a file requires PROOF, not a name-
+   pattern guess or a memory of an earlier incident. Call get_file_contents on that
+   EXACT file and copy a real excerpt of its CURRENT vulnerable code into the
+   matching snippet field — do NOT reuse or adapt the primary file's snippet with
+   names swapped; that is pattern-completion, not reading. This matters most when
+   the codebase has a copy-pasted-per-target duplication convention: a file
+   matching the naming convention is not automatically still broken. Siblings get
+   patched independently by earlier, separate incidents, so a file you "remember"
+   being vulnerable may already be fixed — confirm each one individually, don't
+   assume the whole family is still broken because one member was. Any entry with
+   no snippet, or a snippet that isn't verbatim from that specific file, is
    discarded — not kept as an unverified guess. This applies even if you only
-   describe the secondary file in additional_fix prose without setting
-   additional_fix_file: prose naming a specific file as "confirmed" still
-   vulnerable with no grounded file/snippet behind it gets flagged as unverified
-   too. You gain nothing by guessing instead of reading the file — an omitted
-   claim costs nothing; a wrong one wastes a review cycle.
+   describe secondary files in additional_fix prose without setting
+   additional_fix_file/additional_fix_targets: prose naming specific files as
+   "confirmed" still vulnerable with nothing structured and grounded behind it gets
+   flagged as unverified too. You gain nothing by guessing instead of reading each
+   file — an omitted claim costs nothing; a wrong one wastes a review cycle.
 
 6. get_file_contents — fetch the FULL source of the file(s) identified in step 5.
    RAG returns 400-char fragments — you MUST read the full file to understand the code.
@@ -1334,6 +1398,9 @@ Answer with ONLY a valid JSON object:
   "additional_fix_function": "secondaryFunctionName or null",
   "additional_fix_file": "path/to/secondary/file.js or null",
   "additional_fix_snippet": "verbatim excerpt of the CURRENT vulnerable code you actually read in additional_fix_file, or null",
+  "additional_fix_targets": [
+    {{"file": "path/to/sibling.js", "function": "handlerName or null", "snippet": "verbatim excerpt of the CURRENT vulnerable code you actually read in THIS file"}}
+  ],
   "reproduction_confirmed": true,
   "blast_radius": [
     {{"file": "path/to/caller.js", "function": "callerFunction", "snippet": "const x = primaryFunctionToFix(...)"}}
