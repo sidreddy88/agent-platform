@@ -230,6 +230,13 @@ class DiagnosisResult:
     additional_fix: str | None = None          # secondary change description
     additional_fix_function: str | None = None # secondary function name
     additional_fix_file: str | None = None     # secondary file path
+    additional_fix_snippet: str | None = None  # excerpt of the vulnerable code CURRENTLY
+    # in additional_fix_file, so _enforce_grounding can verify it's still actually there
+    # (see _snippet_is_grounded) instead of just checking the file exists. Without this,
+    # a claim like "still broken in shoutoutInterviewUsers.js" sails through ungrounded
+    # even when that file was fixed by an earlier, separate incident — the exact failure
+    # mode blast_radius entries were already protected against, replayed through this
+    # sibling field instead.
     reproduction_confirmed: bool = False
     escalate: bool = False      # True when confidence < CONFIDENCE_THRESHOLD
     # Pre-fix-reasoning fields. FixGenerationAgent reads these as constraints
@@ -328,6 +335,7 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
                 additional_fix=data.get("additional_fix"),
                 additional_fix_function=data.get("additional_fix_function"),
                 additional_fix_file=data.get("additional_fix_file"),
+                additional_fix_snippet=data.get("additional_fix_snippet"),
                 reproduction_confirmed=bool(data.get("reproduction_confirmed", False)),
                 escalate=confidence < CONFIDENCE_THRESHOLD,
                 blast_radius=blast_radius,
@@ -863,6 +871,31 @@ class DiagnosisAgent(BaseAgent):
                 setattr(result, file_attr, None)
                 setattr(result, fn_attr, None)
 
+        # Verify additional_fix_file is still CURRENTLY vulnerable, not just that the
+        # file exists. _file_exists_in_repo above only confirms the path is real — it
+        # says nothing about whether the claimed bug is still there. Real production
+        # bug: the diagnosis claimed "Apply the identical guard to
+        # shoutoutInterviewUsers.js and smallBusinessOfTheDayInterviewUsers.js — both
+        # confirmed by grep to still have the unguarded pattern," but both had already
+        # been fixed by earlier, unrelated incidents. additional_fix_file has no
+        # equivalent of blast_radius's per-entry snippet check below, so the fabricated
+        # "still broken" claim sailed straight through. Only check when a snippet was
+        # actually supplied — its absence doesn't retroactively invalidate the older,
+        # narrower "another entry point needs the same top-level fix" use of this field.
+        if result.additional_fix_file and result.additional_fix_snippet:
+            path = result.additional_fix_file
+            if not await self._snippet_is_grounded(path, result.additional_fix_snippet):
+                logger.warning(
+                    "DiagnosisAgent: additional_fix_snippet for '%s' not found in the file's "
+                    "actual current content — claimed vulnerability is likely already fixed "
+                    "or fabricated — nulling additional_fix_file/_function/_snippet",
+                    path,
+                )
+                ungrounded.append(path)
+                result.additional_fix_file = None
+                result.additional_fix_function = None
+                result.additional_fix_snippet = None
+
         # Verify blast_radius entries — each has a "file" key AND a "snippet" that may
         # be hallucinated independently of each other (see _snippet_is_grounded).
         if result.blast_radius:
@@ -1116,6 +1149,19 @@ Complete each step before moving to the next.
    the incident is specifically about a worker. Focus on top-level entry points.
    The fix agent will commit both files in the same PR.
 
+   MANDATORY when this codebase has a copy-pasted-per-target duplication convention
+   (check the target's own agent guide/notes for this — e.g. one near-identical file
+   per brand/tenant/region): naming additional_fix_file requires PROOF, not a name-
+   pattern guess. Call get_file_contents on that EXACT file and copy a real excerpt of
+   its CURRENT vulnerable code into additional_fix_snippet — do NOT reuse or adapt the
+   primary file's snippet with names swapped; that is pattern-completion, not reading.
+   A file matching the naming convention is not automatically still broken: siblings
+   get patched independently by earlier, separate incidents, so the same file you
+   "remember" being vulnerable may already be fixed. additional_fix_file with no
+   additional_fix_snippet, or a snippet that isn't verbatim from that file, will be
+   treated as unconfirmed and discarded — you gain nothing by guessing instead of
+   reading the file.
+
 6. get_file_contents — fetch the FULL source of the file(s) identified in step 5.
    RAG returns 400-char fragments — you MUST read the full file to understand the code.
    Do not stop at one file. If that file spawns workers, calls helpers, or delegates to
@@ -1233,6 +1279,7 @@ Answer with ONLY a valid JSON object:
   "additional_fix": "optional: describe any secondary change in a different function/file, or null",
   "additional_fix_function": "secondaryFunctionName or null",
   "additional_fix_file": "path/to/secondary/file.js or null",
+  "additional_fix_snippet": "verbatim excerpt of the CURRENT vulnerable code you actually read in additional_fix_file, or null",
   "reproduction_confirmed": true,
   "blast_radius": [
     {{"file": "path/to/caller.js", "function": "callerFunction", "snippet": "const x = primaryFunctionToFix(...)"}}
