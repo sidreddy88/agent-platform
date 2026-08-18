@@ -19,7 +19,7 @@ from app.services.aws import AWSService
 from app.services.detection import classify_ecs_log
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
-from app.services.pending_events import pending_event_store
+from app.services.pending_events import content_signature, pending_event_store
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,22 @@ async def _scan_log(message: str, level: str = "info") -> None:
     await broadcast({"type": "scan_progress", "ts": _scan_ts(), "level": level, "message": message})
 
 
+def _has_active_incident(event: ErrorEvent) -> bool:
+    """True if an incident already exists (any status) for this crash signature.
+
+    A scan should skip re-queuing a signature that's either already resolved (a
+    fix was merged for it) or still actively in flight (awaiting approval, being
+    fixed, sitting in fix_failed) -- there's no value in spawning a second
+    incident for either case. Once a human explicitly deletes the incident
+    (wanting a fresh look -- e.g. an attempt that never actually merged), it
+    drops out of incident_store and this returns False again, so the very next
+    scan treats a real recurrence as new instead of silently absorbing it into
+    pending_events' occurrence counter with no visible incident anywhere.
+    """
+    sig = content_signature(event)
+    return any(content_signature(i.error_event) == sig for i in incident_store.list_all())
+
+
 async def _run_scan(days: int) -> Dict[str, Any]:
     aws = AWSService()
     raw: str = getattr(settings, "ecs_log_groups", "")
@@ -98,7 +114,16 @@ async def _run_scan(days: int) -> Dict[str, Any]:
         service = log_group.rstrip("/").split("/")[-1]
         await _scan_log(f"Scanning {log_group} ...")
         try:
-            matches = aws.get_error_logs(log_group, minutes=minutes, region=region)
+            # get_error_logs is synchronous boto3 -- run it off the event loop
+            # thread. Its own wall-clock budget bounds a single call, but even a
+            # bounded multi-second blocking call in-line here would freeze every
+            # other request (websocket updates, other API calls) for that whole
+            # duration, since this route is otherwise pure async. Confirmed in
+            # production: a scan against a rarely-matching filter hung the
+            # entire app, not just the scan request, for 10+ minutes.
+            matches = await asyncio.to_thread(
+                aws.get_error_logs, log_group, minutes=minutes, region=region,
+            )
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
             seen: set[tuple[str, str, str]] = set()
@@ -137,6 +162,13 @@ async def _run_scan(days: int) -> Dict[str, Any]:
                         "timestamp": log["timestamp"],
                     },
                 )
+
+                if _has_active_incident(event):
+                    await _scan_log(
+                        f"  ✓ already tracked (incident exists): [{error_type}] {msg[:80].strip()}",
+                        level="info",
+                    )
+                    continue
 
                 pe, is_new = pending_event_store.add(event)
                 if pe is None:
@@ -222,7 +254,23 @@ async def scan_crashes_4_weeks() -> Dict[str, Any]:
         service = log_group.rstrip("/").split("/")[-1]
         await _scan_log(f"Scanning {log_group} ...")
         try:
-            matches = aws.get_error_logs(log_group, minutes=_FOUR_WEEKS, region=region)
+            # Scoped to crash-shaped lines only (classify_ecs_log's ONLY crash
+            # trigger is the literal substring "app crashed") -- not the generic
+            # multi-category default. Sharing that default pattern here would
+            # spend the day-chunked fetch's shared event budget on generic
+            # Errors/DeprecationWarnings this scan is about to throw away
+            # anyway, starving out an older, rarer real crash line. Confirmed
+            # in production: a real crash from ~36 hours back never appeared in
+            # a 4-week "crashes only" scan because a noisier recent day
+            # consumed the whole budget before the chunk loop reached that far.
+            # Off the event loop thread -- see the comment on the equivalent
+            # call in _run_scan for why (this is exactly the call that hung
+            # the whole app in production once the narrower crash-only
+            # pattern above stopped hitting the event cap early).
+            matches = await asyncio.to_thread(
+                aws.get_error_logs,
+                log_group, minutes=_FOUR_WEEKS, region=region, filter_pattern='"app crashed"',
+            )
             await _scan_log(f"  {len(matches)} raw log entries fetched")
 
             seen: set[tuple[str, str, str]] = set()
@@ -265,6 +313,13 @@ async def scan_crashes_4_weeks() -> Dict[str, Any]:
                         "timestamp": log["timestamp"],
                     },
                 )
+
+                if _has_active_incident(event):
+                    await _scan_log(
+                        f"  ✓ already tracked (incident exists): [{error_type}] {msg[:80].strip()}",
+                        level="info",
+                    )
+                    continue
 
                 pe, is_new = pending_event_store.add(event)
                 if pe is None:
@@ -337,7 +392,13 @@ async def get_metrics() -> Dict[str, Any]:
 @router.delete("")
 async def clear_incidents() -> Dict[str, Any]:
     """Delete all non-resolved incidents from the store (memory + disk). Resolved incidents are preserved."""
+    # Capture before clear() — its return value is just a count, and once an
+    # incident is gone we lose the error_event needed to forget its pending-events
+    # dedup fingerprint (see delete_incident's comment for why that matters).
+    to_forget = [i for i in incident_store.list_all() if i.status != IncidentStatus.RESOLVED]
     count = incident_store.clear()
+    for incident in to_forget:
+        pending_event_store.forget_matching(incident.error_event)
     remaining = [_serialize(i) for i in incident_store.list_all()]
     await broadcast({"type": "incidents_cleared", "incidents": remaining, "deleted": count})
     return {"deleted": count}
@@ -583,6 +644,11 @@ async def delete_incident(incident_id: str) -> Dict[str, Any]:
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
     incident_store.delete(incident_id)
+    # Also forget the pending-events dedup fingerprint for this incident's error —
+    # otherwise a real recurrence of the exact same crash gets silently absorbed as
+    # "occurrences++" on a pending record with no visible incident, and a future
+    # crash scan reports "no new crashes" even though this is still live.
+    pending_event_store.forget_matching(incident.error_event)
     await broadcast({"type": "incident_deleted", "id": incident_id})
     return {"status": "deleted", "incident_id": incident_id}
 

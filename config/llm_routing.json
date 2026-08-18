@@ -7,6 +7,7 @@
     "triage":    { "model": "claude-haiku-4-5-20251001", "fallback_model": "claude-sonnet-4-6" },
     "diagnosis": { "model": "claude-sonnet-4-6", "max_tokens": 8192 },
     "fix":       { "model": "claude-sonnet-4-6", "max_tokens": 8192 },
+    "clarity":   { "model": "claude-sonnet-4-6", "max_tokens": 8192 },
     "review":    { "model": "openai/gpt-4.1" },
     "critique":  { "model": "claude-haiku-4-5-20251001", "fallback_model": "claude-sonnet-4-6" }
   },

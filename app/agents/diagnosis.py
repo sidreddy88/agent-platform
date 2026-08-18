@@ -907,6 +907,45 @@ class DiagnosisAgent(BaseAgent):
 
         return result
 
+    @staticmethod
+    def _build_parse_retry_prompt(original_prompt: str, failed_answer: str) -> str:
+        """Retry prompt for a non-JSON diagnosis response.
+
+        self.run() starts a completely fresh ReAct loop -- it does NOT resume the
+        failed attempt's conversation or tool-call history. A bare "please format as
+        JSON this time" retry throws away all the investigative work (file reads,
+        sibling searches) the first attempt already did and asks the model to redo it
+        independently from scratch. Since that's a fresh, non-deterministic run, it
+        can come back with LESS than the first attempt found -- not because anything
+        was verified as wrong, just because a second independent search explored
+        differently. Confirmed in production: attempt 1 (which failed to parse -- it
+        wrote a markdown incident report instead of JSON, apparently after a log-tool
+        call hit a real AccessDenied and derailed its output format) found previewCode
+        bugs in 3 files including crInterviewUsers.js. The retry succeeded at
+        producing valid JSON, but silently dropped crInterviewUsers.js from
+        blast_radius entirely -- neither confirmed vulnerable nor fixed, just never
+        mentioned again.
+
+        Fix: hand the retry the failed attempt's own raw text and ask it to convert
+        that analysis to valid JSON, rather than re-investigating from zero. This
+        can't be perfect (the first attempt might itself have been wrong about some
+        file), but it stops a pure formatting hiccup from silently erasing real
+        findings via reasoning non-determinism.
+        """
+        return (
+            original_prompt
+            + "\n\nYour previous response could not be parsed as JSON. Here is "
+              "what you wrote:\n\n---\n"
+            + failed_answer[:6000]
+            + "\n---\n\nConvert YOUR OWN analysis above into a single valid JSON "
+              "object matching the schema. Preserve every file and finding you "
+              "already identified there — do not drop a sibling file from "
+              "blast_radius/additional_fix just because you're reformatting, and "
+              "do not re-verify claims you already made unless something above "
+              "looks wrong on a second read. Return ONLY the JSON object — no "
+              "markdown fences, no commentary, no trailing text."
+        )
+
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
         await self._ensure_local_repo()
@@ -1146,15 +1185,9 @@ Confidence guide:
         result = await self.run(prompt)
         parsed = _parse_diagnosis_result(result.answer)
         if parsed.root_cause == _PARSE_FAILURE_ROOT_CAUSE:
-            # One retry with an explicit reminder. Most parse failures are
-            # one-shot drift (extra prose, dropped closing fence on a
-            # truncated reply); a stricter prompt usually clears it.
-            retry_prompt = (
-                prompt
-                + "\n\nIMPORTANT: Your previous response could not be parsed."
-                  " Return ONLY a single valid JSON object matching the schema above."
-                  " No markdown fences, no commentary, no trailing text."
-            )
+            # See _build_parse_retry_prompt's docstring for why this hands the retry
+            # the failed attempt's own text instead of a bare "format as JSON" nudge.
+            retry_prompt = self._build_parse_retry_prompt(prompt, result.answer)
             logger.info("DiagnosisAgent retrying after parse failure")
             result = await self.run(retry_prompt)
             parsed = _parse_diagnosis_result(result.answer)

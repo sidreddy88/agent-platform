@@ -347,3 +347,222 @@ async def test_prompt_falls_back_to_search_callers_when_blast_radius_empty(monke
     text = captured_prompt.get("text", "")
     assert "TIER 2" in text
     assert "src/searched_caller.js" in text
+
+
+# ---------------------------------------------------------------------------
+# additional_fix_section — must not invite exploring files this call can't edit
+# ---------------------------------------------------------------------------
+
+async def _capture_prompt(agent, incident, **kwargs):
+    """Run _generate_fix with a stub LLM that ends the turn immediately, return the prompt."""
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_complete_with_tools(messages=None, tools=None, system=None, **_kwargs):
+        if messages:
+            for m in messages:
+                if isinstance(m, dict) and m.get("role") == "user":
+                    captured_prompt["text"] = (
+                        m.get("content", "") if isinstance(m.get("content"), str) else str(m.get("content"))
+                    )
+                    break
+        return ("", [], "end_turn")
+
+    agent._llm = MagicMock()
+    agent._llm.complete_with_tools = AsyncMock(side_effect=fake_complete_with_tools)
+    agent._with_harness = MagicMock(return_value="(harness)")
+
+    try:
+        await agent._generate_fix(
+            content=kwargs.pop("content", "function target() {}"),
+            function_name=kwargs.pop("function_name", "target"),
+            incident=incident,
+            file_path=kwargs.pop("file_path", "src/target.js"),
+            context_bundle=kwargs.pop("context_bundle", {"callers": [], "tests": [], "imports": []}),
+            **kwargs,
+        )
+    except Exception:
+        pass
+    return captured_prompt.get("text", "")
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_section_forbids_reading_other_files_with_secondary_target():
+    """When a single secondary file IS structurally supported, the prompt must still
+    forbid exploring it here — it gets its own dedicated _generate_fix() pass in run()."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_additional_fix=(
+            "Apply the identical fix to all 7 remaining sibling files: shoutout.js, cr.js, "
+            "boldJourney.js, artistOfTheDay.js, cityNational.js, highlightApp.js, smallBiz.js"
+        ),
+        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_function="(anonymous route handler)",
+    )
+
+    text = await _capture_prompt(agent, incident)
+
+    assert "SECONDARY FIX NEEDED" not in text  # old wording that invited exploration
+    assert "fixed automatically in a separate pass" in text
+    assert "Do NOT call read_file on any file other than src/target.js" in text
+    assert "shoutoutInterviewUsers.js" in text  # still surfaced, just as background
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_section_marks_unsupported_siblings_out_of_scope():
+    """When diagnosis names siblings but no single diagnosis_additional_fix_file was set,
+    the prompt must say those files are simply out of scope for this call — not fetchable."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_additional_fix="Same bug exists in 7 sibling *InterviewUsers.js files.",
+        diagnosis_additional_fix_file=None,
+        diagnosis_additional_fix_function=None,
+    )
+
+    text = await _capture_prompt(agent, incident)
+
+    assert "are NOT fixed automatically and are out of scope for this call" in text
+    assert "Do NOT call read_file on any file other than src/target.js" in text
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_section_absent_when_no_additional_fix():
+    agent = _make_agent()
+    incident = _make_incident(diagnosis_additional_fix=None)
+
+    text = await _capture_prompt(agent, incident)
+
+    assert "DIAGNOSIS NOTE" not in text
+    assert "out of scope for this call" not in text
+
+
+# ---------------------------------------------------------------------------
+# _resolve_secondary_targets — every sibling from blast_radius, not just the
+# one legacy diagnosis_additional_fix_file
+# ---------------------------------------------------------------------------
+
+def test_resolve_secondary_targets_uses_full_blast_radius():
+    """A diagnosis naming 7 siblings via blast_radius must yield all 7, not just
+    the single diagnosis_additional_fix_file — this was the actual production bug
+    (incident 4caba3f3: diagnosis found 8 files, only 1 got a committed fix)."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[
+            {"file": "routes/api/inspiringInterviewUsers.js", "function": "handler"},  # primary — excluded
+            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "handler"},
+            {"file": "routes/api/crInterviewUsers.js", "function": "handler"},
+            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "handler"},
+        ],
+        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_function="handler",
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
+
+    files = [f for f, _, _ in targets]
+    assert "routes/api/inspiringInterviewUsers.js" not in files  # primary excluded
+    assert files == [
+        "routes/api/shoutoutInterviewUsers.js",
+        "routes/api/crInterviewUsers.js",
+        "routes/api/boldJourneyInterviewUsers.js",
+    ]  # shoutout not duplicated even though it's also diagnosis_additional_fix_file
+
+
+def test_resolve_secondary_targets_includes_legacy_field_not_in_blast_radius():
+    """diagnosis_additional_fix_file must still count when blast_radius omits it —
+    don't regress the pre-existing single-secondary-file path."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[],
+        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_function="handler",
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
+
+    assert targets == [("routes/api/shoutoutInterviewUsers.js", "handler", None)]
+
+
+def test_resolve_secondary_targets_carries_the_blast_radius_snippet():
+    """Real production bug (AllInterviews PR #2552): 3 of 5 secondary files got a
+    fabricated new route instead of the real fix, because the secondary pass had
+    only a vague function label and free-text prose to go on -- no actual code to
+    search for. The blast_radius snippet is the concrete anchor that fixes this;
+    it must actually flow through, not get dropped."""
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[
+            {
+                "file": "routes/api/inspiringInterviewUsers.js",
+                "function": "handler",
+                "snippet": "primary — excluded",
+            },
+            {
+                "file": "routes/api/shoutoutInterviewUsers.js",
+                "function": "(anonymous route handler)",
+                "snippet": "ShoutoutInterviewUser.find({ previewCode: id }).then(users => {",
+            },
+        ],
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
+
+    assert targets == [(
+        "routes/api/shoutoutInterviewUsers.js",
+        "(anonymous route handler)",
+        "ShoutoutInterviewUser.find({ previewCode: id }).then(users => {",
+    )]
+
+
+def test_resolve_secondary_targets_caps_at_max():
+    agent = _make_agent()
+    incident = _make_incident(
+        diagnosis_blast_radius=[
+            {"file": f"routes/api/brand{i}.js", "function": "handler"} for i in range(20)
+        ],
+    )
+
+    targets = agent._resolve_secondary_targets(incident, "routes/api/primary.js")
+
+    assert len(targets) == 10  # _MAX_SECONDARY_FIXES
+
+
+def test_resolve_secondary_targets_empty_when_no_signal():
+    agent = _make_agent()
+    incident = _make_incident(diagnosis_blast_radius=[], diagnosis_additional_fix_file=None)
+
+    assert agent._resolve_secondary_targets(incident, "routes/api/primary.js") == []
+
+
+# ---------------------------------------------------------------------------
+# _skipped_secondary_files — regression test for a real production crash
+# ---------------------------------------------------------------------------
+
+def test_skipped_secondary_files_handles_the_3_tuple_shape():
+    """Real production bug: FixGenerationAgent raised 'too many values to
+    unpack (expected 2)' on every multi-file incident, because this exact
+    computation was an inline `for p, _ in secondary_targets` left over from
+    before _resolve_secondary_targets() was extended to 3-tuples. Any incident
+    with diagnosis_blast_radius populated hit this on every single run."""
+    agent = _make_agent()
+    targets = [
+        ("routes/api/shoutoutInterviewUsers.js", "handler", "snippet A"),
+        ("routes/api/crInterviewUsers.js", None, None),
+        ("routes/api/boldJourneyInterviewUsers.js", "handler", "snippet C"),
+    ]
+
+    skipped = agent._skipped_secondary_files(
+        targets, secondary_files_changed=["routes/api/shoutoutInterviewUsers.js"],
+    )
+
+    assert skipped == ["routes/api/crInterviewUsers.js", "routes/api/boldJourneyInterviewUsers.js"]
+
+
+def test_skipped_secondary_files_empty_when_all_fixed():
+    agent = _make_agent()
+    targets = [("routes/api/a.js", "fn", None), ("routes/api/b.js", None, "snip")]
+
+    skipped = agent._skipped_secondary_files(
+        targets, secondary_files_changed=["routes/api/a.js", "routes/api/b.js"],
+    )
+
+    assert skipped == []

@@ -45,6 +45,12 @@ except Exception as _cg_err:
 
 PR_BASE = "staging"  # all fix PRs target this branch; fix branches are created from its tip
 
+# Upper bound on how many additional files _resolve_secondary_targets() will commit
+# fixes to in one PR. Bounds cost/blast-radius when a diagnosis's blast_radius list
+# is large — this codebase's brand fan-out tops out around 8 sibling files today, so
+# 10 gives headroom without being unbounded.
+_MAX_SECONDARY_FIXES = 10
+
 
 # ---------------------------------------------------------------------------
 # Result
@@ -575,18 +581,56 @@ class FixGenerationAgent(BaseAgent):
             )
             steps.append(f"✓ Committed fix (sha={commit_sha[:8]})")
 
-            # ── 5b. Secondary file fix (same issue, different file) ───────
-            secondary_path = incident.diagnosis_additional_fix_file
-            if secondary_path and incident.diagnosis_additional_fix:
+            # ── 5b. Secondary file fixes (same issue, other files) ────────
+            # One dedicated _generate_fix() pass per additional file the diagnosis
+            # named — see _resolve_secondary_targets(). Each pass is single-file
+            # scoped exactly like the primary one; best-effort per file so one
+            # failure doesn't block the others or the primary fix already committed.
+            secondary_targets = self._resolve_secondary_targets(incident, file_path)
+            secondary_files_changed: list[str] = []
+            for secondary_path, secondary_fn, secondary_snippet in secondary_targets:
                 try:
                     sec_content, sec_sha = await self._read_file(secondary_path, ref=PR_BASE)
-                    sec_fn = incident.diagnosis_additional_fix_function or "(module-level)"
+                    sec_fn = secondary_fn or "(module-level)"
+                    # Ground this in the ACTUAL primary diff + diagnosis snippet, not
+                    # free-text prose alone. Real incident (AllInterviews PR #2552):
+                    # 2 of 5 files got the correct fix applied to the existing
+                    # handler; the other 3 -- given only a prose description of the
+                    # bug with no concrete code to search for -- fabricated an
+                    # entirely new, never-called route ("/by-preview-code") instead
+                    # of finding and editing the real vulnerable handler, because
+                    # nothing forced them to locate real matching code first. The
+                    # exact before/after text from the primary fix is the strongest
+                    # anchor available: search for that same pattern here.
+                    if old_function:
+                        primary_change = f"BEFORE:\n{old_function[:1500]}\n\nAFTER:\n{new_function[:1500]}\n\n"
+                    elif patches:
+                        primary_change = "\n\n".join(
+                            f"BEFORE:\n{p_old[:600]}\n\nAFTER:\n{p_new[:600]}" for p_old, p_new in patches[:3]
+                        ) + "\n\n"
+                    else:
+                        primary_change = ""
+                    anchor = (
+                        f"The identical bug was found and fixed in {file_path}. "
+                        f"Here is the EXACT change that was applied there:\n\n{primary_change}"
+                    )
+                    if secondary_snippet:
+                        anchor += (
+                            f"The diagnosis found this specific code in THIS file "
+                            f"({secondary_path}) with the same bug:\n{secondary_snippet[:800]}\n\n"
+                        )
+                    anchor += (
+                        "Find the matching existing code in THIS file — same route path, "
+                        "same field name, same query/find call — and apply the equivalent "
+                        "fix to it. Do NOT write a new function, route, or endpoint that "
+                        "doesn't already exist here. If you cannot locate closely matching "
+                        "existing code in this file after searching, make NO edit at all "
+                        "and call end_turn — leaving this file unchanged is correct when "
+                        "the pattern genuinely isn't here; inventing new code is not."
+                    )
                     sec_old, sec_new, sec_patches, _ = await self._generate_fix(
                         sec_content, sec_fn, incident, secondary_path,
-                        test_failures=(
-                            f"The identical fix was already applied to {file_path}. "
-                            f"Apply the same change here: {incident.diagnosis_additional_fix}"
-                        ),
+                        test_failures=anchor,
                     )
                     if sec_old or sec_patches:
                         sec_new_content = self._apply_all_edits(sec_content, sec_old, sec_new, sec_patches)
@@ -596,11 +640,26 @@ class FixGenerationAgent(BaseAgent):
                             branch_name, sec_sha,
                         )
                         steps.append(f"✓ Committed secondary fix to {secondary_path}")
+                        secondary_files_changed.append(secondary_path)
                     else:
                         steps.append(f"⚠ Secondary fix skipped — LLM produced no edits for {secondary_path}")
                 except Exception as exc:
-                    steps.append(f"⚠ Secondary fix failed ({secondary_path}): {exc} — proceeding with primary only")
+                    steps.append(f"⚠ Secondary fix failed ({secondary_path}): {exc} — proceeding without it")
                     logger.warning("[FixGen] Secondary fix error for %s: %s", secondary_path, exc)
+
+            if secondary_targets:
+                fixed = "\n".join(f"- `{p}`" for p in secondary_files_changed) or "(none)"
+                skipped = self._skipped_secondary_files(secondary_targets, secondary_files_changed)
+                skipped_note = (
+                    "\n\nNot fixed automatically (review manually): "
+                    + ", ".join(f"`{p}`" for p in skipped)
+                    if skipped else ""
+                )
+                pr_body += (
+                    f"\n\n## Same bug, other files\n"
+                    f"Diagnosis found {len(secondary_targets)} additional affected file(s). "
+                    f"Fixed automatically in this PR:\n{fixed}{skipped_note}"
+                )
 
             pr_number, pr_url = await self._github.create_pull_request(
                 self._owner, self._repo,
@@ -637,8 +696,9 @@ class FixGenerationAgent(BaseAgent):
             pr_url=pr_url,
             pr_number=pr_number,
             branch=branch_name,
-            fix_description=f"Fix applied to {function_name} in {file_path}",
-            files_changed=[file_path],
+            fix_description=f"Fix applied to {function_name} in {file_path}"
+            + (f" (+{len(secondary_files_changed)} sibling file(s))" if secondary_files_changed else ""),
+            files_changed=[file_path, *secondary_files_changed],
             test_added=False,
             commit_sha=commit_sha,
             target_file=file_path,
@@ -1282,6 +1342,56 @@ class FixGenerationAgent(BaseAgent):
             lines.append(f"{head}\n{snippet}" if snippet else head)
         return "\n\n".join(lines)
 
+    def _resolve_secondary_targets(
+        self, incident: IncidentState, primary_file: str
+    ) -> list[tuple[str, str | None, str | None]]:
+        """Every OTHER file the diagnosis says needs the identical fix.
+
+        Historically only `diagnosis_additional_fix_file` (a single field) drove the
+        one dedicated secondary-file pass in fix_with_steps(). That undercounts badly
+        now that DiagnosisAgent's search-driven grounding (see targets/allinterviews/
+        AGENTS.md) routinely finds every sibling in a copy-pasted-per-brand bug — a
+        real incident found 7 additional files, but the pipeline only ever committed
+        a fix to 1 of them. diagnosis_blast_radius is the structured, already-searched
+        list of affected (file, function) pairs — use ALL of it, not just the one
+        legacy field, deduped and capped so a runaway diagnosis can't fan out into an
+        unbounded number of commits.
+
+        Returns (file, function, snippet) — the snippet (when the diagnosis captured
+        one) is what actually lets a secondary pass locate real code instead of
+        guessing; see the comment where this is consumed in fix_with_steps().
+        """
+        seen: dict[str, tuple[str | None, str | None]] = {}
+        for entry in incident.diagnosis_blast_radius or []:
+            file = entry.get("file")
+            if not file or file == primary_file or file in seen:
+                continue
+            fn = entry.get("function") or None
+            snippet = entry.get("snippet") or None
+            seen[file] = (fn, snippet)
+        secondary_path = incident.diagnosis_additional_fix_file
+        if secondary_path and secondary_path != primary_file and secondary_path not in seen:
+            seen[secondary_path] = (incident.diagnosis_additional_fix_function, None)
+        return [(f, fn, snip) for f, (fn, snip) in list(seen.items())[:_MAX_SECONDARY_FIXES]]
+
+    @staticmethod
+    def _skipped_secondary_files(
+        secondary_targets: list[tuple[str, str | None, str | None]],
+        secondary_files_changed: list[str],
+    ) -> list[str]:
+        """Which secondary targets did NOT end up with a committed fix.
+
+        Pulled out of the inline PR-body-building code specifically so it's
+        unit-testable on its own: a real production bug (FixGenerationAgent
+        raising "too many values to unpack (expected 2)" on every multi-file
+        incident) was exactly this logic silently left unpacking 2-tuples after
+        _resolve_secondary_targets() was extended to return 3-tuples (file,
+        function, snippet) in an earlier change. An inline list comprehension
+        buried in fix_with_steps() has no way to be covered by a targeted test;
+        this does.
+        """
+        return [f for f, _fn, _snip in secondary_targets if f not in secondary_files_changed]
+
     def _parse_local_imports(self, file_path: str, content: str) -> list[str]:
         """
         Parse local (relative) import paths from JS/TS/Python file content and resolve
@@ -1545,10 +1655,30 @@ class FixGenerationAgent(BaseAgent):
                 secondary_loc = f" ({incident.diagnosis_additional_fix_function} in {incident.diagnosis_additional_fix_file})"
             elif incident.diagnosis_additional_fix_function:
                 secondary_loc = f" ({incident.diagnosis_additional_fix_function})"
+            # This section used to invite the model to `read_file` the secondary
+            # location "for context" — but apply_edit/patch_line can only ever touch
+            # `file_path` (the file already fetched into this call). When a diagnosis
+            # names more affected files than the single diagnosis_additional_fix_file
+            # this pipeline can act on (a live incident found 7 — see PR referencing
+            # this comment), the model would dutifully read_file every one of them
+            # looking for a way to fix them, burn the entire iteration budget on
+            # unreachable files, and never call patch_line/apply_edit on the one file
+            # it actually can fix. diagnosis_additional_fix_file (if set) already gets
+            # its own dedicated _generate_fix() pass after this one returns (see the
+            # "Secondary file fix" step in run()) — so this pass must not attempt it.
             additional_fix_section = (
-                f"\nSECONDARY FIX NEEDED{secondary_loc}: {incident.diagnosis_additional_fix}\n"
-                f"Note: Your primary target is {function_name} in {file_path}. "
-                f"Use read_file to also understand the secondary location and include that context in your analysis.\n"
+                f"\nDIAGNOSIS NOTE (background only — do not act on this in this call): "
+                f"{incident.diagnosis_additional_fix}\n"
+                f"Your ONLY target in this call is {function_name} in {file_path}. "
+                + (
+                    f"The single additional location{secondary_loc} is fixed automatically "
+                    f"in a separate pass right after this one — do not read or touch it here.\n"
+                    if incident.diagnosis_additional_fix_file else
+                    "Any other files named above are NOT fixed automatically and are out of "
+                    "scope for this call.\n"
+                )
+                + f"Do NOT call read_file on any file other than {file_path} because of this "
+                f"note — stay on target and call patch_line/apply_edit for it now.\n"
             )
 
         # Pre-extract the target function so the LLM never needs to reproduce old text.
@@ -1611,7 +1741,11 @@ class FixGenerationAgent(BaseAgent):
             f"2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value — "
             f"every return path must include the complete structure callers depend on.\n"
             f"3. The fix must handle ALL invalid inputs, not just the one that triggered this error.\n"
-            f"4. No unrelated cleanup, logging, or comments.\n\n"
+            f"4. No unrelated cleanup, logging, or comments.\n"
+            f"5. Never invent a new function, route, or endpoint that doesn't already exist as your "
+            f"'fix' for an existing bug. Find and edit the REAL vulnerable code. If you cannot locate "
+            f"it in this file after actually searching, make no edit and call end_turn — that is "
+            f"correct; fabricating unrelated new code is not.\n\n"
             f"IF THE TARGET FUNCTION IS NOT IN THIS FILE:\n"
             f"The function '{function_name}' may be defined in a different file than the one shown above "
             f"(e.g. it may be a backend service called by this frontend component, or a helper in a "
@@ -1645,7 +1779,11 @@ class FixGenerationAgent(BaseAgent):
         _total_pruned_chars = 0
         import json as _json
 
-        for iteration in range(14):
+        # 14 -> 20: modest headroom now that the prompt above no longer invites
+        # exploring files this loop has no ability to edit (see additional_fix_section
+        # comment). Legitimate single-file work — read tests/callers, patch, then scan
+        # for adjacent issues — can still reasonably need more than 14 turns.
+        for iteration in range(20):
             if iteration > 0 and iteration % 3 == 0:
                 messages, pruned = _prune_tool_results(messages)
                 _total_pruned_chars += pruned
