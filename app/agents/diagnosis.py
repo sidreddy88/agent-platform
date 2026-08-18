@@ -155,6 +155,12 @@ _MAX_PROSE_CANDIDATES = 8
 
 _PASCAL_CASE_RE = re.compile(r"\b[A-Z][A-Za-z0-9]*\b")
 
+# Matches a plausible repo-relative source file mention in prose, e.g.
+# "shoutoutInterviewUsers.js" or "routes/api/foo.js" — used to catch
+# additional_fix prose asserting a specific file is still vulnerable with no
+# grounded additional_fix_file/_snippet behind the claim (see _enforce_grounding).
+_FILE_MENTION_RE = re.compile(r"\b[\w./-]+\.(?:js|ts|jsx|tsx|py)\b")
+
 
 def _snippet_skeleton(text: str) -> str:
     """Normalize a code snippet for fuzzy containment checks.
@@ -874,27 +880,69 @@ class DiagnosisAgent(BaseAgent):
         # Verify additional_fix_file is still CURRENTLY vulnerable, not just that the
         # file exists. _file_exists_in_repo above only confirms the path is real — it
         # says nothing about whether the claimed bug is still there. Real production
-        # bug: the diagnosis claimed "Apply the identical guard to
-        # shoutoutInterviewUsers.js and smallBusinessOfTheDayInterviewUsers.js — both
-        # confirmed by grep to still have the unguarded pattern," but both had already
-        # been fixed by earlier, unrelated incidents. additional_fix_file has no
-        # equivalent of blast_radius's per-entry snippet check below, so the fabricated
-        # "still broken" claim sailed straight through. Only check when a snippet was
-        # actually supplied — its absence doesn't retroactively invalidate the older,
-        # narrower "another entry point needs the same top-level fix" use of this field.
-        if result.additional_fix_file and result.additional_fix_snippet:
+        # bug, seen TWICE in one session, the second time AFTER the snippet-grounding
+        # check below already existed: the diagnosis claimed 2-3 sibling files were
+        # "confirmed by grep / by reading current code to still have the unguarded
+        # pattern," but every one of them had already been fixed by earlier, unrelated
+        # incidents. The first occurrence had a fabricated snippet that this check
+        # correctly caught. The second occurrence just omitted additional_fix_snippet
+        # entirely — the check below only ever fires when a snippet IS present, so
+        # skipping it was a free way around verification. A claim with no evidence
+        # attached is not more trustworthy than a claim with fabricated evidence; both
+        # get discarded the same way. Only skipped when we genuinely cannot verify at
+        # all (_local_repo not ready) — same fail-open policy as every other check here.
+        if result.additional_fix_file and self._local_repo.ready:
             path = result.additional_fix_file
-            if not await self._snippet_is_grounded(path, result.additional_fix_snippet):
+            grounded = bool(result.additional_fix_snippet) and await self._snippet_is_grounded(
+                path, result.additional_fix_snippet
+            )
+            if not grounded:
                 logger.warning(
-                    "DiagnosisAgent: additional_fix_snippet for '%s' not found in the file's "
-                    "actual current content — claimed vulnerability is likely already fixed "
-                    "or fabricated — nulling additional_fix_file/_function/_snippet",
+                    "DiagnosisAgent: additional_fix_file '%s' has no verifiable "
+                    "additional_fix_snippet (or the snippet doesn't match the file's actual "
+                    "current content) — claim is unconfirmed, treating as likely already "
+                    "fixed or fabricated — nulling additional_fix_file/_function/_snippet",
                     path,
                 )
                 ungrounded.append(path)
                 result.additional_fix_file = None
                 result.additional_fix_function = None
                 result.additional_fix_snippet = None
+
+        # additional_fix (prose) can still assert "file X is confirmed still
+        # vulnerable" even after the structured field above ends up None — either
+        # because it just got nulled for lacking evidence, or because the model
+        # never populated additional_fix_file in the first place and only ever put
+        # its claim in prose. Real production bug: this is exactly what happened —
+        # additional_fix_file came back null (correctly; no wrong commit followed),
+        # but additional_fix still read "...confirmed still-vulnerable by reading
+        # current code" naming two files, displayed verbatim on the incident
+        # dashboard with nothing to indicate it was never verified. A claim with no
+        # structured, checkable file attached is not more trustworthy for being in
+        # prose instead — same policy as above: no verified file/snippet pairing
+        # means don't assert "confirmed" in what a human reads.
+        if (
+            result.additional_fix_file is None
+            and result.additional_fix
+            and self._local_repo.ready
+            and _FILE_MENTION_RE.search(result.additional_fix)
+        ):
+            logger.warning(
+                "DiagnosisAgent: additional_fix prose names file(s) with no verified "
+                "additional_fix_file/_snippet backing the claim — %r — flagging as unconfirmed",
+                result.additional_fix,
+            )
+            ungrounded.append(f"additional_fix prose: {result.additional_fix[:120]}")
+            result.evidence = [
+                *result.evidence,
+                (
+                    "ADDITIONAL_FIX UNVERIFIED: the additional_fix text names specific file(s) "
+                    "as still vulnerable, but no additional_fix_file/additional_fix_snippet "
+                    "survived grounding to back that claim — treat the file list in "
+                    "additional_fix as unconfirmed, not as evidence any of them are actually "
+                    "still broken."
+                ),
+            ]
 
         # Verify blast_radius entries — each has a "file" key AND a "snippet" that may
         # be hallucinated independently of each other (see _snippet_is_grounded).
@@ -1149,18 +1197,24 @@ Complete each step before moving to the next.
    the incident is specifically about a worker. Focus on top-level entry points.
    The fix agent will commit both files in the same PR.
 
-   MANDATORY when this codebase has a copy-pasted-per-target duplication convention
-   (check the target's own agent guide/notes for this — e.g. one near-identical file
-   per brand/tenant/region): naming additional_fix_file requires PROOF, not a name-
-   pattern guess. Call get_file_contents on that EXACT file and copy a real excerpt of
-   its CURRENT vulnerable code into additional_fix_snippet — do NOT reuse or adapt the
-   primary file's snippet with names swapped; that is pattern-completion, not reading.
-   A file matching the naming convention is not automatically still broken: siblings
-   get patched independently by earlier, separate incidents, so the same file you
-   "remember" being vulnerable may already be fixed. additional_fix_file with no
-   additional_fix_snippet, or a snippet that isn't verbatim from that file, will be
-   treated as unconfirmed and discarded — you gain nothing by guessing instead of
-   reading the file.
+   MANDATORY, for ANY additional_fix_file, not only per-target duplication cases:
+   naming it requires PROOF, not a name-pattern guess or a memory of an earlier
+   incident. Call get_file_contents on that EXACT file and copy a real excerpt of
+   its CURRENT vulnerable code into additional_fix_snippet — do NOT reuse or adapt
+   the primary file's snippet with names swapped; that is pattern-completion, not
+   reading. This matters most when the codebase has a copy-pasted-per-target
+   duplication convention (check the target's own agent guide/notes — e.g. one
+   near-identical file per brand/tenant/region): a file matching the naming
+   convention is not automatically still broken. Siblings get patched
+   independently by earlier, separate incidents, so the same file you "remember"
+   being vulnerable may already be fixed. additional_fix_file with no
+   additional_fix_snippet, or a snippet that isn't verbatim from that file, is
+   discarded — not kept as an unverified guess. This applies even if you only
+   describe the secondary file in additional_fix prose without setting
+   additional_fix_file: prose naming a specific file as "confirmed" still
+   vulnerable with no grounded file/snippet behind it gets flagged as unverified
+   too. You gain nothing by guessing instead of reading the file — an omitted
+   claim costs nothing; a wrong one wastes a review cycle.
 
 6. get_file_contents — fetch the FULL source of the file(s) identified in step 5.
    RAG returns 400-char fragments — you MUST read the full file to understand the code.
