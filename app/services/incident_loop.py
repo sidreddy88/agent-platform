@@ -411,7 +411,7 @@ class IncidentLoop:
         # the past root cause and fix as context for DiagnosisAgent.
         prior_context: str | None = None
         if event.error_type and event.service:
-            past = incident_store.get_resolved_for_error(event.error_type, event.service)
+            past = incident_store.get_resolved_for_error(event.error_type, event.service, event.description)
             if past:
                 prior_context = (
                     f"REGRESSION: This error was previously resolved "

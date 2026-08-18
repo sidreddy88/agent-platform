@@ -123,9 +123,37 @@ class IncidentStore:
                 return incident.pr_url or incident.id
         return None
 
-    def get_resolved_for_error(self, error_type: str, service: str) -> Optional["IncidentState"]:
-        """Query Postgres for resolved incidents matching error_type + service.
-        Direct DB query ensures regression context is current across ECS tasks."""
+    def get_resolved_for_error(
+        self, error_type: str, service: str, description: str = ""
+    ) -> Optional["IncidentState"]:
+        """Query Postgres for resolved incidents matching error_type + service + a
+        normalized description (same _normalize_desc used by get_open_pr_for_error).
+
+        Real production bug: matching on error_type + service ALONE is far too
+        coarse for a service that crashes for many unrelated reasons under the
+        same generic "APP_CRASHED" type. Confirmed live: a previewCode CastError
+        incident's "regression check" surfaced an unrelated image-upload crash
+        (different route, different file, different root cause entirely) as "the
+        same error, previously resolved" -- purely because both happened to be
+        APP_CRASHED on TaskAllInterviews. DiagnosisAgent's prompt frames this
+        result as "PRIOR KNOWLEDGE -- treat as strong evidence," with no
+        verification step at all (unlike blast_radius/additional_fix_targets,
+        which are snippet-grounded). The model then produced a confident,
+        specific-sounding root_cause narrative -- citing the real (but wrong)
+        incident ID and PR as evidence that 7 sibling files were already fixed --
+        blending the wrong citation with AGENTS.md's own illustrative "7 siblings"
+        anecdote into something that read as verified history but wasn't.
+
+        Requiring a normalized-description match (not just error_type + service)
+        makes this return None far more often for a genuinely-new-but-similarly-
+        typed crash -- the safe failure mode. A missed regression just means
+        diagnosis reasons from scratch, same as if no history existed at all. A
+        false-positive regression match poisons diagnosis with "strong evidence"
+        that's actually wrong, which is far worse. If description is omitted,
+        no result is ever returned (matches get_open_pr_for_error's same
+        empty-description behavior) rather than falling back to the old
+        error_type+service-only matching.
+        """
         from sqlalchemy import select
         from app.services.database import engine, tables
 
@@ -140,11 +168,13 @@ class IncidentStore:
             logger.warning("[IncidentStore] get_resolved_for_error DB query failed, using cache: %s", exc)
             all_resolved = [i for i in self._incidents.values() if i.status == IncidentStatus.RESOLVED]
 
+        desc_key = self._normalize_desc(description)
         candidates = [
             i for i in all_resolved
             if i.error_event.error_type == error_type
             and i.error_event.service == service
             and i.diagnosis
+            and self._normalize_desc(i.error_event.description or "") == desc_key
         ]
         if not candidates:
             return None
