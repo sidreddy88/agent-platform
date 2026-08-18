@@ -582,6 +582,170 @@ async def test_additional_fix_prose_not_flagged_without_file_mentions():
     assert all("ADDITIONAL_FIX UNVERIFIED" not in e for e in out.evidence)
 
 
+# ---------------------------------------------------------------------------
+# additional_fix_targets — multi-file counterpart to additional_fix_file (PR #180)
+#
+# Real production bug: a diagnosis correctly identified 3 sibling files needing
+# the identical per-brand-duplication fix in its prose, but additional_fix_file
+# can only ever carry ONE — FixGenerationAgent structurally never had a path to
+# attempt more than one secondary fix, even when the diagnosis got every file
+# right. additional_fix_targets is the fix: a proper list, each entry grounded
+# the same (mandatory-snippet) way as additional_fix_file.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_parser_extracts_additional_fix_targets():
+    """Schema-shaped JSON should populate additional_fix_targets."""
+    from app.agents.diagnosis import _parse_diagnosis_result
+
+    answer = """{
+      "root_cause": "x",
+      "confidence": 0.85,
+      "additional_fix_targets": [
+        {"file": "routes/api/brandBInterviewUsers.js", "function": null, "snippet": "Model.find({ previewCode: id })"},
+        {"file": "routes/api/inspiringInterviewUsers.js", "function": null, "snippet": "Model.find({ previewCode: id })"}
+      ]
+    }"""
+
+    result = _parse_diagnosis_result(answer)
+    assert len(result.additional_fix_targets) == 2
+    assert result.additional_fix_targets[0]["file"] == "routes/api/brandBInterviewUsers.js"
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_targets_survive_when_grounded():
+    """Multiple genuinely-vulnerable sibling files, each with a real snippet, all
+    survive — this is the whole point of the field."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    vulnerable_snippet = "Model.find({ previewCode: id }).then(users => res.json(users));"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = f"router.get('/getPreviewUser/:id', (req, res) => {{ {vulnerable_snippet} }});"
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix_targets=[
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
+            {"file": "routes/api/inspiringInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
+        ],
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert len(out.additional_fix_targets) == 2
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_targets_drops_entries_without_grounded_snippet():
+    """Real production bug: 1 of 3 named sibling files was already fixed (wrong
+    claim) — each entry must be checked independently, not accepted as a batch."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    already_fixed_content = "if (!/^\\d+$/.test(id)) { return res.status(400).json({}); } Model.find({ previewCode: Number(id) })"
+    local_repo = MagicMock(ready=True)
+    # brandA is already fixed (real content doesn't match the claimed vulnerable snippet);
+    # brandB genuinely still has it.
+    local_repo.read_file.side_effect = lambda path: (
+        already_fixed_content if "brandA" in path else "Model.find({ previewCode: id })"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix_targets=[
+            {"file": "routes/api/brandAInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
+        ],
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    surviving_files = [e["file"] for e in out.additional_fix_targets]
+    assert surviving_files == ["routes/api/brandBInterviewUsers.js"]
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_targets_drops_entries_with_no_snippet_at_all():
+    """Omitting the snippet is not a way around verification — same policy as
+    additional_fix_file."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "Model.find({ previewCode: id })"
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix_targets=[
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": ""},
+        ],
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.additional_fix_targets == []
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_targets_survive_when_cannot_verify_at_all():
+    """Fail-open when _local_repo isn't ready — same policy as every other check."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    agent = _make_agent(found)  # default: ready=False
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix_targets=[
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": ""},
+        ],
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert len(out.additional_fix_targets) == 1
+
+
+@pytest.mark.asyncio
+async def test_additional_fix_prose_not_flagged_when_targets_grounded():
+    """additional_fix_file is None, but additional_fix_targets is genuinely
+    grounded — the prose-unverified flag must not fire in this case."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    vulnerable_snippet = "Model.find({ previewCode: id })"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = vulnerable_snippet
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix="Apply the identical guard to brandBInterviewUsers.js.",
+        additional_fix_file=None,
+        additional_fix_targets=[
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
+        ],
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert all("ADDITIONAL_FIX UNVERIFIED" not in e for e in out.evidence)
+
+
 @pytest.mark.asyncio
 async def test_entry_point_helper_name_hints():
     """Spot-check the entry-point name detector."""
