@@ -399,6 +399,9 @@ async def clear_incidents() -> Dict[str, Any]:
     count = incident_store.clear()
     for incident in to_forget:
         pending_event_store.forget_matching(incident.error_event)
+        # See delete_incident's comment — same monitor_pr_map staleness issue.
+        if incident.pr_url:
+            incident_store.forget_pr_mapping(incident.pr_url)
     remaining = [_serialize(i) for i in incident_store.list_all()]
     await broadcast({"type": "incidents_cleared", "incidents": remaining, "deleted": count})
     return {"deleted": count}
@@ -649,6 +652,14 @@ async def delete_incident(incident_id: str) -> Dict[str, Any]:
     # "occurrences++" on a pending record with no visible incident, and a future
     # crash scan reports "no new crashes" even though this is still live.
     pending_event_store.forget_matching(incident.error_event)
+    # And forget any monitor_pr_map entry pointing at this incident's PR — a
+    # SEPARATE dedup mechanism (TriageAgent's duplicate-PR check) that has no
+    # other wiring back to incident deletion at all. Confirmed live: closing a
+    # PR that was never merged, then deleting its incident, still left the next
+    # occurrence of the exact same crash triaged "duplicate" against that same
+    # closed PR, because this map was never told to forget it.
+    if incident.pr_url:
+        incident_store.forget_pr_mapping(incident.pr_url)
     await broadcast({"type": "incident_deleted", "id": incident_id})
     return {"status": "deleted", "incident_id": incident_id}
 
