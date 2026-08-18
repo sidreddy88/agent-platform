@@ -92,13 +92,13 @@ class TestLLMResponseCostCalculation:
 class TestRoutingConfig:
     def test_loads_provider_and_model(self):
         gw = _make_gateway()
-        provider, model = gw._get_routing("triage")
+        provider, model, _max_tokens = gw._get_routing("triage")
         assert provider == "anthropic"  # inferred from "claude-haiku-*"
         assert model == "claude-haiku-4-5-20251001"
 
     def test_unknown_task_type_uses_defaults(self):
         gw = _make_gateway()
-        provider, model = gw._get_routing("unknown_task")
+        provider, model, _max_tokens = gw._get_routing("unknown_task")
         assert provider == "unknown"  # empty model string → can't infer provider
         assert model == "claude-sonnet-4-6"
 
@@ -113,7 +113,7 @@ class TestRoutingConfig:
             "triage": {"provider": "openai", "model": "gpt-4o-mini"},
         }}
         gw = _make_gateway(cfg)
-        provider, model = gw._get_routing("triage")
+        provider, model, _max_tokens = gw._get_routing("triage")
         assert provider == "openai"
         assert model == "gpt-4o-mini"
 
@@ -128,8 +128,8 @@ class TestRoutingConfig:
             },
         }
         gw = _make_gateway(cfg)
-        _, fix_model = gw._get_routing("fix")
-        _, review_model = gw._get_routing("review")
+        _, fix_model, _ = gw._get_routing("fix")
+        _, review_model, _ = gw._get_routing("review")
         assert _infer_provider(fix_model) != _infer_provider(review_model)
 
     def test_same_provider_for_fix_and_review_raises(self):
@@ -147,6 +147,30 @@ class TestRoutingConfig:
         gw._daily_costs = {}
         with pytest.raises(ValueError, match="fix and review must use different providers"):
             gw._validate_fix_review_providers()
+
+    def test_clarity_task_type_resolves_to_a_real_model(self):
+        """Regression guard: ErrorClarityAgent was silently broken in production
+        because incident_loop.py never overrode its default LLMService (which
+        lacks complete_with_tools) the way it does for FixGenerationAgent. The
+        fix adds a "clarity" routing entry and wires get_llm_service_for("clarity")
+        into incident_loop.py -- this confirms the config entry actually resolves
+        instead of silently falling back to defaults from a typo'd key."""
+        cfg = {**ROUTING_CONFIG, "routing": {
+            **ROUTING_CONFIG["routing"],
+            "clarity": {"model": "claude-sonnet-4-6", "max_tokens": 8192},
+        }}
+        gw = _make_gateway(cfg)
+        provider, model, max_tokens = gw._get_routing("clarity")
+        assert provider == "anthropic"
+        assert model == "claude-sonnet-4-6"
+        assert max_tokens == 8192
+
+    def test_get_llm_service_for_clarity_has_complete_with_tools(self):
+        """The whole point of the fix: the object handed to ErrorClarityAgent
+        must actually support the tool-calling loop it runs."""
+        gw = _make_gateway()
+        service = gw.get_llm_service_for("clarity")
+        assert hasattr(service, "complete_with_tools")
 
 
 # ---------------------------------------------------------------------------
