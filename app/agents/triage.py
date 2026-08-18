@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass
 
 from app.agents.base import BaseAgent
+from app.core.config import settings
 from app.models.events import ErrorEvent
 from app.services.aws import AWSError, AWSService
 from app.services.incident_store import incident_store as _default_store
@@ -127,6 +128,11 @@ class TriageAgent(BaseAgent):
     def _register_tools(self) -> None:
         aws = self._aws
         store = self._store
+        # TargetApp' logs live in us-east-2, agent-platform's own infra in
+        # us-east-1 -- search_log_events() had no region param at all until this
+        # fix, so this call always queried the wrong region and failed. See
+        # AWSService.search_log_events's docstring for the full story.
+        log_region = settings.ecs_log_groups_region or None
 
         async def _check_duplicate_pr(error_type: str, service: str = "", description_prefix: str = "") -> str:
             key = f"{error_type}:{service}:{description_prefix[:100]}"
@@ -146,6 +152,7 @@ class TriageAgent(BaseAgent):
                     filter_pattern=pattern,
                     minutes=hours * 60,
                     limit=1000,
+                    region=log_region,
                 )
                 return (
                     f"{len(events)} occurrences of '{pattern}' "
