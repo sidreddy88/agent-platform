@@ -647,7 +647,7 @@ class FixGenerationAgent(BaseAgent):
 
             if secondary_targets:
                 fixed = "\n".join(f"- `{p}`" for p in secondary_files_changed) or "(none)"
-                skipped = [p for p, _ in secondary_targets if p not in secondary_files_changed]
+                skipped = self._skipped_secondary_files(secondary_targets, secondary_files_changed)
                 skipped_note = (
                     "\n\nNot fixed automatically (review manually): "
                     + ", ".join(f"`{p}`" for p in skipped)
@@ -1371,6 +1371,24 @@ class FixGenerationAgent(BaseAgent):
         if secondary_path and secondary_path != primary_file and secondary_path not in seen:
             seen[secondary_path] = (incident.diagnosis_additional_fix_function, None)
         return [(f, fn, snip) for f, (fn, snip) in list(seen.items())[:_MAX_SECONDARY_FIXES]]
+
+    @staticmethod
+    def _skipped_secondary_files(
+        secondary_targets: list[tuple[str, str | None, str | None]],
+        secondary_files_changed: list[str],
+    ) -> list[str]:
+        """Which secondary targets did NOT end up with a committed fix.
+
+        Pulled out of the inline PR-body-building code specifically so it's
+        unit-testable on its own: a real production bug (FixGenerationAgent
+        raising "too many values to unpack (expected 2)" on every multi-file
+        incident) was exactly this logic silently left unpacking 2-tuples after
+        _resolve_secondary_targets() was extended to return 3-tuples (file,
+        function, snippet) in an earlier change. An inline list comprehension
+        buried in fix_with_steps() has no way to be covered by a targeted test;
+        this does.
+        """
+        return [f for f, _fn, _snip in secondary_targets if f not in secondary_files_changed]
 
     def _parse_local_imports(self, file_path: str, content: str) -> list[str]:
         """

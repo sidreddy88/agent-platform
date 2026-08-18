@@ -531,3 +531,38 @@ def test_resolve_secondary_targets_empty_when_no_signal():
     incident = _make_incident(diagnosis_blast_radius=[], diagnosis_additional_fix_file=None)
 
     assert agent._resolve_secondary_targets(incident, "routes/api/primary.js") == []
+
+
+# ---------------------------------------------------------------------------
+# _skipped_secondary_files — regression test for a real production crash
+# ---------------------------------------------------------------------------
+
+def test_skipped_secondary_files_handles_the_3_tuple_shape():
+    """Real production bug: FixGenerationAgent raised 'too many values to
+    unpack (expected 2)' on every multi-file incident, because this exact
+    computation was an inline `for p, _ in secondary_targets` left over from
+    before _resolve_secondary_targets() was extended to 3-tuples. Any incident
+    with diagnosis_blast_radius populated hit this on every single run."""
+    agent = _make_agent()
+    targets = [
+        ("routes/api/brandAInterviewUsers.js", "handler", "snippet A"),
+        ("routes/api/brandCInterviewUsers.js", None, None),
+        ("routes/api/brandBInterviewUsers.js", "handler", "snippet C"),
+    ]
+
+    skipped = agent._skipped_secondary_files(
+        targets, secondary_files_changed=["routes/api/brandAInterviewUsers.js"],
+    )
+
+    assert skipped == ["routes/api/brandCInterviewUsers.js", "routes/api/brandBInterviewUsers.js"]
+
+
+def test_skipped_secondary_files_empty_when_all_fixed():
+    agent = _make_agent()
+    targets = [("routes/api/a.js", "fn", None), ("routes/api/b.js", None, "snip")]
+
+    skipped = agent._skipped_secondary_files(
+        targets, secondary_files_changed=["routes/api/a.js", "routes/api/b.js"],
+    )
+
+    assert skipped == []
