@@ -1182,7 +1182,22 @@ class DiagnosisAgent(BaseAgent):
 
         prior_section = ""
         if prior_context:
-            prior_section = f"\nPRIOR KNOWLEDGE (from past incidents — treat as strong evidence):\n{prior_context}\n"
+            prior_section = (
+                f"\nPRIOR KNOWLEDGE (from past incidents — a LEAD to investigate, not a "
+                f"citable fact):\n{prior_context}\n"
+                f"This match is keyed on error_type + service + description — not a "
+                f"guarantee the past incident is actually the same bug, especially for a "
+                f"service that crashes for many unrelated reasons under the same generic "
+                f"error_type. Real production bug: a past incident matched this way was for "
+                f"a completely different route/file, and the diagnosis cited its (wrong) PR "
+                f"as evidence that several sibling files were 'already fixed,' fabricating "
+                f"specifics (a file count) that weren't even IN this prior-knowledge text. "
+                f"Before citing anything from PRIOR KNOWLEDGE in root_cause: read the actual "
+                f"current file(s) yourself and confirm the SAME code shape and symptom match. "
+                f"Never state a specific fact (which files were fixed, how many, when) unless "
+                f"you verified it by reading real current code — not by inferring it from this "
+                f"summary or from a general pattern described elsewhere (e.g. AGENTS.md).\n"
+            )
 
         prompt = f"""You are a senior SRE diagnosing a production incident. A triage agent has already
 confirmed this is real. Your job is to find the root cause and a fix approach.
