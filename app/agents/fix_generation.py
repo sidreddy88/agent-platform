@@ -586,17 +586,49 @@ class FixGenerationAgent(BaseAgent):
             # failure doesn't block the others or the primary fix already committed.
             secondary_targets = self._resolve_secondary_targets(incident, file_path)
             secondary_files_changed: list[str] = []
-            for secondary_path, secondary_fn in secondary_targets:
+            for secondary_path, secondary_fn, secondary_snippet in secondary_targets:
                 try:
                     sec_content, sec_sha = await self._read_file(secondary_path, ref=PR_BASE)
                     sec_fn = secondary_fn or "(module-level)"
+                    # Ground this in the ACTUAL primary diff + diagnosis snippet, not
+                    # free-text prose alone. Real incident (TargetApp PR #2552):
+                    # 2 of 5 files got the correct fix applied to the existing
+                    # handler; the other 3 -- given only a prose description of the
+                    # bug with no concrete code to search for -- fabricated an
+                    # entirely new, never-called route ("/by-preview-code") instead
+                    # of finding and editing the real vulnerable handler, because
+                    # nothing forced them to locate real matching code first. The
+                    # exact before/after text from the primary fix is the strongest
+                    # anchor available: search for that same pattern here.
+                    if old_function:
+                        primary_change = f"BEFORE:\n{old_function[:1500]}\n\nAFTER:\n{new_function[:1500]}\n\n"
+                    elif patches:
+                        primary_change = "\n\n".join(
+                            f"BEFORE:\n{p_old[:600]}\n\nAFTER:\n{p_new[:600]}" for p_old, p_new in patches[:3]
+                        ) + "\n\n"
+                    else:
+                        primary_change = ""
+                    anchor = (
+                        f"The identical bug was found and fixed in {file_path}. "
+                        f"Here is the EXACT change that was applied there:\n\n{primary_change}"
+                    )
+                    if secondary_snippet:
+                        anchor += (
+                            f"The diagnosis found this specific code in THIS file "
+                            f"({secondary_path}) with the same bug:\n{secondary_snippet[:800]}\n\n"
+                        )
+                    anchor += (
+                        "Find the matching existing code in THIS file — same route path, "
+                        "same field name, same query/find call — and apply the equivalent "
+                        "fix to it. Do NOT write a new function, route, or endpoint that "
+                        "doesn't already exist here. If you cannot locate closely matching "
+                        "existing code in this file after searching, make NO edit at all "
+                        "and call end_turn — leaving this file unchanged is correct when "
+                        "the pattern genuinely isn't here; inventing new code is not."
+                    )
                     sec_old, sec_new, sec_patches, _ = await self._generate_fix(
                         sec_content, sec_fn, incident, secondary_path,
-                        test_failures=(
-                            f"The identical fix was already applied to {file_path}. "
-                            f"Apply the same change here"
-                            + (f": {incident.diagnosis_additional_fix}" if incident.diagnosis_additional_fix else ".")
-                        ),
+                        test_failures=anchor,
                     )
                     if sec_old or sec_patches:
                         sec_new_content = self._apply_all_edits(sec_content, sec_old, sec_new, sec_patches)
@@ -1310,7 +1342,7 @@ class FixGenerationAgent(BaseAgent):
 
     def _resolve_secondary_targets(
         self, incident: IncidentState, primary_file: str
-    ) -> list[tuple[str, str | None]]:
+    ) -> list[tuple[str, str | None, str | None]]:
         """Every OTHER file the diagnosis says needs the identical fix.
 
         Historically only `diagnosis_additional_fix_file` (a single field) drove the
@@ -1322,18 +1354,23 @@ class FixGenerationAgent(BaseAgent):
         list of affected (file, function) pairs — use ALL of it, not just the one
         legacy field, deduped and capped so a runaway diagnosis can't fan out into an
         unbounded number of commits.
+
+        Returns (file, function, snippet) — the snippet (when the diagnosis captured
+        one) is what actually lets a secondary pass locate real code instead of
+        guessing; see the comment where this is consumed in fix_with_steps().
         """
-        seen: dict[str, str | None] = {}
+        seen: dict[str, tuple[str | None, str | None]] = {}
         for entry in incident.diagnosis_blast_radius or []:
             file = entry.get("file")
             if not file or file == primary_file or file in seen:
                 continue
             fn = entry.get("function") or None
-            seen[file] = fn
+            snippet = entry.get("snippet") or None
+            seen[file] = (fn, snippet)
         secondary_path = incident.diagnosis_additional_fix_file
         if secondary_path and secondary_path != primary_file and secondary_path not in seen:
-            seen[secondary_path] = incident.diagnosis_additional_fix_function
-        return list(seen.items())[:_MAX_SECONDARY_FIXES]
+            seen[secondary_path] = (incident.diagnosis_additional_fix_function, None)
+        return [(f, fn, snip) for f, (fn, snip) in list(seen.items())[:_MAX_SECONDARY_FIXES]]
 
     def _parse_local_imports(self, file_path: str, content: str) -> list[str]:
         """
@@ -1684,7 +1721,11 @@ class FixGenerationAgent(BaseAgent):
             f"2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value — "
             f"every return path must include the complete structure callers depend on.\n"
             f"3. The fix must handle ALL invalid inputs, not just the one that triggered this error.\n"
-            f"4. No unrelated cleanup, logging, or comments.\n\n"
+            f"4. No unrelated cleanup, logging, or comments.\n"
+            f"5. Never invent a new function, route, or endpoint that doesn't already exist as your "
+            f"'fix' for an existing bug. Find and edit the REAL vulnerable code. If you cannot locate "
+            f"it in this file after actually searching, make no edit and call end_turn — that is "
+            f"correct; fabricating unrelated new code is not.\n\n"
             f"IF THE TARGET FUNCTION IS NOT IN THIS FILE:\n"
             f"The function '{function_name}' may be defined in a different file than the one shown above "
             f"(e.g. it may be a backend service called by this frontend component, or a helper in a "
