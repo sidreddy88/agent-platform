@@ -12,7 +12,7 @@ When a production error fires a CloudWatch alarm, the platform's pipeline:
 
 1. **Detects** the alarm via SNS → HTTPS webhook (push-based; zero polling load on the production server).
 2. **Triages** the event into real / noise / duplicate at P0–P3 severity using a Haiku-class classifier validated against a 100-case golden dataset.
-3. **Diagnoses** the root cause with a Sonnet-class agent that grounds every claim against the actual repo via GitHub Code Search.
+3. **Diagnoses** the root cause with a Sonnet-class agent that grounds structured fields (affected file/function, secondary fixes) against the actual repo via GitHub Code Search.
 4. **Generates a fix** — writes a patch, runs it in a Docker sandbox against the real test suite, retries up to 3× on failure.
 5. **Self-critiques** the fix, opens a GitHub PR, and queues the merge for human approval if HIGH/CRITICAL.
 
@@ -122,7 +122,7 @@ mcp_server/        # MCP server exposing agents to Claude Desktop
 infra/             # Terraform for ECS Fargate + Cloudflare + SNS
 scripts/           # measure_mttr.py, eval_rag.py, triage_replay.py
 targets/           # External codebases the platform operates on
-tests/             # pytest test suite (745 tests, mocked — no live API calls)
+tests/             # pytest test suite (818 tests, mocked — no live API calls)
 docs/              # MANUAL_BASELINE, architecture notes
 ```
 
