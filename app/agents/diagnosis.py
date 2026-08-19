@@ -867,6 +867,16 @@ class DiagnosisAgent(BaseAgent):
         """
         ungrounded: list[str] = []
 
+        # Snapshot the two field groups that feed the human-facing prose (root_cause
+        # reads from the "primary" group, additional_fix from the "secondary" group)
+        # so we can tell, at the end of this function, whether ANY check below nulled
+        # something in that group -- regardless of which specific check did it. See
+        # the unified UNVERIFIED-caveat block right before `return result`.
+        _primary_before = (result.affected_file, result.affected_function, result.root_cause_snippet)
+        _secondary_before = (
+            result.additional_fix_file, result.additional_fix_function, result.additional_fix_snippet,
+        )
+
         # Verify function names. A bad function name nulls only that function field —
         # NOT the file field. Express anonymous handlers (no searchable name) are common
         # and the file path is sufficient for fix generation.
@@ -1172,6 +1182,51 @@ class DiagnosisAgent(BaseAgent):
                     f"diagnosis skipped the caller search."
                 ),
             ]
+
+        # ----- Flag the human-facing prose, not just the structured fields ---------
+        # Every check above nulls a structured field the moment it can't verify a
+        # claim -- but nulling affected_file/root_cause_snippet/additional_fix_function
+        # etc. does nothing to root_cause/additional_fix, the free-text narrative
+        # fields incident_loop.py copies verbatim into incident.diagnosis, the ONLY
+        # diagnosis text a human reviewer actually sees on the approval dashboard.
+        # (The per-failure GROUNDING NOTE above only ever reaches result.evidence,
+        # which incident_loop.py truncates into a Slack message and never persists
+        # onto the incident at all.)
+        #
+        # Two real production incidents, same underlying gap, caught by two DIFFERENT
+        # checks above: (1) a fabricated root_cause_snippet on models/MasterBrandA.js,
+        # caught by the snippet-grounding check a few blocks up; (2) a real, correctly-
+        # grounded root cause whose additional_fix prose separately invented a whole
+        # corroborating guard mechanism ("processInterviews guards against re-creating
+        # an already-existing thumbnail via HeadObjectCommand at line 1757") in a
+        # function name that got nulled by the FUNCTION-NAME check at the very top of
+        # this method -- a different branch than incident (1) hit. Patching each
+        # branch to prepend its own caveat (the first attempt at this fix) only covers
+        # whichever branches existed when it was written; the next fabrication just
+        # needs to trip a different one of the ~8 independent checks above. Comparing
+        # before/after on the two field GROUPS instead covers every branch uniformly,
+        # including ones added later, without needing to touch this file again.
+        primary_after = (result.affected_file, result.affected_function, result.root_cause_snippet)
+        secondary_after = (
+            result.additional_fix_file, result.additional_fix_function, result.additional_fix_snippet,
+        )
+        unverified_caveat = (
+            "UNVERIFIED — some of the specific file/line/code details below could not be "
+            "confirmed against the actual repository and may be fabricated. Treat this as "
+            "an unconfirmed hypothesis, not a confirmed fact.\n\n"
+        )
+        if (
+            primary_after != _primary_before
+            and result.root_cause
+            and not result.root_cause.startswith("UNVERIFIED")
+        ):
+            result.root_cause = unverified_caveat + result.root_cause
+        if (
+            secondary_after != _secondary_before
+            and result.additional_fix
+            and not result.additional_fix.startswith("UNVERIFIED")
+        ):
+            result.additional_fix = unverified_caveat + result.additional_fix
 
         return result
 
