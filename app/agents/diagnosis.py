@@ -447,6 +447,21 @@ class DiagnosisAgent(BaseAgent):
         # tool call — evidence of *some* kind — before an answer is
         # accepted at all.
         self._min_tool_calls_before_answer = 1
+        # The count floor above isn't enough on its own. Real production bug:
+        # a diagnosis called get_error_samples and check_still_occurring (both
+        # log-checking tools) and both returned no data, satisfying "at least
+        # 1 real tool call" -- then answered with a fabricated affected_file
+        # and root_cause_snippet, having never once called a tool that reads
+        # actual code. With no real code investigated, it filled the gap by
+        # inventing a plausible-sounding root cause (in that incident,
+        # reaching for AGENTS.md's per-brand MODEL_MAP pattern, which had
+        # nothing to do with the actual bug). Require at least one call to an
+        # actual code-reading tool before an answer is accepted -- log/timeline
+        # tools establish whether the error is occurring, they can't establish
+        # WHY.
+        self._required_tool_names_before_answer = {
+            "get_file_contents", "search_codebase", "grep_codebase",
+        }
 
     def _register_tools(self) -> None:
         aws = self._aws
