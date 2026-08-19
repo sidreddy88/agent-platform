@@ -12,7 +12,7 @@ When a production error fires a CloudWatch alarm, the platform's pipeline:
 
 1. **Detects** the alarm via SNS → HTTPS webhook (push-based; zero polling load on the production server).
 2. **Triages** the event into real / noise / duplicate at P0–P3 severity using a Haiku-class classifier validated against a 100-case golden dataset.
-3. **Diagnoses** the root cause with a Sonnet-class agent that grounds every claim against the actual repo via GitHub Code Search.
+3. **Diagnoses** the root cause with a Sonnet-class agent that grounds structured fields (affected file/function, secondary fixes) against the actual repo via GitHub Code Search.
 4. **Generates a fix** — writes a patch, runs it in a Docker sandbox against the real test suite, retries up to 3× on failure.
 5. **Self-critiques** the fix, opens a GitHub PR, and queues the merge for human approval if HIGH/CRITICAL.
 
@@ -27,44 +27,50 @@ It is also a research substrate: every LLM call and tool execution is captured a
 | Time-to-first-PR | ~6 min from alarm | [`scripts/measure_mttr.py`](scripts/measure_mttr.py) |
 | Triage accuracy | 92% | 100-case eval — `app/evals/golden_dataset.jsonl` |
 | False-positive rate | < 8% | Triage decisions reviewed against ground truth |
-| Sample size | 100+ production incidents | `agent_platform.db` from live deploy |
+| Sample size | 7 incidents (current live DB row count) | Postgres `incidents` table, live deploy |
 
-Numbers refresh by re-running `scripts/measure_mttr.py --since YYYY-MM-DD`. Triage accuracy and sample size are sourced from a gitignored eval dataset/db from the live deploy, not reproducible from a fresh clone. The pre-agent baseline these are measured against is in [`docs/MANUAL_BASELINE.md`](docs/MANUAL_BASELINE.md) — currently a template pending real incident estimates.
+Numbers refresh by re-running `scripts/measure_mttr.py --since YYYY-MM-DD`. Triage accuracy is sourced from the checked-in eval dataset (`app/evals/golden_dataset.jsonl`); sample size is a live, mutable count from the deploy's Postgres `incidents` table (verified directly against production — not reproducible from a fresh clone, and drops when incidents are cleared/deduped). The pre-agent baseline these are measured against is in [`docs/MANUAL_BASELINE.md`](docs/MANUAL_BASELINE.md) — currently a template pending real incident estimates.
 
 ---
 
 ## Architecture
 
 ```
-CloudWatch alarm  ─►  SNS  ─►  /webhooks/cloudwatch-alarm
-                                       │
-                                       ▼
-                              ┌────────────────┐
-                              │  Dedup gate    │  string-match · SQL · RAG (live store lookup)
-                              └────────┬───────┘
-                                       │   (new event)
-                                       ▼
-                              ┌────────────────┐
-                              │  TriageAgent   │  real / noise / duplicate · P0–P3
-                              └────────┬───────┘
-                                       │   (real, ≥ P2)
-                                       ▼
-                              ┌────────────────┐
-                              │ DiagnosisAgent │  grounds every symbol against the live repo
-                              └────────┬───────┘
-                                       ▼
-                              ┌────────────────┐
-                              │FixGeneration   │  writes patch · sandbox test · retry 3×
-                              └────────┬───────┘
-                                       ▼
-                              ┌────────────────┐
-                              │ CodeReview     │  self-critique → open PR
-                              └────────┬───────┘
-                                       ▼
-                              ┌────────────────┐
-                              │ Approval gate  │  HIGH/CRITICAL → human · merge → MonitorGen
-                              └────────────────┘
+CloudWatch alarm ─► SNS ─► /webhooks/cloudwatch-alarm ──┐
+                                                         │
+CloudWatch Logs ─► DetectionService (poll · 5 min) ──────┤
+                                                         ▼
+                                              ┌────────────────┐
+                                              │  Dedup gate    │  string-match · SQL · RAG (live store lookup)
+                                              └────────┬───────┘
+                                                        │   (new event)
+                                                        ▼
+                                              ┌────────────────┐
+                                              │  TriageAgent   │  real / noise / duplicate · P0–P3 (Haiku)
+                                              └────────┬───────┘
+                                                        │   (real, ≥ P2)
+                                                        ▼
+                                              ┌────────────────┐
+                                              │ DiagnosisAgent │  grounds every symbol against the live repo (Sonnet)
+                                              └────────┬───────┘
+                                                        ▼
+                                              ┌────────────────┐
+                                              │ FixGeneration  │  writes patch · sandbox test · retry 3× · self-critique (Sonnet + Haiku)
+                                              └────────┬───────┘
+                                                        ▼
+                                                 Open GitHub PR
+                                                        │
+                                                        ▼
+                                              ┌────────────────┐
+                                              │ CodeReviewAgent│  independent review, posts PR comment (GPT-4.1)
+                                              └────────┬───────┘
+                                                        ▼
+                                              ┌────────────────┐
+                                              │ Approval gate  │  HIGH/CRITICAL → human · merge → MonitorGen
+                                              └────────────────┘
 ```
+
+Two independent detection paths feed the same dedup gate: a push-based SNS webhook (near-zero latency) and a `DetectionService` background loop polling CloudWatch Logs every 5 minutes as a backstop — this polls AWS's own CloudWatch API, not the target application's servers, so it adds no load there. Self-critique (Haiku) runs *inside* `FixGenerationAgent`, before the PR exists; `CodeReviewAgent` (GPT-4.1, via `litellm`) is a separate agent that reviews and comments *after* the PR is already open — two distinct steps, not one.
 
 The pipeline runs on FastAPI with WebSocket streaming for the live dashboard. State lives in Postgres (`agent_runs`, `incidents`, `approvals`, `monitor_records`); RAG candidate matching lives in pgvector. The dashboard is a React + Vite bundle served from the same ECS container.
 
@@ -122,7 +128,7 @@ mcp_server/        # MCP server exposing agents to Claude Desktop
 infra/             # Terraform for ECS Fargate + Cloudflare + SNS
 scripts/           # measure_mttr.py, eval_rag.py, triage_replay.py
 targets/           # External codebases the platform operates on
-tests/             # pytest test suite (745 tests, mocked — no live API calls)
+tests/             # pytest test suite (818 tests, mocked — no live API calls)
 docs/              # MANUAL_BASELINE, architecture notes
 ```
 
