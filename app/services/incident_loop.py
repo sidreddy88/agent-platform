@@ -569,6 +569,7 @@ class IncidentLoop:
         incident.reproduction_confirmed = diagnosis.reproduction_confirmed
         incident.diagnosis_affected_file = diagnosis.affected_file
         incident.diagnosis_affected_function = diagnosis.affected_function
+        incident.diagnosis_root_cause_snippet = diagnosis.root_cause_snippet
         incident.diagnosis_additional_fix = diagnosis.additional_fix
         incident.diagnosis_additional_fix_file = diagnosis.additional_fix_file
         incident.diagnosis_additional_fix_function = diagnosis.additional_fix_function
