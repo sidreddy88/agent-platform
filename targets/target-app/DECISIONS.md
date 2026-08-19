@@ -1,4 +1,4 @@
-# TargetApp — Architectural Decisions
+# Target App — Architectural Decisions
 
 Decisions are recorded here so agents don't re-litigate them. Each entry includes the
 rationale and the constraint that follows from it.
@@ -89,11 +89,11 @@ See CONSTRAINTS.md and `docs/CONTENT_MODERATION.md`.
 ## D7 — Stage 1 / Stage 2 test infrastructure rollout
 
 **Decision:** Tests and harness docs live in `agent-platform/targets/target-app/`
-during Stage 1. They migrate to the TargetApp repo in Stage 2.
+during Stage 1. They migrate to the target app's own repo in Stage 2.
 
 **Why:** Stage 1 lets the test suite prove itself (green across 5+ agent PRs) before
 committing it permanently to a production repo used by thousands of people. The cost of
 a bad test in a production repo is higher than the cost of the temporary split.
 
-**Pre-condition to move to Stage 2:** 5+ agent PRs with green CI on TargetApp.
+**Pre-condition to move to Stage 2:** 5+ agent PRs with green CI on the target app.
 See `FUTURE.md`.
