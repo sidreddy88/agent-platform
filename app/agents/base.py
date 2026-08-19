@@ -215,6 +215,18 @@ class BaseAgent:
         # for why this exists — a real production diagnosis answered in a
         # single LLM call with zero tool calls and fabricated its evidence.
         self._min_tool_calls_before_answer: int = 0
+        # Opt-in: require at least one call to a tool NAMED in this set before
+        # an answer is accepted, on top of (not instead of) the count-based
+        # floor above. Real production bug the count-based floor alone can't
+        # catch: a diagnosis called two log-checking tools (both returned no
+        # data), satisfying "at least 1 real tool call," then answered with a
+        # fabricated affected_file/root_cause_snippet -- having never called
+        # get_file_contents/search_codebase/grep_codebase, i.e. never actually
+        # read any real code at all. A count floor can't distinguish "verified
+        # something real" from "called any tool, even one that found nothing
+        # relevant" -- this can. Empty set (default) preserves existing
+        # behavior for every agent that doesn't opt in.
+        self._required_tool_names_before_answer: set[str] = set()
 
     @staticmethod
     def _load_harness_docs() -> str:
@@ -316,6 +328,7 @@ class BaseAgent:
             _total_input_tokens = 0
             _total_output_tokens = 0
             _tool_calls_made = 0
+            _tools_called: set[str] = set()
 
             for i in range(1, MAX_ITERATIONS + 1):
                 # Compress conversation history if the previous call's token count
@@ -342,14 +355,35 @@ class BaseAgent:
 
                 # ── ANSWER → done (unless this subclass requires evidence first) ──
                 if "answer" in parsed:
-                    if _tool_calls_made < self._min_tool_calls_before_answer:
+                    count_unmet = _tool_calls_made < self._min_tool_calls_before_answer
+                    # Real production bug the count check alone can't catch: a
+                    # diagnosis called two log-checking tools (both returned no
+                    # data), satisfying "at least 1 real tool call," then
+                    # answered with a fabricated affected_file/root_cause_snippet
+                    # -- having never called a code-reading tool, i.e. never
+                    # actually read any real code. A count floor can't tell
+                    # "verified something real" apart from "called any tool,
+                    # even an irrelevant one that found nothing."
+                    required_unmet = bool(
+                        self._required_tool_names_before_answer
+                    ) and not (_tools_called & self._required_tool_names_before_answer)
+                    if count_unmet or required_unmet:
                         if i < MAX_ITERATIONS:
-                            step.observation = (
-                                f"REJECTED: you must call at least "
-                                f"{self._min_tool_calls_before_answer} tool(s) to verify your "
-                                f"claims before answering — you have called {_tool_calls_made} "
-                                f"so far. Use one of your verification tools now, then answer."
-                            )
+                            if required_unmet:
+                                step.observation = (
+                                    f"REJECTED: you must call at least one of "
+                                    f"{sorted(self._required_tool_names_before_answer)} before "
+                                    f"answering — you have called {sorted(_tools_called) or 'nothing'} "
+                                    f"so far, which doesn't include any of them. Use one of those "
+                                    f"tools now, then answer."
+                                )
+                            else:
+                                step.observation = (
+                                    f"REJECTED: you must call at least "
+                                    f"{self._min_tool_calls_before_answer} tool(s) to verify your "
+                                    f"claims before answering — you have called {_tool_calls_made} "
+                                    f"so far. Use one of your verification tools now, then answer."
+                                )
                             steps.append(step)
                             messages.append({"role": "user", "content": f"Observation: {step.observation}"})
                             continue
@@ -387,6 +421,7 @@ class BaseAgent:
 
                 observation = await self._execute_tool(step.action, step.action_input)
                 _tool_calls_made += 1
+                _tools_called.add(step.action)
                 step.observation = observation
                 steps.append(step)
 
