@@ -1187,8 +1187,19 @@ class FixGenerationAgent(BaseAgent):
             return None
 
         # Ask the LLM: given this file and this error, what function produces the undefined?
+        # Uses self._llm_haiku (the same rolling-alias-pinned Haiku instance _critique_fix
+        # uses) rather than self._llm.complete(..., model="claude-haiku-4-5-20251001").
+        # Real production bug found via a README accuracy pass: LLMService.complete() has
+        # no `model` kwarg at all -- this call raised TypeError on every single invocation,
+        # silently swallowed by the except below, so this entire producer-vs-consumer
+        # retargeting mechanism (the automated version of "fix the producer, not the crash
+        # site") has never actually run once. The pipeline's real-world correctness on
+        # null/undefined incidents so far has relied on DiagnosisAgent's own upstream
+        # affected_file/affected_function already pointing at the producer -- this was
+        # meant to be a second, file-generation-time safety net for when it doesn't, and
+        # that safety net has always been dead.
         try:
-            probe = await self._llm.complete(
+            probe = await self._llm_haiku.complete(
                 messages=[{"role": "user", "content": (
                     f"This file ({file_path}) has a production error:\n"
                     f"{incident.error_event.description or incident.error_event.title}\n\n"
@@ -1199,7 +1210,6 @@ class FixGenerationAgent(BaseAgent):
                     f"If you cannot identify it, return 'UNKNOWN'."
                 )}],
                 system=self._with_harness("Return only the function name. Single word or camelCase identifier. No punctuation."),
-                model="claude-haiku-4-5-20251001",
             )
             source_fn = probe.strip().split()[0].strip(".,;:()")
         except Exception as exc:
