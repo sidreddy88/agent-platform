@@ -1,4 +1,4 @@
-# AllInterviews — Constraints
+# Target App — Constraints
 
 Hard rules. Violations block PR approval.
 

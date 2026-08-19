@@ -1359,7 +1359,7 @@ class FixGenerationAgent(BaseAgent):
 
         Historically only `diagnosis_additional_fix_file` (a single field) drove the
         one dedicated secondary-file pass in fix_with_steps(). That undercounts badly
-        now that DiagnosisAgent's search-driven grounding (see targets/allinterviews/
+        now that DiagnosisAgent's search-driven grounding (see targets/target-app/
         AGENTS.md) routinely finds every sibling in a copy-pasted-per-brand bug — a
         real incident found 7 additional files, but the pipeline only ever committed
         a fix to 1 of them. Three sources feed this now, all deduped by path and

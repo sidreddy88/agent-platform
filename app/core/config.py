@@ -92,7 +92,7 @@ class Settings(BaseSettings):
 
     # Directory containing AGENTS.md + CONSTRAINTS.md to inject into every agent call.
     # Relative to the project root, or absolute. Set to "" to disable injection.
-    harness_docs_path: str = "targets/allinterviews"
+    harness_docs_path: str = "targets/target-app"
 
     # Monitor generation — set to true to actually provision CloudWatch alarms on PR merge
     create_monitors: bool = False
