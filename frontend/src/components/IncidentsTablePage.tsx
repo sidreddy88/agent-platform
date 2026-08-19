@@ -190,6 +190,7 @@ export function IncidentsTablePage({ incidents }: Props) {
   const [agentRunMap, setAgentRunMap] = useState<Record<string, AgentRun[]>>({});
   const [archiving, setArchiving] = useState<string | null>(null);
   const [resolving, setResolving] = useState<string | null>(null);
+  const [marking, setMarking] = useState<string | null>(null);
   const [wrongFixTarget, setWrongFixTarget] = useState<Incident | null>(null);
   const [noteTarget, setNoteTarget] = useState<AgentRun | null>(null);
   // Local overlay state for archived/wrong_fix (optimistic, until WS update arrives)
@@ -227,6 +228,21 @@ export function IncidentsTablePage({ incidents }: Props) {
       setLocalResolved((prev) => new Set(prev).add(id));
     } finally {
       setResolving(null);
+    }
+  }
+
+  // Distinct from handleResolve: outcome=fix_merged (not manually_resolved) is what
+  // /api/agents/pr-stats' "merged" count and MTTR calculation actually check for
+  // (see get_pr_stats — mttr_seconds is only set "when outcome == fix_merged"). An
+  // incident whose PR (fix or clarity) was actually merged should use this, not the
+  // generic Resolve, so it's counted correctly on the PR stats dashboard.
+  async function handleMarkMerged(id: string) {
+    setMarking(id);
+    try {
+      await fetch(`/incidents/${id}/mark-merged`, { method: "POST" });
+      setLocalResolved((prev) => new Set(prev).add(id));
+    } finally {
+      setMarking(null);
     }
   }
 
@@ -345,14 +361,25 @@ export function IncidentsTablePage({ incidents }: Props) {
                     <td style={{ ...td, whiteSpace: "nowrap" as const }}>
                       <div style={{ display: "flex", gap: 4 }}>
                         {!TERMINAL.has(inc.status) && !localResolved.has(inc.id) && (
-                          <button
-                            style={actionBtn("#1e3a2a", "#22c55e", resolving === inc.id)}
-                            onClick={() => handleResolve(inc.id)}
-                            disabled={resolving === inc.id}
-                            title="Mark as resolved"
-                          >
-                            {resolving === inc.id ? "…" : "Resolve"}
-                          </button>
+                          hasPR ? (
+                            <button
+                              style={actionBtn("#1e3a2a", "#22c55e", marking === inc.id)}
+                              onClick={() => handleMarkMerged(inc.id)}
+                              disabled={marking === inc.id}
+                              title="Mark this PR as merged — counts toward PR stats' merged/MTTR numbers"
+                            >
+                              {marking === inc.id ? "…" : "Mark Merged"}
+                            </button>
+                          ) : (
+                            <button
+                              style={actionBtn("#1e3a2a", "#22c55e", resolving === inc.id)}
+                              onClick={() => handleResolve(inc.id)}
+                              disabled={resolving === inc.id}
+                              title="Mark as resolved"
+                            >
+                              {resolving === inc.id ? "…" : "Resolve"}
+                            </button>
+                          )
                         )}
                         {isResolved(inc) && (
                           <button
