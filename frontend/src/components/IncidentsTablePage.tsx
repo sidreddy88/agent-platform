@@ -183,6 +183,59 @@ function WrongFixModal({ incident, onClose }: { incident: Incident; onClose: () 
   );
 }
 
+function RefixWithNotesModal({
+  incident, onClose, onQueued,
+}: { incident: Incident; onClose: () => void; onQueued: () => void }) {
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit() {
+    if (!notes.trim()) return;
+    setSaving(true);
+    try {
+      await fetch(`/incidents/${incident.id}/refix-with-notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: notes.trim() }),
+      });
+      onQueued();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={modalOverlay} onClick={onClose}>
+      <div style={modalBox} onClick={(e) => e.stopPropagation()}>
+        <h3 style={modalTitle}>Rerun Fix With Notes</h3>
+        <p style={modalSub}>Incident: <span style={{ color: "#e2e8f0" }}>{incident.error_event.title}</span></p>
+        <p style={modalSub}>
+          Closes the current PR and re-runs FixGenerationAgent with your notes as guidance
+          — usable any time, not only when a code review requested changes.
+        </p>
+        <textarea
+          style={notesInput}
+          placeholder="What's wrong with this fix, and what should it do instead?"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          rows={4}
+          autoFocus
+        />
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+          <button style={cancelBtn} onClick={onClose}>Cancel</button>
+          <button
+            style={submitBtn(saving || !notes.trim())}
+            onClick={handleSubmit}
+            disabled={saving || !notes.trim()}
+          >
+            {saving ? "Queuing..." : "Rerun Fix"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export function IncidentsTablePage({ incidents }: Props) {
@@ -192,11 +245,13 @@ export function IncidentsTablePage({ incidents }: Props) {
   const [resolving, setResolving] = useState<string | null>(null);
   const [marking, setMarking] = useState<string | null>(null);
   const [wrongFixTarget, setWrongFixTarget] = useState<Incident | null>(null);
+  const [refixTarget, setRefixTarget] = useState<Incident | null>(null);
   const [noteTarget, setNoteTarget] = useState<AgentRun | null>(null);
   // Local overlay state for archived/wrong_fix (optimistic, until WS update arrives)
   const [localArchived, setLocalArchived] = useState<Set<string>>(new Set());
   const [localWrongFix, setLocalWrongFix] = useState<Set<string>>(new Set());
   const [localResolved, setLocalResolved] = useState<Set<string>>(new Set());
+  const [localRefixed, setLocalRefixed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetch("/api/agents/prs")
@@ -272,6 +327,16 @@ export function IncidentsTablePage({ incidents }: Props) {
           onClose={() => {
             setLocalWrongFix((prev) => new Set(prev).add(wrongFixTarget.id));
             setWrongFixTarget(null);
+          }}
+        />
+      )}
+      {refixTarget && (
+        <RefixWithNotesModal
+          incident={refixTarget}
+          onClose={() => setRefixTarget(null)}
+          onQueued={() => {
+            setLocalRefixed((prev) => new Set(prev).add(refixTarget.id));
+            setRefixTarget(null);
           }}
         />
       )}
@@ -398,6 +463,15 @@ export function IncidentsTablePage({ incidents }: Props) {
                             title="Mark this fix as incorrect"
                           >
                             Wrong Fix
+                          </button>
+                        )}
+                        {hasPR && !localRefixed.has(inc.id) && (
+                          <button
+                            style={actionBtn("#3a2e1e", "#fb923c", false)}
+                            onClick={() => setRefixTarget(inc)}
+                            title="Close this PR and re-run the fix with your notes as guidance"
+                          >
+                            Rerun Fix
                           </button>
                         )}
                       </div>
