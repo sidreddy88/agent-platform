@@ -162,14 +162,25 @@ async def get_pr_stats():
             except Exception:
                 pass
 
+    # Real gap: this filter and everything below it only ever looked at
+    # pr_number/pr_url (FixGenerationAgent's fields) — an ErrorClarityAgent PR
+    # (clarity_pr_number/clarity_pr_url) was invisible here entirely, with no way
+    # to mark it merged or see its stats on this dashboard, even after a human
+    # merged it on GitHub. Every incident.pr_number/incident.pr_url reference
+    # below now goes through pr_number/pr_url locals that fall back to the
+    # clarity fields when the fix fields are unset — the two are mutually
+    # exclusive in practice (an incident only ever gets one or the other PR
+    # type), so "whichever is set" is unambiguous.
     resolved = [
         i for i in incident_store.list_all()
-        if i.pr_number or i.pr_url
+        if i.pr_number or i.pr_url or i.clarity_pr_number or i.clarity_pr_url
     ]
 
     results = []
     for incident in resolved:
         event = incident.error_event
+        pr_number = incident.pr_number or incident.clarity_pr_number
+        pr_url = incident.pr_url or incident.clarity_pr_url
 
         # MTTD: time from error occurrence in production to our system detecting it.
         # CloudWatch log events store the original log timestamp in metadata["timestamp"].
@@ -198,9 +209,9 @@ async def get_pr_stats():
         ci_checks: list[dict] = []
         ci_source = None  # "check_runs" | "master_workflow"
 
-        if owner and incident.pr_number:
+        if owner and pr_number:
             try:
-                pr_details = await gh.get_pr(owner, repo, incident.pr_number)
+                pr_details = await gh.get_pr(owner, repo, pr_number)
                 pr_description = pr_details.description
 
                 ci_checks = await gh.get_commit_checks(owner, repo, pr_details.head_sha)
@@ -252,8 +263,9 @@ async def get_pr_stats():
         results.append({
             "incident_id": incident.id,
             "outcome": incident.outcome,
-            "pr_url": incident.pr_url,
-            "pr_number": incident.pr_number,
+            "pr_url": pr_url,
+            "pr_number": pr_number,
+            "is_clarity_pr": bool(incident.clarity_pr_url and not incident.pr_url),
             "service": event.service,
             "severity": str(event.severity).split(".")[-1] if event.severity else None,
             "error_title": event.title,
