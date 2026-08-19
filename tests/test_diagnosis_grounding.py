@@ -746,6 +746,135 @@ async def test_additional_fix_prose_not_flagged_when_targets_grounded():
     assert all("ADDITIONAL_FIX UNVERIFIED" not in e for e in out.evidence)
 
 
+# ---------------------------------------------------------------------------
+# affected_file / root_cause_snippet grounding — the PRIMARY-target counterpart
+# to additional_fix_file's mandatory-snippet policy (PR after #182).
+#
+# Real production bug, the worst fabrication found this session: a diagnosis
+# named affected_file="models/MasterInspiring.js" (a real file, module-level,
+# no function claimed) and quoted a root_cause code snippet
+# ("errors: { prank: {...}, contentFlags: {...} }") that existed NOWHERE in
+# the real repo -- not in that file, not in any file. The real bug (a
+# different, unrelated file) was never found at all. affected_file's
+# existence-only check passed trivially; there was no equivalent of
+# additional_fix_file's snippet-grounding for the PRIMARY target -- backwards,
+# since affected_file is what FixGenerationAgent actually edits.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_parser_extracts_root_cause_snippet():
+    from app.agents.diagnosis import _parse_diagnosis_result
+
+    answer = """{
+      "root_cause": "x",
+      "confidence": 0.85,
+      "affected_file": "models/PrankCheckerLog.js",
+      "root_cause_snippet": "errors: { type: Array },"
+    }"""
+
+    result = _parse_diagnosis_result(answer)
+    assert result.affected_file == "models/PrankCheckerLog.js"
+    assert result.root_cause_snippet == "errors: { type: Array },"
+
+
+@pytest.mark.asyncio
+async def test_affected_file_survives_when_root_cause_snippet_grounded():
+    async def found(owner, repo, query):
+        return []
+
+    real_snippet = "errors: { type: Array },"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        "const schema = new mongoose.Schema({\n  fields: { type: Object },\n"
+        f"  {real_snippet}\n  result: {{ type: String }},\n}});"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="PrankCheckerLog.js defines a reserved `errors` schema pathname",
+        confidence=0.85,
+        affected_file="models/PrankCheckerLog.js",
+        root_cause_snippet=real_snippet,
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.affected_file == "models/PrankCheckerLog.js"
+    assert out.confidence == 0.85
+    assert out.escalate is False
+
+
+@pytest.mark.asyncio
+async def test_affected_file_nulled_when_root_cause_snippet_fabricated():
+    """The actual real-world bug: a snippet that matches nothing in the real file."""
+    async def found(owner, repo, query):
+        return []
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        "const MasterInspiringSchema = new schema({\n"
+        "  email: { type: String, required: true, unique: true },\n"
+        "}, { timestamps: true });"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="All four Mongoose model files define an errors field...",
+        confidence=0.55,
+        affected_file="models/MasterInspiring.js",
+        root_cause_snippet="errors: { prank: { type: Boolean, default: false }, contentFlags: { type: Array, default: [] } }",
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.affected_file is None
+    assert out.affected_function is None
+    assert out.root_cause_snippet is None
+    assert out.confidence <= 0.65
+    assert out.escalate is True
+
+
+@pytest.mark.asyncio
+async def test_affected_file_nulled_when_snippet_omitted_but_verifiable():
+    """Omitting the snippet is not a way around verification — same policy as
+    additional_fix_file."""
+    async def found(owner, repo, query):
+        return []
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "some real file content"
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_file="models/PrankCheckerLog.js",
+        # no root_cause_snippet
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.affected_file is None
+    assert out.confidence <= 0.65
+
+
+@pytest.mark.asyncio
+async def test_affected_file_survives_when_cannot_verify_at_all():
+    """Fail-open when _local_repo isn't ready — same policy as every other check."""
+    async def found(owner, repo, query):
+        return []
+
+    agent = _make_agent(found)  # default: ready=False
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_file="models/PrankCheckerLog.js",
+        # no root_cause_snippet — still survives since we can't verify at all
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.affected_file == "models/PrankCheckerLog.js"
+    assert out.confidence == 0.9
+
+
 @pytest.mark.asyncio
 async def test_entry_point_helper_name_hints():
     """Spot-check the entry-point name detector."""
