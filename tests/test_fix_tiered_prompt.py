@@ -250,6 +250,34 @@ async def test_critique_includes_four_checks_and_blast_radius():
 
 
 @pytest.mark.asyncio
+async def test_critique_prompt_forbids_markdown_headers():
+    """The critique gets embedded verbatim into a GitHub PR body (see
+    _build_fix_pr_body) — a markdown heading in the response breaks the
+    surrounding document's structure. Real production PR
+    (VoyageGroupMag/AllInterviews#2589) had Haiku return a full
+    "# Critique: ..." document despite the docstring's claim this is a "short
+    plain-text assessment"; nothing in the prompt actually enforced that."""
+    agent = _make_agent()
+    captured = {"prompt": ""}
+
+    async def fake_complete(messages=None, system=None, **kwargs):
+        captured["prompt"] = messages[0]["content"]
+        return "LOOKS CORRECT"
+
+    agent._llm_haiku = MagicMock()
+    agent._llm_haiku.complete = AsyncMock(side_effect=fake_complete)
+    agent._rag = None
+    agent._with_harness = MagicMock(return_value="(harness)")
+
+    incident = _make_incident(diagnosis="x")
+
+    await agent._critique_fix("old", "new", incident, "src/x.js")
+
+    text = captured["prompt"]
+    assert "no markdown headers" in text.lower()
+
+
+@pytest.mark.asyncio
 async def test_critique_omits_blast_radius_section_when_empty():
     """No Tier 2 callers → no TIER 2 block in the critique prompt."""
     agent = _make_agent()
