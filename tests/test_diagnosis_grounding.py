@@ -448,6 +448,45 @@ async def test_additional_fix_nulled_when_snippet_not_grounded():
 
 
 @pytest.mark.asyncio
+async def test_additional_fix_prose_flagged_unverified_when_snippet_fabricated():
+    """Nulling the structured fields isn't enough on its own — incident_loop.py never
+    persists additional_fix_file/_snippet, only the free-text additional_fix. If that
+    text still repeats the fabricated claim unflagged, a human reviewer sees zero
+    indication the system already disproved it."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        "router.get('/getPreviewUser/:id', (req, res) => {\n"
+        "  const { id } = req.params;\n"
+        "  if (!/^\\d+$/.test(id)) { return res.status(400).json({message: 'Invalid'}); }\n"
+        "  Model.find({ previewCode: Number(id) }).then(users => res.json(users));\n"
+        "});"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    result = DiagnosisResult(
+        root_cause="x",
+        confidence=0.9,
+        affected_function="primaryFn",
+        affected_file="a.js",
+        additional_fix="this route is still vulnerable to the same unguarded query",
+        additional_fix_file="routes/api/exampleInterviewUsers.js",
+        additional_fix_snippet=(
+            "router.get('/getPreviewUser/:id', (req, res) => {\n"
+            "  const { id } = req.params;\n"
+            "  Model.find({ previewCode: id }).then(users => res.json(users));\n"
+            "});"
+        ),
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.additional_fix.startswith("UNVERIFIED")
+    assert "this route is still vulnerable" in out.additional_fix
+
+
+@pytest.mark.asyncio
 async def test_additional_fix_survives_when_snippet_grounded():
     """A claimed-still-vulnerable file that genuinely still has the pattern survives."""
     async def found(owner, repo, query):
@@ -830,6 +869,72 @@ async def test_affected_file_nulled_when_root_cause_snippet_fabricated():
     assert out.root_cause_snippet is None
     assert out.confidence <= 0.65
     assert out.escalate is True
+
+
+@pytest.mark.asyncio
+async def test_root_cause_prose_flagged_unverified_when_snippet_fabricated():
+    """The actual gap this closes: incident_loop.py copies result.root_cause verbatim
+    into incident.diagnosis -- the ONLY field a human reviewer reads on the approval
+    dashboard. Nulling affected_file/root_cause_snippet above doesn't stop the free-text
+    root_cause from repeating the exact same fabricated file/line/code claim with zero
+    indication the system already proved it false. Real production bug: a diagnosis
+    named affected_file="models/MasterShoutout.js" citing a specific line number and
+    field that don't exist in the real (17-line) file -- correctly nulled by the check
+    above, but the human-facing root_cause paragraph was untouched and still read as a
+    confident, fully-detailed explanation."""
+    async def found(owner, repo, query):
+        return []
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        "const MasterShoutoutSchema = new schema({\n"
+        "  email: { type: String, required: true, unique: true },\n"
+        "}, { timestamps: true });"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    original_root_cause = (
+        "In `models/MasterShoutout.js`, the Mongoose Schema is defined with a field "
+        "named `errors: { type: String }` (line 49)."
+    )
+    result = DiagnosisResult(
+        root_cause=original_root_cause,
+        confidence=0.65,
+        affected_file="models/MasterShoutout.js",
+        root_cause_snippet="errors: { type: String, required: false, default: '', trim: true },",
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.affected_file is None
+    assert out.root_cause.startswith("UNVERIFIED")
+    # The original narrative should still be present (for audit/debugging) --
+    # just no longer the ONLY thing a reviewer sees.
+    assert original_root_cause in out.root_cause
+
+
+@pytest.mark.asyncio
+async def test_root_cause_prose_untouched_when_snippet_grounded():
+    """No caveat, no mutation, when the claim actually checks out."""
+    async def found(owner, repo, query):
+        return []
+
+    real_snippet = "errors: { type: Array },"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        f"const schema = new mongoose.Schema({{\n  {real_snippet}\n}});"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    original_root_cause = "PrankCheckerLog.js defines a reserved `errors` schema pathname"
+    result = DiagnosisResult(
+        root_cause=original_root_cause,
+        confidence=0.85,
+        affected_file="models/PrankCheckerLog.js",
+        root_cause_snippet=real_snippet,
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.root_cause == original_root_cause
 
 
 @pytest.mark.asyncio

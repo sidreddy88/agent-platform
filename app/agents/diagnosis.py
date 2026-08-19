@@ -958,6 +958,26 @@ class DiagnosisAgent(BaseAgent):
                 result.affected_file = None
                 result.affected_function = None
                 result.root_cause_snippet = None
+                # Nulling the structured fields above isn't enough on its own. Real
+                # production bug: a diagnosis named affected_file="models/MasterShoutout.js"
+                # with a root_cause_snippet quoting a field/line that doesn't exist in the
+                # real (17-line) file. This check correctly caught it and nulled the
+                # structured fields -- but result.root_cause (the free-text narrative that
+                # incident_loop.py copies verbatim into incident.diagnosis, the ONLY thing a
+                # human reviewer actually reads on the approval dashboard) is a separate
+                # LLM-authored field this function never touches. It kept repeating the
+                # exact same fabricated line number and code claim, now presented with zero
+                # indication that the system itself had just proven it false -- the warning
+                # only ever reached result.evidence, which incident_loop.py truncates into a
+                # Slack message and never persists onto the incident at all. Flag the
+                # human-facing text directly, since that's the one field guaranteed to reach
+                # a reviewer.
+                result.root_cause = (
+                    "UNVERIFIED — the specific file, line number, and code details below "
+                    "could not be confirmed against the actual repository and may be "
+                    "fabricated. Treat this as an unconfirmed hypothesis, not a confirmed "
+                    "root cause.\n\n" + result.root_cause
+                )
 
         # Verify additional_fix_file is still CURRENTLY vulnerable, not just that the
         # file exists. _file_exists_in_repo above only confirms the path is real — it
@@ -990,6 +1010,15 @@ class DiagnosisAgent(BaseAgent):
                 result.additional_fix_file = None
                 result.additional_fix_function = None
                 result.additional_fix_snippet = None
+                # Same gap as the affected_file/root_cause block above, same fix: don't
+                # leave the free-text additional_fix description repeating a claim the
+                # structured fields were just nulled for failing to back up.
+                if result.additional_fix:
+                    result.additional_fix = (
+                        "UNVERIFIED — the specific file/line/code details below could not "
+                        "be confirmed against the actual repository and may be fabricated.\n\n"
+                        + result.additional_fix
+                    )
 
         # Verify blast_radius entries — each has a "file" key AND a "snippet" that may
         # be hallucinated independently of each other (see _snippet_is_grounded).
