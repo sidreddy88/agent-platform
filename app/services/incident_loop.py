@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 
 from app.agents.code_review import CodeReviewAgent
 from app.agents.diagnosis import CONFIDENCE_THRESHOLD, DiagnosisAgent, DiagnosisResult
+from app.agents.error_clarity import ClarityResult
 from app.agents.fix_generation import FixGenerationAgent, FixResult
 from app.agents.triage import TriageAgent, TriageResult
 from app.core.config import settings
@@ -321,8 +322,21 @@ class IncidentLoop:
             logger.error("[IncidentLoop] FixGenerationAgent raised exception for %s: %s", incident.id, exc)
             return None
 
-    async def _run_review(self, incident: IncidentState, fix: FixResult) -> str | None:
-        """Run CodeReviewAgent on the new PR and post review to GitHub."""
+    async def _run_review(
+        self, incident: IncidentState, fix: FixResult | ClarityResult, review_kind: str = "fix",
+    ) -> str | None:
+        """Run CodeReviewAgent on the new PR and post review to GitHub.
+
+        Takes either a FixResult (bug fix) or a ClarityResult (ErrorClarityAgent's
+        observability-only addition) — only .pr_number/.pr_url are ever touched
+        below, and validate_fix_for_review only checks those same two fields, so
+        both result types already satisfy this method's actual contract.
+
+        review_kind is threaded through to CodeReviewAgent so it applies the right
+        criteria: a clarity PR isn't fixing a bug, so root-cause/symptom-fix checks
+        don't apply to it and would either false-positive or waste the review on
+        the wrong question — see analyze_file's review_kind branch in code_review.py.
+        """
         if not fix.pr_number:
             return None
         try:
@@ -337,7 +351,8 @@ class IncidentLoop:
         try:
             result = await cb.call(self._review_agent.run(
                 f'{{"owner": "{owner}", "repo": "{repo}", '
-                f'"pr_number": {fix.pr_number}, "post_to_github": true}}'
+                f'"pr_number": {fix.pr_number}, "post_to_github": true, '
+                f'"review_kind": "{review_kind}"}}'
             ))
             return result.answer
         except CircuitOpenError:
@@ -608,6 +623,21 @@ class IncidentLoop:
                         "[IncidentLoop] %s — ErrorClarityAgent: %d addition(s), pr=%s",
                         incident.id, len(clarity.additions), clarity.pr_url or "none",
                     )
+
+                    # Real gap: CodeReviewAgent was only ever wired to fix.pr_url (the
+                    # two call sites a few hundred lines down), never to clarity.pr_url —
+                    # ErrorClarityAgent's PRs went straight to a human with zero automated
+                    # review, even though _run_review only actually needs .pr_number/
+                    # .pr_url (see HandoffValidator.validate_fix_for_review), both of
+                    # which ClarityResult already has. Skip the fix-specific DoD/dedup/
+                    # merge-decision machinery around the other two call sites — none of
+                    # it applies to an observability-only addition — and just run the
+                    # review itself.
+                    if clarity.pr_number:
+                        clarity_review_text = await self._run_review(incident, clarity, review_kind="clarity")
+                        if clarity_review_text:
+                            incident.review_posted = True
+                            incident_store.update(incident)
                 except Exception as exc:
                     logger.error("[IncidentLoop] ErrorClarityAgent failed for %s: %s", incident.id, exc)
 
