@@ -57,6 +57,46 @@ _MAX_SECONDARY_FIXES = 10
 # ---------------------------------------------------------------------------
 
 
+def _build_fix_pr_body(
+    *,
+    diagnosis: str | None,
+    function_name: str,
+    file_path: str,
+    critique: str,
+    issue_number: int | None,
+    incident_id: str,
+    confidence: float,
+) -> str:
+    """Build the PR body for an auto-generated fix, self-critique included in full.
+
+    Extracted from fix_with_steps for direct unit testing — two real production
+    bugs, found together, lived in the inline version this replaced: (1) the
+    critique text was truncated to 300 chars before being embedded, which cut it
+    off before the verdict line the critique prompt itself asks for LAST
+    ("FINAL LINE — must be exactly one of: LOOKS CORRECT / NEEDS REVIEW / LIKELY
+    WRONG") — a reviewer reading the PR could never actually see whether the
+    agent's own critique passed or failed the fix, only the internal retry check
+    (`"LIKELY WRONG" in critique.upper()`, evaluated against the full string)
+    ever saw it. (2) critique is itself markdown — Haiku often returns a full
+    "# Critique: ..." document with its own headers despite being asked for a
+    short assessment — and embedding that inside a single
+    `- **Self-critique:** ...` bullet breaks GitHub's rendering, since a heading
+    can't nest inside a list item. Giving critique its own section, in full,
+    fixes both: no truncation loses the verdict, and a real section boundary
+    means nested headers render fine instead of collapsing into the summary
+    bullet list.
+    """
+    return (
+        f"## Summary\n"
+        f"- **Root cause:** {diagnosis}\n"
+        f"- **Fix:** Updated `{function_name}` in `{file_path}`\n\n"
+        f"## Self-critique\n\n{critique}\n\n"
+        f"{f'Fixes #{issue_number}' if issue_number else ''}\n\n"
+        f"**Incident ID:** {incident_id}  \n"
+        f"**Agent confidence:** {confidence:.0%}"
+    )
+
+
 def _prune_tool_results(
     messages: list[dict],
     keep_last: int = 2,
@@ -555,14 +595,14 @@ class FixGenerationAgent(BaseAgent):
         # ── 5. Commit fix and open PR ──────────────────────────────────
         # new_content already computed in step 3d
 
-        pr_body = (
-            f"## Summary\n"
-            f"- **Root cause:** {incident.diagnosis}\n"
-            f"- **Fix:** Updated `{function_name}` in `{file_path}`\n"
-            f"- **Self-critique:** {critique[:300]}\n\n"
-            f"{f'Fixes #{issue_number}' if issue_number else ''}\n\n"
-            f"**Incident ID:** {incident.id}  \n"
-            f"**Agent confidence:** {incident.confidence:.0%}"
+        pr_body = _build_fix_pr_body(
+            diagnosis=incident.diagnosis,
+            function_name=function_name,
+            file_path=file_path,
+            critique=critique,
+            issue_number=issue_number,
+            incident_id=incident.id,
+            confidence=incident.confidence,
         )
 
         pr_number: int | None = None
@@ -2099,6 +2139,9 @@ class FixGenerationAgent(BaseAgent):
             f"- Converts an invalid value instead of preventing it from being invalid in the first place\n"
             f"- Fixes only the happy-path return of a producer function but leaves error/early-exit\n"
             f"  return paths still missing the expected field — all return paths must be complete\n\n"
+            f"Plain sentences only — no markdown headers (#, ##), no title line, no bold "
+            f"section labels. This gets embedded directly into a GitHub PR body; a markdown "
+            f"heading here breaks the surrounding document's structure.\n\n"
             f"FOUR EXPLICIT CHECKS — answer each in one sentence:\n"
             f"1. Does the fix BREAK any Tier 2 caller listed above? "
             f"(Walk the callers; check each still works with the new function shape.)\n"
