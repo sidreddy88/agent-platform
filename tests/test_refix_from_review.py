@@ -291,6 +291,107 @@ class TestRefixFromReview:
 
 
 # ---------------------------------------------------------------------------
+# refix_with_notes — the general "I disagree with this fix" action, not gated
+# to the CodeReviewAgent REQUEST_CHANGES workflow like refix_from_review is.
+# ---------------------------------------------------------------------------
+
+class TestRefixWithNotes:
+    @pytest.mark.asyncio
+    async def test_works_regardless_of_status(self):
+        """The actual gap this closes: refix_from_review requires
+        AWAITING_REFIX_APPROVAL specifically. A human disagreeing with an already
+        AWAITING_APPROVAL (or RESOLVED, or anything else) fix had no path at all —
+        this must work from any non-FIXING status."""
+        from app.services.incident_loop import IncidentLoop
+
+        loop = IncidentLoop.__new__(IncidentLoop)
+        incident = make_incident(
+            status=IncidentStatus.AWAITING_APPROVAL,  # NOT awaiting_refix_approval
+            pr_url="https://github.com/org/repo/pull/10",
+            pr_number=10,
+        )
+        new_fix = make_fix_result(pr_url="https://github.com/org/repo/pull/21", pr_number=21)
+
+        store = MagicMock()
+        store.get = MagicMock(return_value=incident)
+        mock_gh = AsyncMock()
+        loop._run_fix = AsyncMock(return_value=new_fix)
+        loop._run_post_fix = AsyncMock()
+
+        with patch("app.services.incident_loop.incident_store", store), \
+             patch("app.services.incident_loop.session_logger") as mock_sess, \
+             patch("app.services.incident_loop._apply_dod_gate", AsyncMock(return_value=True)), \
+             patch("app.services.incident_loop.settings") as mock_settings, \
+             patch("app.services.github.GitHubService", return_value=mock_gh):
+            mock_settings.fix_target_repo = "org/repo"
+            mock_sess.get = MagicMock(return_value=MagicMock())
+            await loop.refix_with_notes(incident.id, "Use a simpler fix — just check for NaN before extract()")
+
+        mock_gh.close_pull_request.assert_awaited_once_with("org", "repo", 10)
+        loop._run_fix.assert_awaited_once()
+        assert incident.status == IncidentStatus.REVIEWING
+        assert incident.pr_url == new_fix.pr_url
+
+    @pytest.mark.asyncio
+    async def test_notes_are_prepended_as_human_instruction(self):
+        from app.services.incident_loop import IncidentLoop
+
+        loop = IncidentLoop.__new__(IncidentLoop)
+        incident = make_incident(
+            status=IncidentStatus.AWAITING_APPROVAL,
+            pr_number=None,
+            human_notes="pre-existing note",
+        )
+        new_fix = make_fix_result()
+
+        store = MagicMock()
+        store.get = MagicMock(return_value=incident)
+        loop._run_fix = AsyncMock(return_value=new_fix)
+        loop._run_post_fix = AsyncMock()
+
+        with patch("app.services.incident_loop.incident_store", store), \
+             patch("app.services.incident_loop.session_logger") as mock_sess, \
+             patch("app.services.incident_loop._apply_dod_gate", AsyncMock(return_value=True)), \
+             patch("app.services.incident_loop.settings") as mock_settings:
+            mock_settings.fix_target_repo = "org/repo"
+            mock_sess.get = MagicMock(return_value=MagicMock())
+            await loop.refix_with_notes(incident.id, "check for NaN before extract()")
+
+        assert "HUMAN INSTRUCTION: check for NaN before extract()" in incident.human_notes
+        assert "pre-existing note" in incident.human_notes
+
+    @pytest.mark.asyncio
+    async def test_refuses_when_already_fixing(self):
+        from app.services.incident_loop import IncidentLoop
+
+        loop = IncidentLoop.__new__(IncidentLoop)
+        incident = make_incident(status=IncidentStatus.FIXING)
+
+        store = MagicMock()
+        store.get = MagicMock(return_value=incident)
+        loop._run_fix = AsyncMock()
+
+        with patch("app.services.incident_loop.incident_store", store):
+            await loop.refix_with_notes(incident.id, "some notes")
+
+        loop._run_fix.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_incident_not_found_is_a_noop(self):
+        from app.services.incident_loop import IncidentLoop
+
+        loop = IncidentLoop.__new__(IncidentLoop)
+        store = MagicMock()
+        store.get = MagicMock(return_value=None)
+        loop._run_fix = AsyncMock()
+
+        with patch("app.services.incident_loop.incident_store", store):
+            await loop.refix_with_notes("nonexistent-id", "some notes")
+
+        loop._run_fix.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------------------
 
@@ -363,3 +464,70 @@ class TestRefixEndpoints:
             resp = client.post(f"/incidents/{incident.id}/reject-refix")
 
         assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_refix_with_notes_endpoint_works_from_any_non_fixing_status(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        incident = make_incident(status=IncidentStatus.AWAITING_APPROVAL)
+        mock_loop = MagicMock()
+        mock_loop.refix_with_notes = AsyncMock()
+
+        with patch("app.api.routes.incidents.incident_store") as mock_store, \
+             patch("app.services.incident_loop.incident_loop", mock_loop):
+            mock_store.get = MagicMock(return_value=incident)
+
+            client = TestClient(app)
+            resp = client.post(
+                f"/incidents/{incident.id}/refix-with-notes", json={"notes": "use a simpler fix"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "refix_queued"
+
+    @pytest.mark.asyncio
+    async def test_refix_with_notes_endpoint_rejects_empty_notes(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        incident = make_incident(status=IncidentStatus.AWAITING_APPROVAL)
+
+        with patch("app.api.routes.incidents.incident_store") as mock_store:
+            mock_store.get = MagicMock(return_value=incident)
+            client = TestClient(app)
+            resp = client.post(f"/incidents/{incident.id}/refix-with-notes", json={"notes": "   "})
+
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_refix_with_notes_endpoint_rejects_while_fixing(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        incident = make_incident(status=IncidentStatus.FIXING)
+
+        with patch("app.api.routes.incidents.incident_store") as mock_store:
+            mock_store.get = MagicMock(return_value=incident)
+            client = TestClient(app)
+            resp = client.post(
+                f"/incidents/{incident.id}/refix-with-notes", json={"notes": "use a simpler fix"},
+            )
+
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_refix_with_notes_endpoint_404_for_unknown_incident(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with patch("app.api.routes.incidents.incident_store") as mock_store:
+            mock_store.get = MagicMock(return_value=None)
+            client = TestClient(app)
+            resp = client.post("/incidents/nonexistent/refix-with-notes", json={"notes": "x"})
+
+        assert resp.status_code == 404

@@ -605,6 +605,38 @@ async def approve_refix(incident_id: str, background_tasks: BackgroundTasks, bod
     return {"status": "refix_queued", "incident_id": incident_id}
 
 
+class RefixWithNotesBody(BaseModel):
+    notes: str
+
+
+@router.post("/{incident_id}/refix-with-notes")
+async def refix_with_notes(
+    incident_id: str, background_tasks: BackgroundTasks, body: RefixWithNotesBody,
+) -> Dict[str, Any]:
+    """
+    Re-run fix generation with human-provided notes, regardless of current status.
+
+    Unlike /refix (gated to AWAITING_REFIX_APPROVAL — the CodeReviewAgent
+    REQUEST_CHANGES workflow specifically), this is the general "I disagree with
+    this fix, try again with my feedback" action. Real gap: a diagnosis found the
+    correct file at 55% confidence, a human approved fix generation anyway, the fix
+    that came back was wrong (self-critique even flagged a simpler fix existed),
+    and there was no way to act on that disagreement through the app at all —
+    /refix's status gate made it unreachable outside the one specific
+    review-driven pathway.
+    """
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if not body.notes or not body.notes.strip():
+        raise HTTPException(status_code=400, detail="notes must be a non-empty string")
+    if incident.status == IncidentStatus.FIXING:
+        raise HTTPException(status_code=400, detail="Incident is already mid-fix")
+    from app.services.incident_loop import incident_loop
+    background_tasks.add_task(incident_loop.refix_with_notes, incident_id, body.notes)
+    return {"status": "refix_queued", "incident_id": incident_id}
+
+
 @router.post("/{incident_id}/reject-refix")
 async def reject_refix(incident_id: str) -> Dict[str, Any]:
     """
