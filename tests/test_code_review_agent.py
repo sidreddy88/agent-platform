@@ -177,6 +177,50 @@ class TestAnalyzeFile:
         result = await analyze_file("assets/logo.png", gh, llm)
         assert result == "No code issues in binary file."
 
+    @pytest.mark.asyncio
+    async def test_default_review_kind_keeps_symptom_fix_criteria(self):
+        """review_kind defaults to "fix" — existing FixGenerationAgent PRs must keep
+        being reviewed against root-cause/symptom-fix criteria, unchanged."""
+        gh = make_github_mock()
+        gh._cached_files = {f.filename: f for f in FAKE_FILES}
+        llm = make_llm_mock("LOOKS CORRECT")
+
+        await analyze_file("app/auth.py", gh, llm)
+
+        prompt_sent = llm.complete.call_args[1]["messages"][0]["content"]
+        assert "does the fix address the actual root cause" in prompt_sent
+        assert "SYMPTOM-FIX RED FLAGS" in prompt_sent
+        assert "OBSERVABILITY ADDITION" not in prompt_sent
+
+    @pytest.mark.asyncio
+    async def test_clarity_review_kind_drops_symptom_fix_criteria(self):
+        """The real gap this closes: an ErrorClarityAgent PR isn't fixing a bug, so
+        root-cause/symptom-fix criteria don't apply and shouldn't be asked."""
+        gh = make_github_mock()
+        gh._cached_files = {f.filename: f for f in FAKE_FILES}
+        llm = make_llm_mock("LOOKS CORRECT")
+
+        await analyze_file("app/auth.py", gh, llm, review_kind="clarity")
+
+        prompt_sent = llm.complete.call_args[1]["messages"][0]["content"]
+        assert "does the fix address the actual root cause" not in prompt_sent
+        assert "SYMPTOM-FIX RED FLAGS" not in prompt_sent
+        assert "there is no bug being fixed and no root cause to address" in prompt_sent
+
+    @pytest.mark.asyncio
+    async def test_clarity_review_kind_asks_about_secrets_and_pii(self):
+        """The check that actually matters for a logging addition: does it leak
+        secrets/PII into logs — not present at all in the "fix" framing."""
+        gh = make_github_mock()
+        gh._cached_files = {f.filename: f for f in FAKE_FILES}
+        llm = make_llm_mock("LOOKS CORRECT")
+
+        await analyze_file("app/auth.py", gh, llm, review_kind="clarity")
+
+        prompt_sent = llm.complete.call_args[1]["messages"][0]["content"]
+        assert "secrets" in prompt_sent.lower()
+        assert "pii" in prompt_sent.lower()
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — generate_review tool
@@ -278,6 +322,35 @@ class TestGenerateReview:
         result = await generate_review("acme", "backend", 42, "", gh, llm)
         assert "fetch_pr first" in result
         llm.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_clarity_review_kind_adds_context_note(self):
+        gh = make_github_mock()
+        gh._cached_pr = FAKE_PR
+        gh._cached_files = {f.filename: f for f in FAKE_FILES}
+        llm = make_llm_mock(FAKE_REVIEW)
+
+        await generate_review(
+            "acme", "backend", 42, "file analyses here", gh, llm,
+            post_to_github=False, review_kind="clarity",
+        )
+
+        prompt_sent = llm.complete.call_args[1]["messages"][0]["content"]
+        assert "observability addition from ErrorClarityAgent" in prompt_sent
+
+    @pytest.mark.asyncio
+    async def test_default_review_kind_omits_clarity_context_note(self):
+        gh = make_github_mock()
+        gh._cached_pr = FAKE_PR
+        gh._cached_files = {f.filename: f for f in FAKE_FILES}
+        llm = make_llm_mock(FAKE_REVIEW)
+
+        await generate_review(
+            "acme", "backend", 42, "file analyses here", gh, llm, post_to_github=False,
+        )
+
+        prompt_sent = llm.complete.call_args[1]["messages"][0]["content"]
+        assert "observability addition from ErrorClarityAgent" not in prompt_sent
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +469,34 @@ class TestCodeReviewAgent:
         agent, _ = self._make_agent([AGENT_FINAL_ANSWER])
         result = await agent.run("Review PR #42 in acme/backend")
         assert result.answer is not None
+
+    @pytest.mark.asyncio
+    async def test_review_kind_threaded_from_input_to_analyze_file(self):
+        """The actual wiring this depends on: CodeReviewAgent.run() parses
+        review_kind out of the input JSON and passes it to every analyze_file
+        call — this is what _run_review's clarity call site in incident_loop.py
+        relies on to get clarity-appropriate criteria applied."""
+        gh = make_github_mock()
+        gh.get_pr = AsyncMock(return_value=FAKE_PR)
+        gh.get_pr_diff = AsyncMock(return_value=FAKE_FILES)
+        agent = CodeReviewAgent(github=gh)
+        llm_mock = MagicMock()
+        llm_mock.complete = AsyncMock(
+            side_effect=["LOOKS CORRECT", "LOOKS CORRECT", FAKE_REVIEW]
+        )
+        agent._llm = llm_mock
+
+        await agent.run(
+            '{"owner": "acme", "repo": "backend", "pr_number": 42, "review_kind": "clarity"}'
+        )
+
+        # Both analyze_file calls (one per FAKE_FILES entry) must have received
+        # the clarity framing, not the default fix framing.
+        analyze_calls = llm_mock.complete.call_args_list[:2]
+        for call in analyze_calls:
+            prompt_sent = call[1]["messages"][0]["content"]
+            assert "OBSERVABILITY ADDITION" in prompt_sent
+            assert "does the fix address the actual root cause" not in prompt_sent
 
     @pytest.mark.asyncio
     async def test_github_error_returns_error_answer(self):
