@@ -36,7 +36,7 @@ locals {
     { name = "AWS_REGION",                    value = var.region },
     { name = "ENVIRONMENT",                   value = var.environment },
     { name = "PYTHONUNBUFFERED",              value = "1" },
-    { name = "HARNESS_DOCS_PATH",             value = "targets/allinterviews" },
+    { name = "HARNESS_DOCS_PATH",             value = "targets/target-app" },
     # SNS topic the MonitorGenerationAgent wires into AlarmActions when
     # creating new CloudWatch alarms. Not a secret — just an ARN.
     { name = "CLOUDWATCH_ALARM_SNS_TOPIC_ARN", value = aws_sns_topic.alarms.arn },

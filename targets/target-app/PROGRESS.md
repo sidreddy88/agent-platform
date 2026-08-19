@@ -1,4 +1,4 @@
-# AllInterviews — Progress
+# Target App — Progress
 
 Single source of truth for session handoff. Update at the start and end of every session.
 
@@ -8,7 +8,7 @@ Single source of truth for session handoff. Update at the start and end of every
 
 Before starting any work, verify all of the following are true:
 
-- [ ] `npm install` completes without error (in AllInterviews repo root)
+- [ ] `npm install` completes without error (in the target app's repo root)
 - [ ] `cd client && npm install` completes without error
 - [ ] `npm test` passes (only documented known failures below are allowed)
 - [ ] "Current State" section below is accurate
@@ -20,11 +20,11 @@ If any item fails, fix it before starting new feature work.
 
 ## Current State
 
-All four phases authored in `agent-platform/targets/allinterviews/`. Not yet pushed to
-AllInterviews. Tests are authored to work once pushed to the AllInterviews repo root
-(relative imports assumed from there).
+All four phases authored in `agent-platform/targets/target-app/`. Not yet pushed to
+the target app's repo. Tests are authored to work once pushed to the target app's repo
+root (relative imports assumed from there).
 
-Two source patches documented but not yet applied to AllInterviews:
+Two source patches documented but not yet applied to the target app's repo:
 - `patches/config-index.patch.md` — add "test" to valid NODE_ENV values
 - `patches/server-export.patch.md` — export app, guard app.listen()
 
@@ -57,16 +57,16 @@ Done when:  <acceptance criterion — specific and verifiable>
 
 ## Next Steps
 
-1. **Push harness to AllInterviews as a PR**
+1. **Push harness to the target app as a PR**
    - Apply patches: `config-index.patch.md` + `server-export.patch.md`
-   - Add devDependencies + scripts from `package-overrides.json` to AllInterviews package.json
+   - Add devDependencies + scripts from `package-overrides.json` to the target app's package.json
    - Commit all harness files (tests, docs, .eslintrc.json, scripts/) via GitHub API
    - Run `npm test` locally — must be green before opening PR
-   - Open PR to AllInterviews `master`
+   - Open PR to the target app's `master`
    - Done when: `npm test` passes locally and PR is open
    - State: **not started**
 
-2. **Open PR to AllInterviews for Phase 4 files**
+2. **Open PR to the target app for Phase 4 files**
    - `.eslintrc.json`, `scripts/arch-check.js` — go in the same PR as Phase 1 or a follow-up
    - State: **not started**
 

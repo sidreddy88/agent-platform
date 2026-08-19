@@ -12,7 +12,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_TARGETS_DIR = Path(__file__).parent.parent.parent / "targets" / "allinterviews"
+_TARGETS_DIR = Path(__file__).parent.parent.parent / "targets" / "target-app"
 
 _CONFIG_INDEX_PATCH = (
     'assertInValues("NODE_ENV", ["production", "development", "local"])',
@@ -202,7 +202,7 @@ class SandboxService:
             logger.warning("[Sandbox] Docker daemon not available — falling back to direct npm test")
             return self._run_npm_direct(workdir)
 
-        project_name = re.sub(r"[^a-z0-9-]", "", Path(workdir).name.lower())[:40] or "allinterviews"
+        project_name = re.sub(r"[^a-z0-9-]", "", Path(workdir).name.lower())[:40] or "target-app"
         compose_cmd = ["docker", "compose", "-f", "docker-compose.test.yml", "-p", project_name]
         up_cmd = ["up", "--abort-on-container-exit", "--exit-code-from", "app"]
         if build:

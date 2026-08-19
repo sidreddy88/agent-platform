@@ -16,7 +16,7 @@ services:
       - /app/node_modules
     environment:
       - NODE_ENV=test
-      - MONGO_URI=mongodb://mongo:27017/allinterviews_test
+      - MONGO_URI=mongodb://mongo:27017/target_app_test
     depends_on:
       mongo:
         condition: service_healthy
