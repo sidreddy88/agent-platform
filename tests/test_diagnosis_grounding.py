@@ -938,6 +938,60 @@ async def test_root_cause_prose_untouched_when_snippet_grounded():
 
 
 @pytest.mark.asyncio
+async def test_additional_fix_prose_flagged_when_only_function_name_nulled():
+    """The actual live-incident gap this generalized fix closes: a diagnosis whose
+    root cause and affected_file/root_cause_snippet were ALL genuinely grounded (a
+    real axios.get() 404 in createThumbnailFromUrl) still had its additional_fix
+    prose invent a whole corroborating guard mechanism -- 'processInterviews guards
+    against re-creating an already-existing thumbnail (HeadObjectCommand at line
+    1757, NoSuchKey at line 1763)' -- naming a function that doesn't exist anywhere
+    in the repo. additional_fix_function correctly got nulled by the function-name
+    check (a DIFFERENT branch than the file/snippet-grounding check the earlier
+    MasterShoutout fix targeted) -- additional_fix_file/_snippet both survived
+    because the proposed fix's location and existing-code excerpt were real. Only
+    additional_fix (not root_cause) should get the caveat: the primary diagnosis
+    was never in question."""
+    async def found(owner, repo, query):
+        if "processInterviews" in query:
+            return []  # fabricated — doesn't exist anywhere in the repo
+        return [{"path": "routes/api/interviewUsers.js", "fragment": "match"}]
+
+    real_snippet = "} catch (err) {\n  console.log('Failed to process image', err);\n}"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        f"async function createThumbnailFromUrl(url) {{\n  {real_snippet}\n}}"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    original_root_cause = (
+        "createThumbnailFromUrl calls axios.get(imageUrl) with no existence check; "
+        "the source image is missing from S3/CDN, so it 404s."
+    )
+    original_additional_fix = (
+        "In `processInterviews` (line 1789), add a HeadObjectCommand pre-check. "
+        "processInterviews already guards against re-creating an existing thumbnail "
+        "(HeadObjectCommand at line 1757, NoSuchKey at line 1763)."
+    )
+    result = DiagnosisResult(
+        root_cause=original_root_cause,
+        confidence=0.55,
+        affected_function="createThumbnailFromUrl",
+        additional_fix=original_additional_fix,
+        additional_fix_function="processInterviews",
+        additional_fix_file="routes/api/interviewUsers.js",
+        additional_fix_snippet=real_snippet,
+    )
+
+    out = await agent._enforce_grounding(result)
+
+    assert out.additional_fix_function is None
+    assert out.additional_fix_file == "routes/api/interviewUsers.js"  # survived — real
+    assert out.additional_fix.startswith("UNVERIFIED")
+    assert original_additional_fix in out.additional_fix
+    # The primary diagnosis was never in question — no caveat should leak onto it.
+    assert out.root_cause == original_root_cause
+
+
+@pytest.mark.asyncio
 async def test_affected_file_nulled_when_snippet_omitted_but_verifiable():
     """Omitting the snippet is not a way around verification — same policy as
     additional_fix_file."""

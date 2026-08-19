@@ -867,6 +867,16 @@ class DiagnosisAgent(BaseAgent):
         """
         ungrounded: list[str] = []
 
+        # Snapshot the two field groups that feed the human-facing prose (root_cause
+        # reads from the "primary" group, additional_fix from the "secondary" group)
+        # so we can tell, at the end of this function, whether ANY check below nulled
+        # something in that group -- regardless of which specific check did it. See
+        # the unified UNVERIFIED-caveat block right before `return result`.
+        _primary_before = (result.affected_file, result.affected_function, result.root_cause_snippet)
+        _secondary_before = (
+            result.additional_fix_file, result.additional_fix_function, result.additional_fix_snippet,
+        )
+
         # Verify function names. A bad function name nulls only that function field —
         # NOT the file field. Express anonymous handlers (no searchable name) are common
         # and the file path is sufficient for fix generation.
@@ -958,26 +968,6 @@ class DiagnosisAgent(BaseAgent):
                 result.affected_file = None
                 result.affected_function = None
                 result.root_cause_snippet = None
-                # Nulling the structured fields above isn't enough on its own. Real
-                # production bug: a diagnosis named affected_file="models/MasterShoutout.js"
-                # with a root_cause_snippet quoting a field/line that doesn't exist in the
-                # real (17-line) file. This check correctly caught it and nulled the
-                # structured fields -- but result.root_cause (the free-text narrative that
-                # incident_loop.py copies verbatim into incident.diagnosis, the ONLY thing a
-                # human reviewer actually reads on the approval dashboard) is a separate
-                # LLM-authored field this function never touches. It kept repeating the
-                # exact same fabricated line number and code claim, now presented with zero
-                # indication that the system itself had just proven it false -- the warning
-                # only ever reached result.evidence, which incident_loop.py truncates into a
-                # Slack message and never persists onto the incident at all. Flag the
-                # human-facing text directly, since that's the one field guaranteed to reach
-                # a reviewer.
-                result.root_cause = (
-                    "UNVERIFIED — the specific file, line number, and code details below "
-                    "could not be confirmed against the actual repository and may be "
-                    "fabricated. Treat this as an unconfirmed hypothesis, not a confirmed "
-                    "root cause.\n\n" + result.root_cause
-                )
 
         # Verify additional_fix_file is still CURRENTLY vulnerable, not just that the
         # file exists. _file_exists_in_repo above only confirms the path is real — it
@@ -1010,15 +1000,6 @@ class DiagnosisAgent(BaseAgent):
                 result.additional_fix_file = None
                 result.additional_fix_function = None
                 result.additional_fix_snippet = None
-                # Same gap as the affected_file/root_cause block above, same fix: don't
-                # leave the free-text additional_fix description repeating a claim the
-                # structured fields were just nulled for failing to back up.
-                if result.additional_fix:
-                    result.additional_fix = (
-                        "UNVERIFIED — the specific file/line/code details below could not "
-                        "be confirmed against the actual repository and may be fabricated.\n\n"
-                        + result.additional_fix
-                    )
 
         # Verify blast_radius entries — each has a "file" key AND a "snippet" that may
         # be hallucinated independently of each other (see _snippet_is_grounded).
@@ -1201,6 +1182,51 @@ class DiagnosisAgent(BaseAgent):
                     f"diagnosis skipped the caller search."
                 ),
             ]
+
+        # ----- Flag the human-facing prose, not just the structured fields ---------
+        # Every check above nulls a structured field the moment it can't verify a
+        # claim -- but nulling affected_file/root_cause_snippet/additional_fix_function
+        # etc. does nothing to root_cause/additional_fix, the free-text narrative
+        # fields incident_loop.py copies verbatim into incident.diagnosis, the ONLY
+        # diagnosis text a human reviewer actually sees on the approval dashboard.
+        # (The per-failure GROUNDING NOTE above only ever reaches result.evidence,
+        # which incident_loop.py truncates into a Slack message and never persists
+        # onto the incident at all.)
+        #
+        # Two real production incidents, same underlying gap, caught by two DIFFERENT
+        # checks above: (1) a fabricated root_cause_snippet on models/MasterShoutout.js,
+        # caught by the snippet-grounding check a few blocks up; (2) a real, correctly-
+        # grounded root cause whose additional_fix prose separately invented a whole
+        # corroborating guard mechanism ("processInterviews guards against re-creating
+        # an already-existing thumbnail via HeadObjectCommand at line 1757") in a
+        # function name that got nulled by the FUNCTION-NAME check at the very top of
+        # this method -- a different branch than incident (1) hit. Patching each
+        # branch to prepend its own caveat (the first attempt at this fix) only covers
+        # whichever branches existed when it was written; the next fabrication just
+        # needs to trip a different one of the ~8 independent checks above. Comparing
+        # before/after on the two field GROUPS instead covers every branch uniformly,
+        # including ones added later, without needing to touch this file again.
+        primary_after = (result.affected_file, result.affected_function, result.root_cause_snippet)
+        secondary_after = (
+            result.additional_fix_file, result.additional_fix_function, result.additional_fix_snippet,
+        )
+        unverified_caveat = (
+            "UNVERIFIED — some of the specific file/line/code details below could not be "
+            "confirmed against the actual repository and may be fabricated. Treat this as "
+            "an unconfirmed hypothesis, not a confirmed fact.\n\n"
+        )
+        if (
+            primary_after != _primary_before
+            and result.root_cause
+            and not result.root_cause.startswith("UNVERIFIED")
+        ):
+            result.root_cause = unverified_caveat + result.root_cause
+        if (
+            secondary_after != _secondary_before
+            and result.additional_fix
+            and not result.additional_fix.startswith("UNVERIFIED")
+        ):
+            result.additional_fix = unverified_caveat + result.additional_fix
 
         return result
 
