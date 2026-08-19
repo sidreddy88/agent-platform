@@ -233,6 +233,19 @@ class DiagnosisResult:
     fix_approach: str = ""
     affected_function: str | None = None
     affected_file: str | None = None
+    root_cause_snippet: str | None = None      # verbatim excerpt of the CURRENT code in
+    # affected_file that actually shows the claimed bug -- the PRIMARY-target counterpart
+    # to additional_fix_snippet below. Real production bug, the worst fabrication found
+    # this session: a diagnosis named affected_file="models/MasterInspiring.js" and quoted
+    # a root_cause code snippet ("errors: { flagged: {...}, contentFlags: {...} }") that
+    # exists NOWHERE in the real repo -- not even in a different file. The real bug was a
+    # single, unrelated file (a log model with its own genuinely-real `errors` field) that
+    # was never found at all. affected_file's existence-only check passed trivially (the
+    # named file is real, just doesn't contain what root_cause claims), and unlike
+    # additional_fix_file, affected_file had no snippet-grounding check whatsoever --
+    # backwards, since affected_file is the PRIMARY field that actually gets edited by
+    # FixGenerationAgent, making it the single most consequential field to leave
+    # ungrounded. See _enforce_grounding.
     additional_fix: str | None = None          # secondary change description
     additional_fix_function: str | None = None # secondary function name
     additional_fix_file: str | None = None     # secondary file path
@@ -360,6 +373,7 @@ def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
                 fix_approach=data.get("fix_approach", ""),
                 affected_function=data.get("affected_function"),
                 affected_file=data.get("affected_file"),
+                root_cause_snippet=data.get("root_cause_snippet"),
                 additional_fix=data.get("additional_fix"),
                 additional_fix_function=data.get("additional_fix_function"),
                 additional_fix_file=data.get("additional_fix_file"),
@@ -900,6 +914,36 @@ class DiagnosisAgent(BaseAgent):
                 setattr(result, file_attr, None)
                 setattr(result, fn_attr, None)
 
+        # Verify root_cause_snippet is actually IN affected_file. The checks above only
+        # confirm the file exists and (if a function was named) that the function lives
+        # there -- neither confirms the CODE root_cause describes is real. Real
+        # production bug, the worst fabrication found this session: a diagnosis named
+        # affected_file="models/MasterInspiring.js" (a real file, module-level, no
+        # function claimed -- so the pairing check above never ran) and quoted a
+        # root_cause code snippet that exists NOWHERE in the real repo, not even in a
+        # different file. The actual bug was a single, unrelated file the diagnosis
+        # never found at all. affected_file is the single most consequential field to
+        # leave ungrounded -- it's what FixGenerationAgent actually edits -- so it gets
+        # the same mandatory-snippet policy as additional_fix_file (a missing snippet is
+        # treated the same as a wrong one, not more trustworthy for having no evidence
+        # attached), not the weaker "only check if present" policy blast_radius uses.
+        if result.affected_file and self._local_repo.ready:
+            path = result.affected_file
+            grounded = bool(result.root_cause_snippet) and await self._snippet_is_grounded(
+                path, result.root_cause_snippet
+            )
+            if not grounded:
+                logger.warning(
+                    "DiagnosisAgent: affected_file '%s' has no verifiable root_cause_snippet "
+                    "(missing, or doesn't match the file's actual current content) — root "
+                    "cause claim is unconfirmed — nulling affected_file/_function",
+                    path,
+                )
+                ungrounded.append(path)
+                result.affected_file = None
+                result.affected_function = None
+                result.root_cause_snippet = None
+
         # Verify additional_fix_file is still CURRENTLY vulnerable, not just that the
         # file exists. _file_exists_in_repo above only confirms the path is real — it
         # says nothing about whether the claimed bug is still there. Real production
@@ -1310,6 +1354,18 @@ Complete each step before moving to the next.
 
    If a file is truncated, search for the specific function name via search_codebase.
 
+   MANDATORY: before naming affected_file, copy a verbatim excerpt of the actual code
+   you just read — the specific lines that show the claimed bug — into
+   root_cause_snippet. Not a paraphrase, not a reconstruction from memory of what a
+   similar file elsewhere looked like: the literal text from THIS file, from a real
+   get_file_contents/read_file call in THIS diagnosis. Real production bug: a diagnosis
+   named a real file as affected_file and quoted a root_cause code snippet that existed
+   nowhere in the actual repo — not in that file, not in any file — while the real bug
+   (a different file entirely) was never found. affected_file with no root_cause_snippet,
+   or a snippet that isn't verbatim from that file, is discarded — the same policy
+   additional_fix_file already has, applied here because affected_file is the field that
+   actually gets edited, making it the most consequential one to get right.
+
 7. verify_symbol_in_repo — MANDATORY CODE-GROUNDING STEP (do not skip).
    For EVERY function name you intend to put in affected_function or additional_fix_function,
    call verify_symbol_in_repo with that exact name. This is not optional, even if the name
@@ -1424,6 +1480,7 @@ Answer with ONLY a valid JSON object:
   "fix_approach": "what must change at the upstream source",
   "affected_function": "primaryFunctionToFix or null",
   "affected_file": "path/to/primary/file.js or null",
+  "root_cause_snippet": "verbatim excerpt of the CURRENT code in affected_file that actually shows the claimed bug — copied from a real get_file_contents/read_file call, not from memory",
   "additional_fix": "optional: describe any secondary change in a different function/file, or null",
   "additional_fix_function": "secondaryFunctionName or null",
   "additional_fix_file": "path/to/secondary/file.js or null",

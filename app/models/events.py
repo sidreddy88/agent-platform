@@ -80,6 +80,11 @@ class IncidentState(BaseModel):
     reproduction_confirmed: Optional[bool] = None
     diagnosis_affected_file: Optional[str] = None      # primary fix file identified by DiagnosisAgent
     diagnosis_affected_function: Optional[str] = None  # primary fix function identified by DiagnosisAgent
+    diagnosis_root_cause_snippet: Optional[str] = None  # grounded snippet backing
+    # affected_file -- the primary-target counterpart to diagnosis_additional_fix_snippet.
+    # Persisted for audit/observability (what evidence actually convinced the grounding
+    # check this was real) even though FixGenerationAgent reads the full file itself and
+    # doesn't need this as a locator the way secondary-file passes do.
     diagnosis_additional_fix: Optional[str] = None         # secondary fix description
     diagnosis_additional_fix_file: Optional[str] = None    # secondary fix file
     diagnosis_additional_fix_function: Optional[str] = None  # secondary fix function
