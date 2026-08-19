@@ -53,16 +53,20 @@ CloudWatch Logs ─► DetectionService (poll · 5 min) ──────┤
                                               ┌────────────────┐
                                               │ DiagnosisAgent │  grounds every symbol against the live repo (Sonnet)
                                               └────────┬───────┘
-                                                        ▼
+                                          (< 70% confidence, no file identified) ──► ErrorClarityAgent
+                                                        │                            adds logging only — never fixes
+                                                        │ (≥ 70% confidence)          the bug, scope enforced in code
+                                                        ▼                            (not just by prompt) (Haiku)
                                               ┌────────────────┐
                                               │ FixGeneration  │  writes patch · sandbox test · retry 3× · self-critique (Sonnet + Haiku)
                                               └────────┬───────┘
                                                         ▼
-                                                 Open GitHub PR
+                                                 Open GitHub PR  ◄── or from ErrorClarityAgent, when it finds exact code
                                                         │
                                                         ▼
                                               ┌────────────────┐
-                                              │ CodeReviewAgent│  independent review, posts PR comment (GPT-4.1)
+                                              │ CodeReviewAgent│  independent review, posts PR comment — applies fix
+                                              │                │  vs. observability-specific criteria (GPT-4.1)
                                               └────────┬───────┘
                                                         ▼
                                               ┌────────────────┐
@@ -71,6 +75,8 @@ CloudWatch Logs ─► DetectionService (poll · 5 min) ──────┤
 ```
 
 Two independent detection paths feed the same dedup gate: a push-based SNS webhook (near-zero latency) and a `DetectionService` background loop polling CloudWatch Logs every 5 minutes as a backstop — this polls AWS's own CloudWatch API, not the target application's servers, so it adds no load there. Self-critique (Haiku) runs *inside* `FixGenerationAgent`, before the PR exists; `CodeReviewAgent` (GPT-4.1, via `litellm`) is a separate agent that reviews and comments *after* the PR is already open — two distinct steps, not one.
+
+When `DiagnosisAgent`'s confidence lands below the fix threshold with no file identified, `ErrorClarityAgent` (`app/agents/error_clarity.py`) runs instead of `FixGenerationAgent` — it adds a logging or error-handling line so the *next* occurrence is diagnosable, and explicitly does not attempt the fix itself. That boundary is enforced structurally, not just by prompt: its only path to committing code requires a proposed change to add a net-new logging/error-handling call, or it's rejected outright and routed to a text-only recommendation instead — a config change or behavior fix, even a correct one, can't get through. `CodeReviewAgent` reviews PRs from both agents, with different criteria depending on which one opened it (root-cause/symptom-fix checks for a `FixGenerationAgent` PR; secrets/PII-leakage and behavior-change checks for an `ErrorClarityAgent` one, since there's no "root cause" to check against for a change that isn't a fix).
 
 The pipeline runs on FastAPI with WebSocket streaming for the live dashboard. State lives in Postgres (`agent_runs`, `incidents`, `approvals`, `monitor_records`); RAG candidate matching lives in pgvector. The dashboard is a React + Vite bundle served from the same ECS container.
 
@@ -145,6 +151,8 @@ docs/              # MANUAL_BASELINE, architecture notes
 **Ground every symbol against the repo.** DiagnosisAgent runs `verify_symbol_in_repo` via GitHub Code Search; a server-side guard re-checks every named function in the parsed output and rejects fabricated camelCase identifiers.
 
 **Sandbox before PR.** Every fix runs in a Docker container against the real test suite. If tests fail, regenerate up to 3× before opening any GitHub noise.
+
+**Scope enforced in code, not by prompt.** `ErrorClarityAgent`'s prompt already says "add visibility, don't fix the bug" — that alone didn't stop it from once suppressing a warning via a schema-option change with zero logging added. Its commit path now requires a net-new logging/error-handling call in the proposed diff; anything else is rejected regardless of how the model justifies it.
 
 **Approval gate for HIGH/CRITICAL.** Configurable risk threshold; rejections are logged as RLHF preference pairs.
 
