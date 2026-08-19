@@ -37,7 +37,7 @@ FROM python:3.13-slim AS runtime
 # `build-essential gcc` are stripped after pip install via the purge below
 # to keep the image small.
 # `git` + `nodejs` + `npm` stay in the runtime image — SandboxService
-# clones the TargetApp repo and runs its Jest suite via direct npm
+# clones the target app's repo and runs its Jest suite via direct npm
 # (Docker-in-Fargate isn't viable, so the npm fallback path is the one
 # actually used in prod). Node 18 matches targets/target-app/Dockerfile.test.
 RUN apt-get update \

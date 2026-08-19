@@ -1,4 +1,4 @@
-# TargetApp — Agent Guide
+# Target App — Agent Guide
 
 ## What This Platform Is
 
@@ -107,7 +107,7 @@ npm run check        # runs all tests
 npm test             # jest --forceExit
 ```
 
-Tests live in `tests/` alongside this file. They are authored to run from the TargetApp
+Tests live in `tests/` alongside this file. They are authored to run from the target app's
 repo root (relative imports like `../../constants/helperFunctions`).
 
 ## Topic Docs

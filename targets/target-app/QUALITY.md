@@ -1,4 +1,4 @@
-# TargetApp — Module Health
+# Target App — Module Health
 
 Grades reflect test coverage, complexity, and incident history.
 Update when a module's health materially changes.

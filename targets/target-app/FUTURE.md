@@ -1,30 +1,30 @@
-# TargetApp — Deferred Features
+# Target App — Deferred Features
 
 Items here have clear pre-conditions. Do not start them until the pre-condition is met.
 
 ---
 
-## F1 — Stage 2: migrate tests + harness docs to TargetApp permanently
+## F1 — Stage 2: migrate tests + harness docs to the target app permanently
 
-**What:** Move `agent-platform/targets/target-app/` contents into the TargetApp
+**What:** Move `agent-platform/targets/target-app/` contents into the target app's own
 repo root. Enable branch protection on `master` (require `test` CI check before merge).
-Remove tests from agent-platform once they live in TargetApp.
+Remove tests from agent-platform once they live there.
 
 **Why deferred:** Tests must prove stable across several agent PRs before committing
-them permanently to a repo used by thousands of people. A bad test in TargetApp
+them permanently to a repo used by thousands of people. A bad test in the target repo
 blocks all PRs until fixed.
 
-**Pre-condition:** Tests are green across 5+ agent PRs on TargetApp.
+**Pre-condition:** Tests are green across 5+ agent PRs on the target app.
 
 ---
 
-## F2 — Branch protection on `master` (TargetApp)
+## F2 — Branch protection on `master` (target app)
 
 **What:** Enable branch protection requiring the `test` CI check to pass before any PR
 can be merged to `master`.
 
 ```bash
-gh api repos/TargetOrg/TargetApp/branches/master/protection \
+gh api repos/<org>/<target-app-repo>/branches/master/protection \
   --method PUT \
   --field required_status_checks='{"strict":true,"contexts":["test"]}' \
   --field enforce_admins=false \
@@ -62,7 +62,7 @@ test JSON parsing, null handling, and the safe fallback (block) path.
 
 ---
 
-## F5 — GitHub Actions CI on TargetApp PRs
+## F5 — GitHub Actions CI on the target app's PRs
 
 **What:** Enable the `.github/workflows/test.yml` workflow so tests run automatically
 on every PR to `master`. The workflow file is already authored in
