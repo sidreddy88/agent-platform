@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json as _json
 import logging
+import re
 from dataclasses import dataclass, field
 
 from app.core.config import settings
@@ -30,6 +31,41 @@ from app.services.llm import LLMService
 logger = logging.getLogger(__name__)
 
 PR_BASE = "staging"
+
+# ErrorClarityAgent's entire mandate is error VISIBILITY, not fixes — its own prompt
+# says so explicitly ("Do NOT fix the bug — only add error visibility"), but nothing
+# ever checked that a suggest_addition call actually honored it. Real production bug
+# (TargetOrg/TargetApp#2595): given a Mongoose "reserved schema pathname"
+# warning, the agent added `supressReservedKeysWarning: true` (sic — Mongoose's own
+# misspelling) to a schema's options — a genuine behavior change (silences a warning)
+# with zero logging or error-handling added, on a warning it was never asked to fix.
+# Wrong on two independent levels: (1) it's out of scope regardless of correctness —
+# ErrorClarityAgent isn't supposed to change behavior, only add visibility; (2) even
+# taken as a "fix," it used the grammatically-correct spelling, not the one this
+# repo's pinned mongoose@6.8.3 actually checks (`lib/schema.js` reads
+# `this.options.supressReservedKeysWarning` verbatim) — a class of error no amount of
+# reading the APP's own repo could catch, since the bug is in a third-party
+# dependency's exact spelling, not in anything suggest_addition's existing
+# code_before verbatim-match check was ever designed to verify.
+# This check targets failure (1), which is both the root cause (an agent whose whole
+# job is adding visibility decided a config change counted as "visibility") and the
+# one actually preventable here — requiring third-party API verification for every
+# addition is a much larger, separate effort (see the "how do we make agent behave
+# correctly" investigation this was found under).
+_OBSERVABILITY_MARKERS = re.compile(
+    r"console\.(log|error|warn|debug|info)\s*\(|logger\.\w+\s*\(|\.catch\s*\(|"
+    r"catch\s*\(|throw\s+|\.error\s*\(|\.warn\s*\("
+)
+
+
+def _adds_observability(code_before: str, code_after: str) -> bool:
+    """True only if code_after introduces at least one NEW logging/error-handling
+    call relative to code_before. A schema option, config flag, or any other value
+    change that adds zero actual visibility fails this — regardless of whether the
+    change itself would be correct, it's not what this agent exists to do."""
+    before_count = len(_OBSERVABILITY_MARKERS.findall(code_before or ""))
+    after_count = len(_OBSERVABILITY_MARKERS.findall(code_after or ""))
+    return after_count > before_count
 
 
 @dataclass
@@ -98,7 +134,13 @@ class ErrorClarityAgent:
                 "find-and-replace to create the PR. If you are not 100% sure of the exact text, "
                 "use flag_pattern instead.\n"
                 "Focus on: JSON.parse without try/catch, API calls that swallow errors, "
-                "DB queries with no .catch(), callbacks that return null with no logging."
+                "DB queries with no .catch(), callbacks that return null with no logging.\n"
+                "code_after must ADD a console/logger call, a try/catch, or a .catch() — it must "
+                "not just change a value, flag, or option. Silencing a warning (schema options, "
+                "library config, etc.) is a fix, not observability — use flag_pattern for that "
+                "instead, even if you're confident about what the fix should be: it belongs to "
+                "FixGenerationAgent or a human, not you, and a wrong guess at a third-party "
+                "library's exact option name is worse than no attempt."
             ),
             "input_schema": {
                 "type": "object",
@@ -244,11 +286,22 @@ class ErrorClarityAgent:
                         result = f"Search failed: {exc}"
 
                 elif name == "suggest_addition":
-                    raw_additions.append(inp)
-                    result = (
-                        f"✓ Specific addition recorded for {inp.get('file')}/{inp.get('function')}. "
-                        f"Will be committed to a PR. Continue or stop."
-                    )
+                    if not _adds_observability(inp.get("code_before", ""), inp.get("code_after", "")):
+                        result = (
+                            "REJECTED: code_after doesn't add any logging or error-handling — it "
+                            "changes behavior/config instead (a value, a flag, a schema option, etc.). "
+                            "That's a fix, not observability, and fixing bugs is out of scope for this "
+                            "agent — even a correct fix belongs to FixGenerationAgent or a human, and "
+                            "an incorrect one (e.g. a third-party library option whose exact spelling "
+                            "you can't verify from this repo alone) is actively worse than doing "
+                            "nothing. Use flag_pattern instead to record this as a recommendation."
+                        )
+                    else:
+                        raw_additions.append(inp)
+                        result = (
+                            f"✓ Specific addition recorded for {inp.get('file')}/{inp.get('function')}. "
+                            f"Will be committed to a PR. Continue or stop."
+                        )
 
                 elif name == "flag_pattern":
                     raw_patterns.append(inp)
