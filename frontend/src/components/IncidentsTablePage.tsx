@@ -31,6 +31,19 @@ function shortName(name: string) {
   return AGENT_SHORT[name] ?? name.replace("Agent", "");
 }
 
+// Real gap: pr_url/pr_number are FixGenerationAgent's fields — an ErrorClarityAgent
+// PR lives in clarity_pr_url/clarity_pr_number instead, and every reference to
+// inc.pr_url/inc.pr_number in this table checked only the fix fields, so a clarity
+// PR showed as "—" with no link and no way to act on it, even after it was merged
+// on GitHub. Same underlying bug as the /api/agents/pr-stats fix — mutually
+// exclusive fields, so "whichever is set" is unambiguous.
+function prLinkFor(inc: Incident): { url: string | null; number: number | null } {
+  return {
+    url: inc.pr_url ?? inc.clarity_pr_url,
+    number: inc.pr_number ?? inc.clarity_pr_number,
+  };
+}
+
 // ── Agent run pills ──────────────────────────────────────────────────────────
 
 function AgentRunPills({ runs, onNote }: { runs: AgentRun[]; onNote: (r: AgentRun) => void }) {
@@ -177,6 +190,7 @@ export function IncidentsTablePage({ incidents }: Props) {
   const [agentRunMap, setAgentRunMap] = useState<Record<string, AgentRun[]>>({});
   const [archiving, setArchiving] = useState<string | null>(null);
   const [resolving, setResolving] = useState<string | null>(null);
+  const [marking, setMarking] = useState<string | null>(null);
   const [wrongFixTarget, setWrongFixTarget] = useState<Incident | null>(null);
   const [noteTarget, setNoteTarget] = useState<AgentRun | null>(null);
   // Local overlay state for archived/wrong_fix (optimistic, until WS update arrives)
@@ -214,6 +228,21 @@ export function IncidentsTablePage({ incidents }: Props) {
       setLocalResolved((prev) => new Set(prev).add(id));
     } finally {
       setResolving(null);
+    }
+  }
+
+  // Distinct from handleResolve: outcome=fix_merged (not manually_resolved) is what
+  // /api/agents/pr-stats' "merged" count and MTTR calculation actually check for
+  // (see get_pr_stats — mttr_seconds is only set "when outcome == fix_merged"). An
+  // incident whose PR (fix or clarity) was actually merged should use this, not the
+  // generic Resolve, so it's counted correctly on the PR stats dashboard.
+  async function handleMarkMerged(id: string) {
+    setMarking(id);
+    try {
+      await fetch(`/incidents/${id}/mark-merged`, { method: "POST" });
+      setLocalResolved((prev) => new Set(prev).add(id));
+    } finally {
+      setMarking(null);
     }
   }
 
@@ -281,7 +310,8 @@ export function IncidentsTablePage({ incidents }: Props) {
             </thead>
             <tbody>
               {filtered.map((inc, i) => {
-                const hasPR = !!inc.pr_url;
+                const pr = prLinkFor(inc);
+                const hasPR = !!pr.url;
                 return (
                   <tr key={inc.id} style={tRow(i % 2 === 0)}>
                     <td style={td}>
@@ -314,9 +344,9 @@ export function IncidentsTablePage({ incidents }: Props) {
                       })()}
                     </td>
                     <td style={td}>
-                      {inc.pr_url ? (
-                        <a href={inc.pr_url} target="_blank" rel="noreferrer" style={prLink}>
-                          #{inc.pr_number}
+                      {pr.url ? (
+                        <a href={pr.url} target="_blank" rel="noreferrer" style={prLink}>
+                          #{pr.number}
                         </a>
                       ) : (
                         <span style={noData}>—</span>
@@ -331,14 +361,25 @@ export function IncidentsTablePage({ incidents }: Props) {
                     <td style={{ ...td, whiteSpace: "nowrap" as const }}>
                       <div style={{ display: "flex", gap: 4 }}>
                         {!TERMINAL.has(inc.status) && !localResolved.has(inc.id) && (
-                          <button
-                            style={actionBtn("#1e3a2a", "#22c55e", resolving === inc.id)}
-                            onClick={() => handleResolve(inc.id)}
-                            disabled={resolving === inc.id}
-                            title="Mark as resolved"
-                          >
-                            {resolving === inc.id ? "…" : "Resolve"}
-                          </button>
+                          hasPR ? (
+                            <button
+                              style={actionBtn("#1e3a2a", "#22c55e", marking === inc.id)}
+                              onClick={() => handleMarkMerged(inc.id)}
+                              disabled={marking === inc.id}
+                              title="Mark this PR as merged — counts toward PR stats' merged/MTTR numbers"
+                            >
+                              {marking === inc.id ? "…" : "Mark Merged"}
+                            </button>
+                          ) : (
+                            <button
+                              style={actionBtn("#1e3a2a", "#22c55e", resolving === inc.id)}
+                              onClick={() => handleResolve(inc.id)}
+                              disabled={resolving === inc.id}
+                              title="Mark as resolved"
+                            >
+                              {resolving === inc.id ? "…" : "Resolve"}
+                            </button>
+                          )
                         )}
                         {isResolved(inc) && (
                           <button
@@ -389,7 +430,9 @@ export function IncidentsTablePage({ incidents }: Props) {
                 </tr>
               </thead>
               <tbody>
-                {wrongFixIncidents.map((inc, i) => (
+                {wrongFixIncidents.map((inc, i) => {
+                  const wfPr = prLinkFor(inc);
+                  return (
                   <tr key={inc.id} style={tRow(i % 2 === 0)}>
                     <td style={td}>
                       <span style={{ color: SEV_COLOR[inc.error_event.severity] ?? "#6b7280", fontWeight: 700, fontSize: 11 }}>
@@ -403,9 +446,9 @@ export function IncidentsTablePage({ incidents }: Props) {
                       <span style={svcBadge}>{inc.error_event.service}</span>
                     </td>
                     <td style={td}>
-                      {inc.pr_url ? (
-                        <a href={inc.pr_url} target="_blank" rel="noreferrer" style={prLink}>
-                          #{inc.pr_number}
+                      {wfPr.url ? (
+                        <a href={wfPr.url} target="_blank" rel="noreferrer" style={prLink}>
+                          #{wfPr.number}
                         </a>
                       ) : (
                         <span style={noData}>—</span>
@@ -422,7 +465,8 @@ export function IncidentsTablePage({ incidents }: Props) {
                       <span style={wrongNotes}>{inc.wrong_fix_notes ?? "—"}</span>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
