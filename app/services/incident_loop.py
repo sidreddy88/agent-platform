@@ -1019,6 +1019,42 @@ class IncidentLoop:
                 incident_id, incident.status,
             )
             return
+        await self._execute_refix(incident)
+
+    async def refix_with_notes(self, incident_id: str, notes: str) -> None:
+        """Re-run fix generation with human-provided notes, regardless of current status.
+
+        Unlike refix_from_review (gated to the CodeReviewAgent REQUEST_CHANGES
+        workflow), this is the general "I disagree with this fix, try again with my
+        feedback" action -- usable any time a fix already exists, not only mid-review.
+        Real gap this closes: a diagnosis correctly found the affected file at 55%
+        confidence, a human approved fix generation anyway, the fix that came back
+        was wrong (self-critique even said a simpler fix existed), and there was no
+        way to act on that disagreement -- refix_from_review's AWAITING_REFIX_APPROVAL
+        gate made it entirely unreachable outside the one specific review-driven
+        pathway, so a human's only option was accept the bad fix or manually intervene
+        outside the app.
+        """
+        incident = incident_store.get(incident_id)
+        if incident is None:
+            logger.error("[IncidentLoop] refix_with_notes: incident %s not found", incident_id)
+            return
+        if incident.status == IncidentStatus.FIXING:
+            logger.warning(
+                "[IncidentLoop] refix_with_notes: %s is already mid-fix — ignoring", incident_id,
+            )
+            return
+        existing = incident.human_notes or ""
+        incident.human_notes = f"HUMAN INSTRUCTION: {notes.strip()}\n\n{existing}".strip()
+        incident_store.update(incident)
+        await self._execute_refix(incident)
+
+    async def _execute_refix(self, incident: IncidentState) -> None:
+        """Shared refix execution: close the old PR, re-run FixGenerationAgent with
+        incident.human_notes as guidance, and handle every outcome shape _run_fix can
+        return. Callers are responsible for validating status and setting human_notes
+        beforehand -- this assumes both are already correct."""
+        incident_id = incident.id
 
         # Classify review intent before closing the PR — if the fix is already correct
         # and the reviewer only wants additions, use the PR branch as the fix base so
