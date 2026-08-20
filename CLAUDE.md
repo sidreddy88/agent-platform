@@ -107,7 +107,7 @@ timezone: UTC                   # timezone for timestamps in outputs
 
 ## MCP Server
 
-Exposes agents as tools for Claude Desktop:
+Exposes the 5 standalone/earlier-design agents (RequirementsAgent, CodeReviewAgent, CICDAgent, DeploymentAgent, IncidentResponseAgent — see the table above) as tools for Claude Desktop. The production incident pipeline agents (TriageAgent, DiagnosisAgent, FixGenerationAgent, MergeDecisionAgent, ErrorClarityAgent, MonitorGenerationAgent) are not exposed here — they run as part of `incident_loop.py`'s pipeline, not as standalone callable tools:
 
 ```bash
 python mcp_server/server.py
