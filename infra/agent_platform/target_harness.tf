@@ -13,10 +13,25 @@
 # reused here — GitHub's OIDC provider is a single account-level resource, not
 # one per trusting repo.
 
-variable "target_harness_repo" {
-  description = "owner/repo allowed to push harness content to S3 via OIDC."
+# GitHub's default OIDC `sub` claim format changed at some point after
+# agent-platform itself was created: NEW repos get immutable owner/repo IDs
+# baked into the subject (repo:owner@ownerID/repo@repoID:ref:...) instead of
+# the plain repo:owner/repo:ref:... format agent-platform's own deploy role
+# (github_oidc.tf) still uses — confirmed both are real via
+# `gh api repos/OWNER/REPO/actions/oidc/customization/sub` on each repo:
+# agent-platform still resolves to the plain prefix (grandfathered), this
+# repo resolves to the immutable-ID one. The customization API only lets you
+# choose which claim segments appear (repo, ref, environment, ...), not
+# override a segment's format, so matching reality here — rather than
+# fighting the platform default — is the only real fix. First production
+# proof this changed: the initial `sts:AssumeRoleWithWebIdentity` calls
+# against a trust policy written for the plain format failed outright.
+# These IDs are immutable for the life of the account/repo (that's the
+# point of the feature), so hardcoding them is not fragile.
+variable "target_harness_repo_immutable_sub_prefix" {
+  description = "OIDC sub claim prefix for sidreddy88/agent-platform-target-harness, including GitHub's immutable owner/repo IDs — verified via `gh api repos/<repo>/actions/oidc/customization/sub`."
   type        = string
-  default     = "sidreddy88/agent-platform-target-harness"
+  default     = "sidreddy88@4920692/agent-platform-target-harness@1340892405"
 }
 
 resource "aws_s3_bucket" "target_harness" {
@@ -58,7 +73,7 @@ data "aws_iam_policy_document" "github_harness_sync_assume" {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${var.target_harness_repo}:ref:refs/heads/main",
+        "repo:${var.target_harness_repo_immutable_sub_prefix}:ref:refs/heads/main",
       ]
     }
   }
