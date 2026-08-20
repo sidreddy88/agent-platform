@@ -48,6 +48,7 @@ class _FakeSettings:
     target_harness_key = "latest.tar.gz"
     harness_docs_path = ""  # set per-test to a tmp_path
     aws_region = "us-east-1"
+    skip_target_harness_fetch = False
 
 
 @pytest.fixture
@@ -58,14 +59,42 @@ def fake_settings(tmp_path):
         yield s
 
 
-def test_skips_cleanly_when_bucket_unset(tmp_path):
+def test_unset_bucket_fails_loud_not_skips(tmp_path):
+    """The actual gap this closes: an empty bucket setting must never be
+    silently treated as 'nothing to do' -- that's exactly how a forgotten
+    env var in a task definition turns into a silent outage, the same
+    failure shape as the Langfuse-tracing and FIX_TARGET_REPO incidents this
+    script's docstring cites as precedent."""
     s = _FakeSettings()
     s.target_harness_bucket = ""
     s.harness_docs_path = str(tmp_path / "target-app")
     with patch("app.core.config.settings", s):
-        assert fetch_target_harness.main() == 0
-    # No directory should have been created — nothing to extract.
+        assert fetch_target_harness.main() == 1
     assert not (tmp_path / "target-app").exists()
+
+
+def test_skip_flag_skips_cleanly(tmp_path):
+    """The actual, deliberate opt-out for local dev -- must be an explicit
+    flag a developer sets on purpose, not an accidental default."""
+    s = _FakeSettings()
+    s.target_harness_bucket = ""
+    s.skip_target_harness_fetch = True
+    s.harness_docs_path = str(tmp_path / "target-app")
+    with patch("app.core.config.settings", s):
+        assert fetch_target_harness.main() == 0
+    assert not (tmp_path / "target-app").exists()
+
+
+def test_skip_flag_wins_even_if_bucket_is_set(tmp_path):
+    """skip_target_harness_fetch short-circuits before any S3 call is made,
+    regardless of what target_harness_bucket holds."""
+    s = _FakeSettings()
+    s.skip_target_harness_fetch = True
+    s.harness_docs_path = str(tmp_path / "target-app")
+    mock_boto3 = MagicMock()
+    with patch("app.core.config.settings", s), patch.dict(sys.modules, {"boto3": mock_boto3}):
+        assert fetch_target_harness.main() == 0
+    mock_boto3.client.assert_not_called()
 
 
 def test_successful_fetch_extracts_files(fake_settings):

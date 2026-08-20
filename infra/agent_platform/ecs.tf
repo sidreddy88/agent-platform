@@ -37,6 +37,10 @@ locals {
     { name = "ENVIRONMENT",                   value = var.environment },
     { name = "PYTHONUNBUFFERED",              value = "1" },
     { name = "HARNESS_DOCS_PATH",             value = "targets/target-app" },
+    # scripts/fetch_target_harness.py fails the container startup outright if
+    # this is unset (see its own docstring) -- deliberately not a value that
+    # can be silently forgotten, unlike a fetch that just skips quietly.
+    { name = "TARGET_HARNESS_BUCKET", value = aws_s3_bucket.target_harness.bucket },
     # SNS topic the MonitorGenerationAgent wires into AlarmActions when
     # creating new CloudWatch alarms. Not a secret — just an ARN.
     { name = "CLOUDWATCH_ALARM_SNS_TOPIC_ARN", value = aws_sns_topic.alarms.arn },
