@@ -80,6 +80,22 @@ def main() -> int:
         import boto3
         from botocore.exceptions import BotoCoreError, ClientError
 
+        # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY are set in production (SSM
+        # secret, see infra/agent_platform/secrets.tf) for AWSService's
+        # cross-account CloudWatch access — a different AWS account than
+        # this bucket lives in. boto3's default credential chain checks
+        # env-var credentials BEFORE the task's IAM role, so if this client
+        # picked them up it would try to read this (same-account) bucket as
+        # that other account's identity and fail — the exact AccessDenied
+        # incident that led to those keys being removed once already, before
+        # the cross-account CloudWatch need was found and they had to come
+        # back. Stripped here, for this call site only, so this fetch always
+        # uses task_runtime's role regardless of what else the container
+        # needs those env vars for.
+        os.environ.pop("AWS_ACCESS_KEY_ID", None)
+        os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
+        os.environ.pop("AWS_SESSION_TOKEN", None)
+
         s3 = boto3.client("s3", region_name=settings.aws_region)
         logger.info(
             "Fetching s3://%s/%s ...", settings.target_harness_bucket, settings.target_harness_key,
