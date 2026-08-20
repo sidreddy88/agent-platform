@@ -262,7 +262,11 @@ class TestPipelineDispatch:
         assert orch._stats["incident_pipeline"] == 0
 
     @pytest.mark.asyncio
-    async def test_cloudwatch_incident_fires_enrichment(self):
+    async def test_cloudwatch_incident_does_not_fire_enrichment(self):
+        """Parallel deployment enrichment is deliberately disabled (see the
+        commented-out block in Orchestrator._run) -- CLOUDWATCH incidents
+        still route to the incident pipeline, they just don't also fire
+        deployment enrichment alongside it anymore."""
         orch = make_orchestrator()
         event = make_event(source=EventSource.CLOUDWATCH, error_type="S3_NO_SUCH_KEY")
 
@@ -270,8 +274,9 @@ class TestPipelineDispatch:
             mock_alert.send_alert = AsyncMock()
             await orch._dispatch(event)
 
-        assert orch._stats["enrichment_fired"] == 1
-        orch._deployment_agent.run.assert_called_once()
+        assert orch._stats["incident_pipeline"] == 1
+        assert orch._stats["enrichment_fired"] == 0
+        orch._deployment_agent.run.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_digital_ocean_incident_no_enrichment(self):
@@ -491,4 +496,6 @@ class TestRouteLog:
         assert orch._stats["incident_pipeline"] == 1
         assert orch._stats["performance_pipeline"] == 1
         assert orch._stats["cicd_pipeline"] == 1
-        assert orch._stats["enrichment_fired"] == 1  # only the CLOUDWATCH incident
+        # Parallel deployment enrichment is deliberately disabled (see the
+        # commented-out block in Orchestrator._run) -- never fires currently.
+        assert orch._stats["enrichment_fired"] == 0

@@ -320,6 +320,10 @@ class TestFixGenerationBlastRadius:
         agent._rag = None
         agent._owner = "org"
         agent._repo = "repo"
+        # _resolve_target() checks self._local_repo.ready before falling back
+        # to the GitHub API reads mocked below -- __new__() skips __init__(),
+        # which is what normally sets this up.
+        agent._local_repo = MagicMock(ready=False)
 
         # Patch BlastRadiusGuard to always return a violation
         with patch("app.agents.fix_generation.BlastRadiusGuard") as MockGuard:
@@ -377,6 +381,10 @@ class TestFixGenerationBlastRadius:
         agent._owner = "org"
         agent._repo = "repo"
         agent._rag = None
+        # _resolve_target() checks self._local_repo.ready before falling back
+        # to the GitHub API reads mocked below -- __new__() skips __init__(),
+        # which is what normally sets this up.
+        agent._local_repo = MagicMock(ready=False)
 
         agent._github = MagicMock()
         agent._github.get_default_branch = AsyncMock(return_value="main")

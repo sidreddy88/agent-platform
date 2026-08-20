@@ -284,6 +284,8 @@ class TestBaseAgentCheckpointIntegration:
 
         agent = BaseAgent.__new__(BaseAgent)
         agent._tracing_ctx = MagicMock(enabled=False)
+        agent._min_tool_calls_before_answer = 0  # __new__() skips __init__()'s default
+        agent._required_tool_names_before_answer = set()  # same reason
         agent._tools = {
             "dummy": (AsyncMock(return_value="result"), "dummy tool")
         }
@@ -291,6 +293,7 @@ class TestBaseAgentCheckpointIntegration:
         mock_llm = MagicMock(spec=LLMService)
         mock_llm.complete = _fake_complete
         mock_llm.last_input_tokens = 0
+        mock_llm.last_output_tokens = 0  # BaseAgent.run() reads this to total output tokens
         agent._llm = mock_llm
 
         # Custom checkpointer with a very low limit so it fires immediately
@@ -331,11 +334,14 @@ class TestBaseAgentCheckpointIntegration:
 
         agent = BaseAgent.__new__(BaseAgent)
         agent._tracing_ctx = MagicMock(enabled=False)
+        agent._min_tool_calls_before_answer = 0  # __new__() skips __init__()'s default
+        agent._required_tool_names_before_answer = set()  # same reason
         agent._tools = {}
         from app.services.llm import LLMService
         mock_llm = MagicMock(spec=LLMService)
         mock_llm.complete = _fake_complete
         mock_llm.last_input_tokens = 100  # well below any threshold
+        mock_llm.last_output_tokens = 0  # BaseAgent.run() reads this to total output tokens
         agent._llm = mock_llm
 
         cp = ContextCheckpointer(context_window=200_000, threshold=0.70)
