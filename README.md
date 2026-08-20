@@ -86,7 +86,7 @@ The pipeline runs on FastAPI with WebSocket streaming for the live dashboard. St
 
 | Layer | Choice |
 |---|---|
-| Agent runtime | Anthropic SDK · Claude Opus 4.6 / Sonnet 4.6 / Haiku 4.5 |
+| Agent runtime | Anthropic SDK · Claude Sonnet 4.6 / Haiku 4.5 · GPT-4.1 (via litellm, `CodeReviewAgent` only) |
 | Web framework | FastAPI · WebSocket streaming · Pydantic v2 |
 | Storage | Postgres (SQLAlchemy Core) · pgvector for RAG |
 | Sandbox | Docker Compose · Jest · mongodb-memory-server |
@@ -133,8 +133,9 @@ app/
 mcp_server/        # MCP server exposing agents to Claude Desktop
 infra/             # Terraform for ECS Fargate + Cloudflare + SNS
 scripts/           # measure_mttr.py, eval_rag.py, triage_replay.py
-targets/           # External codebases the platform operates on
-tests/             # pytest test suite (818 tests, mocked — no live API calls)
+targets/           # Fetched from S3 at container startup (scripts/fetch_target_harness.py) —
+                   # empty on a fresh clone, not committed to this repo
+tests/             # pytest test suite (880 tests, mocked — no live API calls)
 docs/              # MANUAL_BASELINE, architecture notes
 ```
 
