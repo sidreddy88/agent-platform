@@ -135,7 +135,7 @@ infra/             # Terraform for ECS Fargate + Cloudflare + SNS
 scripts/           # measure_mttr.py, eval_rag.py, triage_replay.py
 targets/           # Fetched from S3 at container startup (scripts/fetch_target_harness.py) —
                    # empty on a fresh clone, not committed to this repo
-tests/             # pytest test suite (880 tests, mocked — no live API calls)
+tests/             # pytest test suite (858 passing, mocked — no live API calls)
 docs/              # MANUAL_BASELINE, architecture notes
 ```
 
