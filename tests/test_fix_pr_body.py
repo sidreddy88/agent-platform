@@ -2,7 +2,7 @@
 Regression tests for _build_fix_pr_body — the PR body FixGenerationAgent opens for
 an auto-generated fix.
 
-Real production bug, found on a live PR (VoyageGroupMag/AllInterviews#2589): the
+Real production bug, found on a live PR (target app issue #2589): the
 inline version this replaced truncated the self-critique to 300 chars before
 embedding it (`critique[:300]`), which cut the text off before the verdict line
 the critique prompt itself asks for LAST ("FINAL LINE — must be exactly one of:

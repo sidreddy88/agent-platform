@@ -48,10 +48,10 @@ def _incident(pr_url: str | None = None) -> IncidentState:
     event = ErrorEvent(
         source=EventSource.CLOUDWATCH,
         error_type="APP_CRASHED",
-        title="APP_CRASHED in TaskAllInterviews",
-        service="TaskAllInterviews",
+        title="APP_CRASHED in TaskTargetApp",
+        service="TaskTargetApp",
         description="CastError: Cast to Number failed for value \"5341614a\"",
-        metadata={"log_group": "/ecs/TaskAllInterviews"},
+        metadata={"log_group": "/ecs/TaskTargetApp"},
     )
     inc = IncidentState(error_event=event)
     inc.pr_url = pr_url

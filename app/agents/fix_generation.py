@@ -633,7 +633,7 @@ class FixGenerationAgent(BaseAgent):
                     sec_content, sec_sha = await self._read_file(secondary_path, ref=PR_BASE)
                     sec_fn = secondary_fn or "(module-level)"
                     # Ground this in the ACTUAL primary diff + diagnosis snippet, not
-                    # free-text prose alone. Real incident (AllInterviews PR #2552):
+                    # free-text prose alone. Real incident (target app PR #2552):
                     # 2 of 5 files got the correct fix applied to the existing
                     # handler; the other 3 -- given only a prose description of the
                     # bug with no concrete code to search for -- fabricated an

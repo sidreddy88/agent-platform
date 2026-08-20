@@ -122,7 +122,7 @@ class Settings(BaseSettings):
 
     # CloudWatch log filter patterns for application-level error detection.
     # JSON array: [{"log_group": "/ecs/...", "pattern": "NoSuchKey",
-    #               "error_type": "S3_NO_SUCH_KEY", "service": "allinterviews"}]
+    #               "error_type": "S3_NO_SUCH_KEY", "service": "target-app"}]
     cw_log_filters: str = ""
 
     # SNS topic ARN that CloudWatch alarms publish to. When set:

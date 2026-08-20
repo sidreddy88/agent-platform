@@ -111,4 +111,4 @@ OPEN → TRIAGING → NOISE / DUPLICATE (terminal)
 
 ## Interview story
 
-Not a toy — runs against a real production codebase (AllInterviews), has caught and fixed real bugs, measurable accuracy metrics (92% triage, <8% false-positive, ~6 min MTTR). Every layer is defensible: why Haiku vs Sonnet, why stack-trace-only, why SQLite, why the DoD gate exists.
+Not a toy — runs against a real production codebase (the target app), has caught and fixed real bugs, measurable accuracy metrics (92% triage, <8% false-positive, ~6 min MTTR). Every layer is defensible: why Haiku vs Sonnet, why stack-trace-only, why SQLite, why the DoD gate exists.

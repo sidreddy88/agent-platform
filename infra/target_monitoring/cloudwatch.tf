@@ -1,4 +1,4 @@
-# Metric filter scans the AllInterviews log group for Node.js error
+# Metric filter scans the target app's log group for Node.js error
 # signatures. Pattern is intentionally Node-specific — different from
 # the Python agent-platform self-monitor's `ERROR:` prefix:
 #

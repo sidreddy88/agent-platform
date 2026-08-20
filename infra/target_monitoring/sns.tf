@@ -1,4 +1,4 @@
-# SNS topic in the AllInterviews account. CloudWatch alarms publish to
+# SNS topic in the target app's account. CloudWatch alarms publish to
 # same-region same-account SNS topics by default, so the topic lives
 # here rather than in the agent-platform account.
 #

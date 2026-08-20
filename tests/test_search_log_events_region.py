@@ -1,7 +1,7 @@
 """
 Regression tests for the search_log_events() region bug.
 
-Real production bug, traced end-to-end: AllInterviews' CloudWatch logs live in
+Real production bug, traced end-to-end: the target app's CloudWatch logs live in
 us-east-2; agent-platform's own infra (and its default AWS client) is in
 us-east-1. get_error_logs() has always threaded a `region` override through for
 exactly this reason -- but search_log_events() never had a region parameter at
@@ -34,7 +34,7 @@ def test_search_log_events_passes_region_to_client():
     mock_logs.filter_log_events.return_value = {"events": []}
 
     with patch.object(AWSService, "_client", return_value=mock_logs) as mock_client:
-        service.search_log_events("/ecs/TaskAllInterviews", "CastError", region="us-east-2")
+        service.search_log_events("/ecs/TaskTargetApp", "CastError", region="us-east-2")
 
     mock_client.assert_called_once_with("logs", region="us-east-2")
 
@@ -47,7 +47,7 @@ def test_search_log_events_region_defaults_to_none():
     mock_logs.filter_log_events.return_value = {"events": []}
 
     with patch.object(AWSService, "_client", return_value=mock_logs) as mock_client:
-        service.search_log_events("/ecs/TaskAllInterviews", "CastError")
+        service.search_log_events("/ecs/TaskTargetApp", "CastError")
 
     mock_client.assert_called_once_with("logs", region=None)
 
@@ -68,7 +68,7 @@ async def test_triage_occurrence_count_uses_configured_log_region():
         mock_settings.ecs_log_groups_region = "us-east-2"
         agent._register_tools()
         tool_fn, _ = agent._tools["get_occurrence_count"]
-        await tool_fn(log_group="/ecs/TaskAllInterviews", pattern="CastError")
+        await tool_fn(log_group="/ecs/TaskTargetApp", pattern="CastError")
 
     agent._aws.search_log_events.assert_called_once()
     assert agent._aws.search_log_events.call_args.kwargs["region"] == "us-east-2"
@@ -92,9 +92,9 @@ def _make_diagnosis_agent() -> DiagnosisAgent:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name,kwargs", [
-    ("get_error_samples", {"log_group": "/ecs/TaskAllInterviews", "pattern": "CastError"}),
-    ("check_still_occurring", {"log_group": "/ecs/TaskAllInterviews", "pattern": "CastError"}),
-    ("get_occurrence_timeline", {"log_group": "/ecs/TaskAllInterviews", "pattern": "CastError"}),
+    ("get_error_samples", {"log_group": "/ecs/TaskTargetApp", "pattern": "CastError"}),
+    ("check_still_occurring", {"log_group": "/ecs/TaskTargetApp", "pattern": "CastError"}),
+    ("get_occurrence_timeline", {"log_group": "/ecs/TaskTargetApp", "pattern": "CastError"}),
 ])
 async def test_diagnosis_log_tool_uses_configured_log_region(tool_name, kwargs):
     agent = _make_diagnosis_agent()

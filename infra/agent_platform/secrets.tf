@@ -23,7 +23,7 @@ locals {
   # AWSService calls -- it didn't check which AWS ACCOUNT those calls need
   # to reach. The target app's real CloudWatch log group/alarms/SNS topic
   # live in a separate AWS account (950252867672) from this one
-  # (542337758768, see infra/allinterviews_monitoring). An IAM role in this
+  # (542337758768, see infra/target_monitoring). An IAM role in this
   # account can never read another account's CloudWatch Logs no matter what
   # permissions it's granted -- only a static credential scoped to that
   # other account (or a proper cross-account trust relationship, not yet

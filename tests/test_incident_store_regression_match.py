@@ -8,7 +8,7 @@ for a service that crashes for many unrelated reasons under the same generic
 different file, different root cause entirely, incident b71aa206 / PR #2279 —
 which only ever touched routes/api/image.js) as "the same error, previously
 resolved" -- purely because both happened to be APP_CRASHED on
-TaskAllInterviews. DiagnosisAgent's prompt frames this as "PRIOR KNOWLEDGE --
+TaskTargetApp. DiagnosisAgent's prompt frames this as "PRIOR KNOWLEDGE --
 treat as strong evidence" with no verification at all, and the model produced
 a confident, specific-sounding root_cause citing the wrong incident/PR as
 evidence that 7 sibling files were already fixed -- a detail that wasn't even
@@ -45,8 +45,8 @@ def _resolved_incident(
     event = ErrorEvent(
         source=EventSource.CLOUDWATCH,
         error_type="APP_CRASHED",
-        title="APP_CRASHED in TaskAllInterviews",
-        service="TaskAllInterviews",
+        title="APP_CRASHED in TaskTargetApp",
+        service="TaskTargetApp",
         description=description,
     )
     inc = IncidentState(error_event=event)
@@ -73,7 +73,7 @@ def test_matches_when_description_is_similar():
 
     with _no_live_db():
         result = store.get_resolved_for_error(
-            "APP_CRASHED", "TaskAllInterviews",
+            "APP_CRASHED", "TaskTargetApp",
             'CastError: Cast to Number failed for value "5341614a" at path "previewCode"',
         )
 
@@ -93,7 +93,7 @@ def test_does_not_match_unrelated_crash_with_same_error_type_and_service():
 
     with _no_live_db():
         result = store.get_resolved_for_error(
-            "APP_CRASHED", "TaskAllInterviews",
+            "APP_CRASHED", "TaskTargetApp",
             'CastError: Cast to Number failed for value "5341614a" at path "previewCode"',
         )
 
@@ -107,7 +107,7 @@ def test_no_match_when_description_omitted():
     store = _store_with(past)
 
     with _no_live_db():
-        result = store.get_resolved_for_error("APP_CRASHED", "TaskAllInterviews")
+        result = store.get_resolved_for_error("APP_CRASHED", "TaskTargetApp")
 
     assert result is None
 
@@ -119,7 +119,7 @@ def test_returns_most_recent_when_multiple_match():
     store = _store_with(older, newer)
 
     with _no_live_db():
-        result = store.get_resolved_for_error("APP_CRASHED", "TaskAllInterviews", desc)
+        result = store.get_resolved_for_error("APP_CRASHED", "TaskTargetApp", desc)
 
     assert result.id == newer.id
 
@@ -131,7 +131,7 @@ def test_no_match_for_different_service():
 
     with _no_live_db():
         result = store.get_resolved_for_error(
-            "APP_CRASHED", "TaskAllInterviews",
+            "APP_CRASHED", "TaskTargetApp",
             'CastError: Cast to Number failed for value "X" at path "previewCode"',
         )
 
