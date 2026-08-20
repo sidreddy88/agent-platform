@@ -162,6 +162,35 @@ def test_corrupt_archive_fails_loud(fake_settings):
         assert fetch_target_harness.main() == 1
 
 
+def test_strips_static_aws_creds_before_building_client(fake_settings, monkeypatch):
+    """Production regression: AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY are set
+    in prod for AWSService's cross-account CloudWatch access (a different AWS
+    account than this bucket lives in). boto3's default credential chain
+    checks env-var credentials before the task's IAM role -- if this script's
+    S3 client picked them up, it would authenticate as the wrong account and
+    fail. This call site must strip them from its own environment before
+    constructing the client, regardless of what the rest of the container
+    needs them for."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "fake-key-id")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake-secret")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "fake-session-token")
+
+    tarball = _make_tarball({"AGENTS.md": "# agents"})
+    mock_s3 = MagicMock()
+    mock_s3.get_object.return_value = {"Body": io.BytesIO(tarball)}
+    mock_boto3 = MagicMock()
+    mock_boto3.client.return_value = mock_s3
+
+    with patch.dict(sys.modules, {"boto3": mock_boto3}):
+        assert fetch_target_harness.main() == 0
+
+    import os
+
+    assert "AWS_ACCESS_KEY_ID" not in os.environ
+    assert "AWS_SECRET_ACCESS_KEY" not in os.environ
+    assert "AWS_SESSION_TOKEN" not in os.environ
+
+
 def test_unexpected_exception_fails_loud_not_raises(fake_settings):
     """Whatever goes wrong, main() must return 1 -- never let an unhandled
     exception escape and produce a Python traceback exit code instead of the
