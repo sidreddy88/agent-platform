@@ -40,3 +40,11 @@ docs/call-graph-data-structures.md
 
 # Internal ops runbook — names the real org/repo, local reference only
 docs/GITHUB_TOKEN_SETUP.md
+
+# Target-harness content — split into a private repo (docs/PLAN_TARGET_HARNESS_SPLIT.md).
+# Contains real, load-bearing per-brand model names that can't be genericized.
+# Fetched from S3 at container startup (scripts/fetch_target_harness.py) —
+# populate it locally by cloning sidreddy88/agent-platform-target-harness
+# directly, or running that script yourself with AWS credentials that can
+# read the bucket.
+targets/target-app/
