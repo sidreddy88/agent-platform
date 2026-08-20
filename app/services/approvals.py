@@ -211,29 +211,36 @@ class ApprovalService:
             risk_icon = {"low": "ℹ", "medium": "⚡", "high": "⚠", "critical": "🚨"}.get(
                 req.risk_level.value, "?"
             )
-            print(f"\n{border}")
-            print(f"  {risk_icon} APPROVAL REQUIRED [{req.risk_level.upper()}]")
-            print(f"  Request ID : {req.id}")
-            print(f"  Agent      : {req.agent_name}")
-            print(f"  Action     : {req.action}")
-            print(f"  What       : {req.description}")
+            lines = [
+                "",
+                border,
+                f"  {risk_icon} APPROVAL REQUIRED [{req.risk_level.upper()}]",
+                f"  Request ID : {req.id}",
+                f"  Agent      : {req.agent_name}",
+                f"  Action     : {req.action}",
+                f"  What       : {req.description}",
+            ]
             if req.parameters:
-                print(f"  Parameters : {req.parameters}")
-            print(f"  Created    : {req.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
-            print(f"\n  To approve : POST /approvals/{req.id}/approve")
-            print(f"  To reject  : POST /approvals/{req.id}/reject")
-            print(f"{border}\n")
+                lines.append(f"  Parameters : {req.parameters}")
+            lines += [
+                f"  Created    : {req.created_at.strftime('%Y-%m-%d %H:%M UTC')}",
+                "",
+                f"  To approve : POST /approvals/{req.id}/approve",
+                f"  To reject  : POST /approvals/{req.id}/reject",
+                border,
+            ]
+            logger.info("\n".join(lines))
 
         elif req.status == ApprovalStatus.AUTO_APPROVED:
-            print(f"[Approvals] ✓ Auto-approved [{req.risk_level}] {req.action} ({req.id})")
+            logger.info("[Approvals] ✓ Auto-approved [%s] %s (%s)", req.risk_level, req.action, req.id)
 
         elif req.status == ApprovalStatus.APPROVED:
-            print(f"\n[Approvals] ✓ APPROVED {req.id} by {req.decided_by} — {req.action}\n")
+            logger.info("[Approvals] ✓ APPROVED %s by %s — %s", req.id, req.decided_by, req.action)
 
         elif req.status == ApprovalStatus.REJECTED:
-            print(
-                f"\n[Approvals] ✗ REJECTED {req.id} by {req.decided_by} "
-                f"— {req.action}  reason: {req.rejection_reason}\n"
+            logger.info(
+                "[Approvals] ✗ REJECTED %s by %s — %s  reason: %s",
+                req.id, req.decided_by, req.action, req.rejection_reason,
             )
 
     # ------------------------------------------------------------------
