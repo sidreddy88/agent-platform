@@ -145,7 +145,7 @@ docs/              # MANUAL_BASELINE, architecture notes
 
 **Push, not poll.** CloudWatch alarms → SNS → HTTPS webhook. Zero polling load on the production server. Detection latency drops from ~7d (human attention) to single-digit minutes.
 
-**RAG finds candidates. The live store confirms truth.** ChromaDB / pgvector hold index-time snapshots; current incident state lives in Postgres. Blocking decisions always re-read the live store. ([why](https://remediatelabs.io/blog/live-store-vs-chromadb))
+**RAG finds candidates. The live store confirms truth.** ChromaDB / pgvector hold index-time snapshots; current incident state lives in Postgres. Blocking decisions always re-read the live store. ([why](https://remediatelabs.io/blog/rag-index-vs-live-store))
 
 **Hard blocks are deterministic, soft hints are LLM-shaped.** Dedup is a hard block (drop the event); regression context is a soft hint (prompt injection). Mixing the two created a four-failure-mode bug. ([walked through here](https://remediatelabs.io/blog/rag-dedup-failure))
 
@@ -161,15 +161,13 @@ docs/              # MANUAL_BASELINE, architecture notes
 
 ## Engineering blog
 
-Notes from building this — debugging stories, architecture posts, retrieval design:
+Notes from building this — debugging stories, architecture posts, retrieval design. 17 posts across 5 series; a few representative ones below, full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
 
-- [The Three Camps of Retrieval Architecture](https://remediatelabs.io/blog/retrieval-architectures) — Improved RAG vs GraphRAG vs Ragless, when to reach for each
-- [Why the Same Bug Kept Creating New Incidents](https://remediatelabs.io/blog/rag-dedup-failure) — four-failure-mode dedup bug
-- [RAG Finds the Candidate. The Live Store Confirms the Truth.](https://remediatelabs.io/blog/live-store-vs-chromadb) — search index vs source of truth
-- [Why My AI Agent Kept Adding Null Checks Instead of Fixing the Bug](https://remediatelabs.io/blog/symptom-fix-antipattern) — producer/consumer routing
-- [Not Every Agent Needs a ReAct Loop](https://remediatelabs.io/blog/not-every-agent-needs-react) + [Four Patterns for Structuring Agents](https://remediatelabs.io/blog/four-agent-patterns) — agent design patterns
-- [My Agent Ran for 58 Seconds and Made Up Every Number](https://remediatelabs.io/blog/debugging-hallucinating-agents) + [The Fix That Broke My Agent in a Different Way](https://remediatelabs.io/blog/prompt-constraints-loop) — hallucination + loop debugging
-- [Typed Boundaries Make Multi-Agent Systems Readable](https://remediatelabs.io/blog/typed-boundaries-agents) — where to put parsing logic
+- **Agent Debugging** — [Why My AI Agent Kept Adding Null Checks Instead of Fixing the Bug](https://remediatelabs.io/blog/symptom-fix-antipattern) (producer/consumer routing) · [Why My AI Agent Cited a File That Never Existed](https://remediatelabs.io/blog/fabricated-file-citation) (fabrication under a code-reading requirement)
+- **RAG Learnings** — [Why the Same Bug Kept Creating New Incidents](https://remediatelabs.io/blog/rag-dedup-failure) (four-failure-mode dedup bug) · [RAG Finds the Candidate. The Live Store Confirms the Truth.](https://remediatelabs.io/blog/rag-index-vs-live-store) (search index vs source of truth)
+- **Code Graph in Production** — [We Built a Call Graph Because Our Agent Kept Breaking Callers It Never Knew About](https://remediatelabs.io/blog/code-graph-call-graph-reverse-index) · [Five Data Structures for a Call Graph](https://remediatelabs.io/blog/code-graph-data-structures)
+- **Code RAG in Production** (10 parts) — [What Actually Gets Indexed](https://remediatelabs.io/blog/code-rag-what-gets-indexed) · [Hybrid Search — Closing the Vocabulary Gap](https://remediatelabs.io/blog/code-rag-hybrid-search) · [Cross-Encoder Re-Ranking — From Top-3 to Rank 1](https://remediatelabs.io/blog/code-rag-cross-encoder-reranking)
+- **Agent Cost Engineering** — [Token Cost Engineering in Agent Loops](https://remediatelabs.io/blog/prompt-caching-react-loops) (prompt caching + state pruning)
 
 ---
 
