@@ -97,12 +97,20 @@ class Settings(BaseSettings):
     # S3-backed fetch for harness_docs_path's content (see
     # docs/PLAN_TARGET_HARNESS_SPLIT.md and scripts/fetch_target_harness.py).
     # Split into a private repo because it contains real, load-bearing
-    # per-brand model names that can't be genericized in place. Leave
-    # target_harness_bucket blank to skip the fetch entirely (local dev without
-    # AWS credentials — harness_docs_path just needs to already exist locally,
-    # e.g. from cloning the private harness repo directly).
+    # per-brand model names that can't be genericized in place.
+    #
+    # target_harness_bucket unset is a FAILURE by default, not a skip — the
+    # whole point of this design is not silently starting up with harness
+    # content missing (see fetch_target_harness.py's module docstring for the
+    # two real incidents, both this exact failure shape, that justify this).
+    # skip_target_harness_fetch is the explicit, deliberate opt-out for local
+    # dev without AWS credentials — harness_docs_path is then expected to
+    # already exist locally (e.g. from cloning the private harness repo
+    # directly). It must be set on purpose; there is no default value or
+    # environment name that trips it by accident.
     target_harness_bucket: str = ""
     target_harness_key: str = "latest.tar.gz"
+    skip_target_harness_fetch: bool = False
 
     # Monitor generation — set to true to actually provision CloudWatch alarms on PR merge
     create_monitors: bool = False

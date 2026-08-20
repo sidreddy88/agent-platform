@@ -26,13 +26,18 @@ Usage (also the Docker CMD's first step — see Dockerfile):
     python scripts/fetch_target_harness.py
 
 Exits 0 if:
-  - settings.target_harness_bucket is unset (explicit opt-out, e.g. local dev
-    without AWS credentials — harness_docs_path is expected to already exist
-    locally in that case, e.g. from cloning the private harness repo directly)
+  - settings.skip_target_harness_fetch is explicitly set (the deliberate
+    local-dev opt-out — harness_docs_path is then expected to already exist
+    locally, e.g. from cloning the private harness repo directly)
   - the fetch and extraction both succeed
 
-Exits 1 (and logs at ERROR) on any other failure: S3 read error, empty/missing
-object, corrupt archive, or a write failure extracting it.
+Exits 1 (and logs at ERROR) on:
+  - target_harness_bucket unset AND skip_target_harness_fetch not set — this
+    is a misconfiguration, not a skip. An empty bucket setting on its own
+    must never be silently treated as "nothing to do"; that's exactly how a
+    forgotten env var in a task definition would turn into a silent outage.
+  - any actual fetch/extraction failure: S3 read error, empty/missing object,
+    corrupt archive, or a write failure extracting it.
 """
 from __future__ import annotations
 
@@ -55,9 +60,17 @@ logger = logging.getLogger(__name__)
 def main() -> int:
     from app.core.config import settings
 
-    if not settings.target_harness_bucket:
-        logger.info("target_harness_bucket is unset — skipping fetch (expects harness_docs_path to already exist locally).")
+    if settings.skip_target_harness_fetch:
+        logger.info("skip_target_harness_fetch is set — skipping fetch (expects harness_docs_path to already exist locally).")
         return 0
+
+    if not settings.target_harness_bucket:
+        logger.error(
+            "target_harness_bucket is unset and skip_target_harness_fetch is not set — refusing to "
+            "silently skip. Set TARGET_HARNESS_BUCKET, or explicitly set SKIP_TARGET_HARNESS_FETCH=true "
+            "for local dev."
+        )
+        return 1
 
     dest = Path(settings.harness_docs_path)
     if not dest.is_absolute():
