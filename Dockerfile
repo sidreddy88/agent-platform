@@ -59,11 +59,14 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-# Application source.
+# Application source. targets/target-app/ is deliberately NOT copied here —
+# it lives in a private repo (sidreddy88/agent-platform-target-harness,
+# split out because it contains real, load-bearing per-brand model names —
+# see docs/PLAN_TARGET_HARNESS_SPLIT.md) and is fetched from S3 at container
+# startup instead, by scripts/fetch_target_harness.py in the CMD below.
 COPY app ./app
 COPY mcp_server ./mcp_server
 COPY scripts ./scripts
-COPY targets ./targets
 COPY config ./config
 COPY pyproject.toml ./
 
@@ -85,6 +88,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 
 EXPOSE 8000
 
+# Fetch the target-harness bundle from S3 before starting uvicorn.
+# fetch_target_harness.py is fail-loud by design (see its own docstring) —
+# `&&` means a failed fetch stops here and the container never starts serving
+# traffic, rather than starting up with the harness content silently missing.
 # Single-process uvicorn. ECS handles multi-task fan-out via task count;
 # putting workers > 1 inside a 1 vCPU task wastes memory.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "python scripts/fetch_target_harness.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
