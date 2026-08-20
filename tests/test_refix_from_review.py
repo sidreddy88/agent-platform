@@ -114,6 +114,9 @@ class TestRunPostFixRequestChanges:
         from app.services.incident_loop import IncidentLoop
 
         loop = IncidentLoop.__new__(IncidentLoop)
+        # _run_post_fix() calls _index_to_rag(), which checks self._rag --
+        # __new__() skips __init__(), which is what normally sets this up.
+        loop._rag = None
         store = MagicMock()
         incident = make_incident(
             status=IncidentStatus.REVIEWING,
@@ -138,6 +141,9 @@ class TestRunPostFixRequestChanges:
         from app.services.incident_loop import IncidentLoop
 
         loop = IncidentLoop.__new__(IncidentLoop)
+        # _run_post_fix() calls _index_to_rag(), which checks self._rag --
+        # __new__() skips __init__(), which is what normally sets this up.
+        loop._rag = None
         store = MagicMock()
         incident = make_incident(
             status=IncidentStatus.REVIEWING,
@@ -165,6 +171,9 @@ class TestRunPostFixRequestChanges:
         from app.services.incident_loop import IncidentLoop
 
         loop = IncidentLoop.__new__(IncidentLoop)
+        # _run_post_fix() calls _index_to_rag(), which checks self._rag --
+        # __new__() skips __init__(), which is what normally sets this up.
+        loop._rag = None
         store = MagicMock()
         incident = make_incident(
             status=IncidentStatus.REVIEWING,

@@ -288,8 +288,10 @@ class TestIncidentPipeline:
         mock_approval.request_approval.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_fix_failure_leaves_incident_in_fixing(self):
-        """If fix generation raises, incident remains in FIXING status."""
+    async def test_fix_failure_marks_incident_fix_failed(self):
+        """If fix generation raises, incident moves to the dedicated FIX_FAILED
+        status (not left in FIXING) so it's distinguishable and escalated,
+        rather than looking indistinguishable from a fix still in progress."""
         store = IncidentStore.__new__(IncidentStore)
         store._incidents = {}
         store._monitor_pr_map = {}
@@ -312,7 +314,7 @@ class TestIncidentPipeline:
             await loop._process(make_error_event())
 
         incident = list(store._incidents.values())[0]
-        assert incident.status == IncidentStatus.FIXING
+        assert incident.status == IncidentStatus.FIX_FAILED
         mock_approval.request_approval.assert_not_called()
 
     @pytest.mark.asyncio
@@ -353,7 +355,12 @@ class TestApprovalResolution:
     """Approval decisions close the loop on incident state."""
 
     @pytest.mark.asyncio
-    async def test_approve_resolves_incident(self):
+    async def test_approve_records_human_decision_without_resolving(self):
+        """Approving a merge_ai_fix_pr request records human_decision but does
+        NOT resolve the incident immediately -- resolution waits for
+        _check_merged_prs to confirm via GitHub that the PR actually merged
+        (see app/api/routes/approvals.py::approve), so an approval click
+        alone can't produce a false "resolved" if the merge itself fails."""
         from app.models.events import IncidentStatus
         from app.services.approvals import ApprovalRequest, ApprovalStatus, RiskLevel, _store
 
@@ -389,10 +396,10 @@ class TestApprovalResolution:
             from app.api.routes.approvals import ApproveBody, approve
             await approve(approval.id, ApproveBody(approver="siddharth"))
 
-        assert incident.status == IncidentStatus.RESOLVED
+        assert incident.status == IncidentStatus.AWAITING_APPROVAL
         assert incident.human_decision == "approved"
-        assert incident.outcome == "fix_merged"
-        assert incident.resolved_at is not None
+        assert incident.outcome is None
+        assert incident.resolved_at is None
 
     @pytest.mark.asyncio
     async def test_reject_marks_incident_rejected(self):
