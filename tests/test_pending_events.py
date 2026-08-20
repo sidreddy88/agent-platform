@@ -56,26 +56,35 @@ def _cloudwatch_event(
     )
 
 
-def test_cloudwatch_pending_events_are_distinct_by_log_entry() -> None:
+def test_cloudwatch_same_message_different_timestamp_merges_as_recurrence() -> None:
+    """_content_sig() deliberately excludes occurrence timestamp (see its
+    docstring) -- the same error message recurring at a later timestamp is
+    the definition of a recurring error, not a distinct one. It merges into
+    the same pending event and increments `occurrences`, same as the exact-
+    duplicate case below, rather than spawning a second dashboard entry."""
     store = PendingEventStore()
 
-    first = store.add(_cloudwatch_event(timestamp=1000))
-    second = store.add(_cloudwatch_event(timestamp=2000))
+    first, first_is_new = store.add(_cloudwatch_event(timestamp=1000))
+    second, second_is_new = store.add(_cloudwatch_event(timestamp=2000))
 
     assert first is not None
-    assert second is not None
-    assert first.id != second.id
-    assert len(store.list_all()) == 2
+    assert first_is_new is True
+    assert second is first
+    assert second_is_new is False
+    assert second.occurrences == 2
+    assert len(store.list_all()) == 1
 
 
 def test_cloudwatch_pending_events_dedup_exact_same_log_entry() -> None:
     store = PendingEventStore()
 
-    first = store.add(_cloudwatch_event(timestamp=1000))
-    duplicate = store.add(_cloudwatch_event(timestamp=1000))
+    first, first_is_new = store.add(_cloudwatch_event(timestamp=1000))
+    duplicate, duplicate_is_new = store.add(_cloudwatch_event(timestamp=1000))
 
     assert first is not None
+    assert first_is_new is True
     assert duplicate is first
+    assert duplicate_is_new is False
     assert len(store.list_all()) == 1
 
 
@@ -124,8 +133,8 @@ def test_cloudwatch_same_timestamp_different_message_are_distinct() -> None:
     """Two distinct errors emitted at the same millisecond must not collapse to one."""
     store = PendingEventStore()
 
-    first = store.add(_cloudwatch_event(timestamp=1000, description="TypeError: cannot read property"))
-    second = store.add(_cloudwatch_event(timestamp=1000, description="ValueError: invalid input"))
+    first, _ = store.add(_cloudwatch_event(timestamp=1000, description="TypeError: cannot read property"))
+    second, _ = store.add(_cloudwatch_event(timestamp=1000, description="ValueError: invalid input"))
 
     assert first is not None
     assert second is not None

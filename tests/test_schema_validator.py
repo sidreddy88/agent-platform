@@ -159,10 +159,13 @@ class TestValidateTriageViolations:
             handoff_validator.validate_triage(_triage(severity="P5"))
         assert any(v.field == "severity" for v in exc_info.value.violations)
 
-    def test_unknown_blast_radius_raises(self):
-        with pytest.raises(HandoffValidationError) as exc_info:
-            handoff_validator.validate_triage(_triage(blast_radius="galaxy_brain"))
-        assert any(v.field == "blast_radius" for v in exc_info.value.violations)
+    def test_unknown_blast_radius_coerced_not_raised(self):
+        """blast_radius is informational, not worth discarding a whole triage
+        result over -- an unrecognised value is coerced to 'unknown' (logged
+        as a coercion) rather than raising, unlike occurrences_24h/reasoning
+        below which are load-bearing enough to hard-fail on."""
+        result = handoff_validator.validate_triage(_triage(blast_radius="galaxy_brain"))
+        assert result.blast_radius == "unknown"
 
     def test_negative_occurrences_raises(self):
         with pytest.raises(HandoffValidationError) as exc_info:
