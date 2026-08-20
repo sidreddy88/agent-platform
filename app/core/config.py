@@ -94,6 +94,16 @@ class Settings(BaseSettings):
     # Relative to the project root, or absolute. Set to "" to disable injection.
     harness_docs_path: str = "targets/target-app"
 
+    # S3-backed fetch for harness_docs_path's content (see
+    # docs/PLAN_TARGET_HARNESS_SPLIT.md and scripts/fetch_target_harness.py).
+    # Split into a private repo because it contains real, load-bearing
+    # per-brand model names that can't be genericized in place. Leave
+    # target_harness_bucket blank to skip the fetch entirely (local dev without
+    # AWS credentials — harness_docs_path just needs to already exist locally,
+    # e.g. from cloning the private harness repo directly).
+    target_harness_bucket: str = ""
+    target_harness_key: str = "latest.tar.gz"
+
     # Monitor generation — set to true to actually provision CloudWatch alarms on PR merge
     create_monitors: bool = False
 
