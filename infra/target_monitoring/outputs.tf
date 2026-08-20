@@ -1,5 +1,5 @@
 output "sns_topic_arn" {
-  description = "SNS topic CloudWatch alarms publish to in the AllInterviews account."
+  description = "SNS topic CloudWatch alarms publish to in the target app's account."
   value       = aws_sns_topic.alarms.arn
 }
 

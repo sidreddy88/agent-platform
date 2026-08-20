@@ -25,7 +25,7 @@ def _make_incident(**overrides) -> IncidentState:
         source=EventSource.CLOUDWATCH,
         title="Some error",
         description="Some error description",
-        service="TaskAllInterviews",
+        service="TaskTargetApp",
         severity=Severity.P3,
     )
     defaults = dict(

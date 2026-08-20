@@ -60,7 +60,7 @@ def _alarm_notification(alarm_name: str = "auto-svc-errors", state: str = "ALARM
             "MetricName": "Errors",
             "Namespace": "AWS/Lambda",
             "Statistic": "Sum",
-            "Dimensions": [{"name": "ServiceName", "value": "allinterviews"}],
+            "Dimensions": [{"name": "ServiceName", "value": "target-app"}],
             "Period": 300,
             "EvaluationPeriods": 1,
             "Threshold": 1.0,

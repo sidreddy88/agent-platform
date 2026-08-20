@@ -31,10 +31,10 @@ def _crash_event(desc: str = "CastError: cast to Number failed for value \"89351
     return ErrorEvent(
         source=EventSource.CLOUDWATCH,
         error_type="CASTERROR",
-        title="CASTERROR in TaskAllInterviews",
+        title="CASTERROR in TaskTargetApp",
         description=desc,
-        service="TaskAllInterviews",
-        metadata={"log_group": "/ecs/TaskAllInterviews", "task_id": "t1", "timestamp": 1000},
+        service="TaskTargetApp",
+        metadata={"log_group": "/ecs/TaskTargetApp", "task_id": "t1", "timestamp": 1000},
     )
 
 

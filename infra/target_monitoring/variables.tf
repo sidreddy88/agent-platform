@@ -1,11 +1,11 @@
 variable "region" {
-  description = "AWS region the AllInterviews ECS task runs in. Same region as the log group."
+  description = "AWS region the target app's ECS task runs in. Same region as the log group."
   type        = string
   default     = "us-east-2"
 }
 
 variable "log_group_name" {
-  description = "CloudWatch log group the AllInterviews ECS task writes to."
+  description = "CloudWatch log group the target app's ECS task writes to."
   type        = string
   default     = "/ecs/TaskAllInterviews"
 }

@@ -451,8 +451,8 @@ class DetectionService:
         """Emit ErrorEvents for application errors matched by custom CloudWatch filter patterns.
 
         Configured via CW_LOG_FILTERS env var (JSON array):
-          [{"log_group": "/ecs/allinterviews", "pattern": "NoSuchKey",
-            "error_type": "S3_NO_SUCH_KEY", "service": "allinterviews"}]
+          [{"log_group": "/ecs/target-app", "pattern": "NoSuchKey",
+            "error_type": "S3_NO_SUCH_KEY", "service": "target-app"}]
 
         severity is intentionally left null — TriageAgent sets it.
         """

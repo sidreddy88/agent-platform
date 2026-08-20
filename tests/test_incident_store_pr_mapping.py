@@ -27,8 +27,8 @@ def _store_with_map(mapping: dict[str, str]) -> IncidentStore:
 
 def test_forget_pr_mapping_removes_matching_entries():
     store = _store_with_map({
-        "APP_CRASHED:TaskAllInterviews:CastError...": "https://github.com/org/repo/pull/2565",
-        "/ecs/TaskAllInterviews": "https://github.com/org/repo/pull/2565",
+        "APP_CRASHED:TaskTargetApp:CastError...": "https://github.com/org/repo/pull/2565",
+        "/ecs/TaskTargetApp": "https://github.com/org/repo/pull/2565",
     })
 
     removed = store.forget_pr_mapping("https://github.com/org/repo/pull/2565")
@@ -41,7 +41,7 @@ def test_forget_pr_mapping_only_removes_the_matching_pr():
     """A stale PR being forgotten must not collateral-delete unrelated,
     still-valid mappings for a different PR."""
     store = _store_with_map({
-        "APP_CRASHED:TaskAllInterviews:CastError...": "https://github.com/org/repo/pull/2565",
+        "APP_CRASHED:TaskTargetApp:CastError...": "https://github.com/org/repo/pull/2565",
         "S3_ERROR:ImageService:NoSuchKey...": "https://github.com/org/repo/pull/9999",
     })
 
