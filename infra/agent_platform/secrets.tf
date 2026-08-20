@@ -12,27 +12,35 @@
 locals {
   # Names mirror the keys in app/core/config.py.
   #
-  # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY deliberately removed (were here
-  # historically, predating task_runtime's IAM role). Real production bug
-  # found rolling out the target-harness S3 fetch: AWSService (app/services/
-  # aws.py) and boto3's default credential chain both check explicit
-  # env-var/static credentials BEFORE falling back to the task's IAM role --
-  # so as long as these were set, every AWS SDK call in this app silently
-  # used this narrower, unmanaged static identity instead of task_runtime,
-  # no matter what permissions were granted to the role. A new S3 read
-  # policy added to task_runtime for the harness fetch never had a chance to
-  # apply; the fetch failed with AccessDenied, correctly caught by the fetch
-  # script's fail-loud design. Confirmed via a full audit of app/services/
-  # aws.py before removing these: it only ever calls ecs/ec2/cloudwatch/logs
-  # APIs, and task_runtime's policy (iam.tf) already grants every one of
-  # them. Removing these two keys means every AWS SDK call in this app now
-  # goes through task_runtime's role -- the intended design all along, and
-  # the same IAM-native philosophy this whole harness-split effort is built
-  # on (see target_harness.tf, docs/PLAN_TARGET_HARNESS_SPLIT.md).
+  # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY: removed once (predating
+  # task_runtime's IAM role, believed to be pure legacy) then restored here.
+  # The removal fixed a real bug -- boto3's default credential chain and
+  # AWSService both check explicit env-var/static credentials BEFORE the
+  # task's IAM role, so their presence silently shadowed a new S3 read
+  # policy added to task_runtime for the harness fetch (AccessDenied on
+  # every fetch attempt). But the audit behind that removal only checked
+  # that task_runtime's IN-ACCOUNT policy covered every AWS API action
+  # AWSService calls -- it didn't check which AWS ACCOUNT those calls need
+  # to reach. The target app's real CloudWatch log group/alarms/SNS topic
+  # live in a separate AWS account (950252867672) from this one
+  # (542337758768, see infra/target-app_monitoring). An IAM role in this
+  # account can never read another account's CloudWatch Logs no matter what
+  # permissions it's granted -- only a static credential scoped to that
+  # other account (or a proper cross-account trust relationship, not yet
+  # built) can. Removing these broke DetectionService/TriageAgent/
+  # DiagnosisAgent's ability to read that log group in production.
+  #
+  # These are restored for that cross-account reason only.
+  # scripts/fetch_target_harness.py explicitly strips both from its own
+  # environment before constructing its S3 client, so their presence here
+  # can't shadow task_runtime's role for the (same-account) harness fetch
+  # again -- see the comment at that call site.
   secret_keys = [
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "GITHUB_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
     "ATLAS_PUBLIC_KEY",
     "ATLAS_PRIVATE_KEY",
     "ATLAS_PROJECT_ID",
