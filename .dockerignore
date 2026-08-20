@@ -35,13 +35,15 @@ frontend/dist
 node_modules
 
 # Tests + dev-only docs (image doesn't need them)
+# The CONSTRAINTS.md/AGENTS.md exception this used to need is gone —
+# targets/target-app/ no longer lives in this repo or gets copied into the
+# image at all (fetched from S3 at container startup instead, see
+# docs/PLAN_TARGET_HARNESS_SPLIT.md).
 tests
 plans
 memory
 docs
 *.md
-!CONSTRAINTS.md
-!AGENTS.md
 
 # Secrets — defensive; SSM Parameter Store is the prod source
 .env
