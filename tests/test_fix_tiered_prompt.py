@@ -254,7 +254,7 @@ async def test_critique_prompt_forbids_markdown_headers():
     """The critique gets embedded verbatim into a GitHub PR body (see
     _build_fix_pr_body) — a markdown heading in the response breaks the
     surrounding document's structure. Real production PR
-    (TargetOrg/TargetApp#2589) had Haiku return a full
+    (target app issue #2589) had Haiku return a full
     "# Critique: ..." document despite the docstring's claim this is a "short
     plain-text assessment"; nothing in the prompt actually enforced that."""
     agent = _make_agent()
@@ -511,7 +511,7 @@ def test_resolve_secondary_targets_includes_legacy_field_not_in_blast_radius():
 
 
 def test_resolve_secondary_targets_carries_the_blast_radius_snippet():
-    """Real production bug (TargetApp PR #2552): 3 of 5 secondary files got a
+    """Real production bug (target app PR #2552): 3 of 5 secondary files got a
     fabricated new route instead of the real fix, because the secondary pass had
     only a vague function label and free-text prose to go on -- no actual code to
     search for. The blast_radius snippet is the concrete anchor that fixes this;

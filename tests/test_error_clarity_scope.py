@@ -1,7 +1,7 @@
 """
 Regression tests for ErrorClarityAgent's observability-only scope enforcement.
 
-Real production bug (TargetOrg/TargetApp#2595): given a Mongoose "reserved
+Real production bug (target app issue #2595): given a Mongoose "reserved
 schema pathname" warning, ErrorClarityAgent used suggest_addition to add
 `supressReservedKeysWarning: true` to a schema's options -- a genuine behavior change
 (silences the warning) with zero logging/error-handling added. Wrong on two levels:

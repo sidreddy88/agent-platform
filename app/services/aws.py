@@ -543,7 +543,7 @@ class AWSService:
         (DiagnosisAgent's get_error_samples / check_still_occurring /
         get_occurrence_timeline tools) always queried agent-platform's own
         region (us-east-1) regardless of where the target log group actually
-        lives (us-east-2 for TargetApp) -- silently hitting
+        lives (us-east-2 for the target app) -- silently hitting
         AccessDenied/no-such-resource on every single call, degrading
         diagnosis quality (empty evidence, "Unknown" root causes) without
         ever surfacing a clear top-level error, since each tool wraps the

@@ -128,7 +128,7 @@ class TriageAgent(BaseAgent):
     def _register_tools(self) -> None:
         aws = self._aws
         store = self._store
-        # TargetApp' logs live in us-east-2, agent-platform's own infra in
+        # The target app's logs live in us-east-2, agent-platform's own infra in
         # us-east-1 -- search_log_events() had no region param at all until this
         # fix, so this call always queried the wrong region and failed. See
         # AWSService.search_log_events's docstring for the full story.

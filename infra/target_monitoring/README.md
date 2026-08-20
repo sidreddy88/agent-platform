@@ -1,8 +1,8 @@
-# TargetApp error monitoring
+# Target app error monitoring
 
-Push-based error monitoring for the TargetApp production ECS service. Watches `/ecs/TaskTargetApp` for Node.js error signatures, fires CloudWatch alarms, and pushes them to the agent-platform webhook at `https://app.remediatelabs.io/webhooks/cloudwatch-alarm`.
+Push-based error monitoring for the target production ECS service. Watches `/ecs/TaskTargetApp` for Node.js error signatures, fires CloudWatch alarms, and pushes them to the agent-platform webhook at `https://app.remediatelabs.io/webhooks/cloudwatch-alarm`.
 
-**Why a separate Terraform module:** TargetApp lives in AWS account `950252867672` (us-east-2). The main `agent_platform` module targets account `542337758768` (us-east-1). State and credentials are cleanly separated so neither account ever needs to know about the other.
+**Why a separate Terraform module:** the target app lives in AWS account `950252867672` (us-east-2). The main `agent_platform` module targets account `542337758768` (us-east-1). State and credentials are cleanly separated so neither account ever needs to know about the other.
 
 ## What it provisions
 
@@ -16,10 +16,10 @@ Push-based error monitoring for the TargetApp production ECS service. Watches `/
 ## Apply
 
 ```bash
-cd infra/target-app_monitoring
+cd infra/target_monitoring
 
 # Pull the webhook token from agent-platform's SSM (uses the
-# agent-platform AWS profile, not the TargetApp one)
+# agent-platform AWS profile, not the target app's one)
 export TF_VAR_webhook_token=$(
   aws ssm get-parameter \
     --profile agent-platform \
@@ -29,10 +29,10 @@ export TF_VAR_webhook_token=$(
     --output text
 )
 
-# Switch to TargetApp creds (admin-scoped — needs PutMetricFilter,
+# Switch to the target app's creds (admin-scoped — needs PutMetricFilter,
 # cloudwatch:PutMetricAlarm, sns:CreateTopic, sns:Subscribe).
 # AgentPlatformMonitor is read-only and will fail.
-export AWS_PROFILE=target-app-admin   # or whatever profile name you use
+export AWS_PROFILE=target-admin   # or whatever profile name you use
 
 terraform init
 terraform plan      # review
@@ -82,6 +82,6 @@ The AWS profile used to apply needs (at minimum) these actions in account `95025
 
 ## What this does NOT change
 
-- Zero load on the TargetApp ECS task: the `awslogs` driver was already shipping stdout/stderr; metric filter + alarm evaluation run on AWS-managed compute
-- Zero changes to TargetApp application code
+- Zero load on the target app's ECS task: the `awslogs` driver was already shipping stdout/stderr; metric filter + alarm evaluation run on AWS-managed compute
+- Zero changes to the target app's application code
 - Zero changes to the agent-platform deployment

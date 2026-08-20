@@ -1,7 +1,7 @@
 """
 Regression tests for the search_log_events() region bug.
 
-Real production bug, traced end-to-end: TargetApp' CloudWatch logs live in
+Real production bug, traced end-to-end: the target app's CloudWatch logs live in
 us-east-2; agent-platform's own infra (and its default AWS client) is in
 us-east-1. get_error_logs() has always threaded a `region` override through for
 exactly this reason -- but search_log_events() never had a region parameter at

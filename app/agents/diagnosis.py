@@ -469,7 +469,7 @@ class DiagnosisAgent(BaseAgent):
         github = self._github
         owner = self._owner
         repo = self._repo
-        # TargetApp' logs live in a different AWS region than agent-platform's
+        # The target app's logs live in a different AWS region than agent-platform's
         # own infra (us-east-2 vs us-east-1) -- get_error_logs() already threads
         # this through everywhere else, but search_log_events() (used by all three
         # log tools below) never had a region param at all, so every call here

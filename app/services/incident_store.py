@@ -135,7 +135,7 @@ class IncidentStore:
         incident's "regression check" surfaced an unrelated image-upload crash
         (different route, different file, different root cause entirely) as "the
         same error, previously resolved" -- purely because both happened to be
-        APP_CRASHED on TaskTargetApp. DiagnosisAgent's prompt frames this
+        APP_CRASHED on the target app's task. DiagnosisAgent's prompt frames this
         result as "PRIOR KNOWLEDGE -- treat as strong evidence," with no
         verification step at all (unlike blast_radius/additional_fix_targets,
         which are snippet-grounded). The model then produced a confident,

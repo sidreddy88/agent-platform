@@ -35,7 +35,7 @@ PR_BASE = "staging"
 # ErrorClarityAgent's entire mandate is error VISIBILITY, not fixes — its own prompt
 # says so explicitly ("Do NOT fix the bug — only add error visibility"), but nothing
 # ever checked that a suggest_addition call actually honored it. Real production bug
-# (TargetOrg/TargetApp#2595): given a Mongoose "reserved schema pathname"
+# (target app issue #2595): given a Mongoose "reserved schema pathname"
 # warning, the agent added `supressReservedKeysWarning: true` (sic — Mongoose's own
 # misspelling) to a schema's options — a genuine behavior change (silences a warning)
 # with zero logging or error-handling added, on a warning it was never asked to fix.
