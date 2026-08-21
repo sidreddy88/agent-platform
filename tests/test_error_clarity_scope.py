@@ -110,7 +110,7 @@ async def test_non_observability_addition_is_rejected_and_not_committed():
         (
             "Thought: found it",
             [_tool_call("1", "suggest_addition", {
-                "file": "models/PrankCheckerLog.js",
+                "file": "models/ValidationLog.js",
                 "function": "(module level)",
                 "description": "Suppress the reserved-key warning",
                 "code_before": REAL_CODE_BEFORE,
@@ -142,7 +142,7 @@ async def test_rejection_message_tells_agent_to_use_flag_pattern():
         (
             "Thought: found it",
             [_tool_call("1", "suggest_addition", {
-                "file": "models/PrankCheckerLog.js",
+                "file": "models/ValidationLog.js",
                 "function": "(module level)",
                 "description": "Suppress the reserved-key warning",
                 "code_before": REAL_CODE_BEFORE,

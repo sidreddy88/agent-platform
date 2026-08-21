@@ -420,10 +420,10 @@ async def test_additional_fix_section_forbids_reading_other_files_with_secondary
     agent = _make_agent()
     incident = _make_incident(
         diagnosis_additional_fix=(
-            "Apply the identical fix to all 7 remaining sibling files: shoutout.js, cr.js, "
-            "boldJourney.js, artistOfTheDay.js, cityNational.js, highlightApp.js, smallBiz.js"
+            "Apply the identical fix to all 7 remaining sibling files: brandA.js, brandC.js, "
+            "brandB.js, artistOfTheDay.js, cityNational.js, highlightApp.js, smallBiz.js"
         ),
-        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",
         diagnosis_additional_fix_function="(anonymous route handler)",
     )
 
@@ -432,7 +432,7 @@ async def test_additional_fix_section_forbids_reading_other_files_with_secondary
     assert "SECONDARY FIX NEEDED" not in text  # old wording that invited exploration
     assert "fixed automatically in a separate pass" in text
     assert "Do NOT call read_file on any file other than src/target.js" in text
-    assert "shoutoutInterviewUsers.js" in text  # still surfaced, just as background
+    assert "brandAInterviewUsers.js" in text  # still surfaced, just as background
 
 
 @pytest.mark.asyncio
@@ -476,11 +476,11 @@ def test_resolve_secondary_targets_uses_full_blast_radius():
     incident = _make_incident(
         diagnosis_blast_radius=[
             {"file": "routes/api/inspiringInterviewUsers.js", "function": "handler"},  # primary — excluded
-            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "handler"},
-            {"file": "routes/api/crInterviewUsers.js", "function": "handler"},
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "handler"},
+            {"file": "routes/api/brandAInterviewUsers.js", "function": "handler"},
+            {"file": "routes/api/brandCInterviewUsers.js", "function": "handler"},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "handler"},
         ],
-        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",
         diagnosis_additional_fix_function="handler",
     )
 
@@ -489,10 +489,10 @@ def test_resolve_secondary_targets_uses_full_blast_radius():
     files = [f for f, _, _ in targets]
     assert "routes/api/inspiringInterviewUsers.js" not in files  # primary excluded
     assert files == [
-        "routes/api/shoutoutInterviewUsers.js",
-        "routes/api/crInterviewUsers.js",
-        "routes/api/boldJourneyInterviewUsers.js",
-    ]  # shoutout not duplicated even though it's also diagnosis_additional_fix_file
+        "routes/api/brandAInterviewUsers.js",
+        "routes/api/brandCInterviewUsers.js",
+        "routes/api/brandBInterviewUsers.js",
+    ]  # brandA not duplicated even though it's also diagnosis_additional_fix_file
 
 
 def test_resolve_secondary_targets_includes_legacy_field_not_in_blast_radius():
@@ -501,13 +501,13 @@ def test_resolve_secondary_targets_includes_legacy_field_not_in_blast_radius():
     agent = _make_agent()
     incident = _make_incident(
         diagnosis_blast_radius=[],
-        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",
         diagnosis_additional_fix_function="handler",
     )
 
     targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
 
-    assert targets == [("routes/api/shoutoutInterviewUsers.js", "handler", None)]
+    assert targets == [("routes/api/brandAInterviewUsers.js", "handler", None)]
 
 
 def test_resolve_secondary_targets_carries_the_blast_radius_snippet():
@@ -525,9 +525,9 @@ def test_resolve_secondary_targets_carries_the_blast_radius_snippet():
                 "snippet": "primary — excluded",
             },
             {
-                "file": "routes/api/shoutoutInterviewUsers.js",
+                "file": "routes/api/brandAInterviewUsers.js",
                 "function": "(anonymous route handler)",
-                "snippet": "ShoutoutInterviewUser.find({ previewCode: id }).then(users => {",
+                "snippet": "BrandAInterviewUser.find({ previewCode: id }).then(users => {",
             },
         ],
     )
@@ -535,9 +535,9 @@ def test_resolve_secondary_targets_carries_the_blast_radius_snippet():
     targets = agent._resolve_secondary_targets(incident, "routes/api/inspiringInterviewUsers.js")
 
     assert targets == [(
-        "routes/api/shoutoutInterviewUsers.js",
+        "routes/api/brandAInterviewUsers.js",
         "(anonymous route handler)",
-        "ShoutoutInterviewUser.find({ previewCode: id }).then(users => {",
+        "BrandAInterviewUser.find({ previewCode: id }).then(users => {",
     )]
 
 
@@ -569,7 +569,7 @@ def test_resolve_secondary_targets_uses_additional_fix_targets():
     incident = _make_incident(
         diagnosis_additional_fix_targets=[
             {
-                "file": "routes/api/boldJourneyInterviewUsers.js",
+                "file": "routes/api/brandBInterviewUsers.js",
                 "function": "",
                 "snippet": "Model.find({ previewCode: id })",
             },
@@ -581,11 +581,11 @@ def test_resolve_secondary_targets_uses_additional_fix_targets():
         ],
     )
 
-    targets = agent._resolve_secondary_targets(incident, "routes/api/crInterviewUsers.js")
+    targets = agent._resolve_secondary_targets(incident, "routes/api/brandCInterviewUsers.js")
 
     files = [f for f, _, _ in targets]
     assert files == [
-        "routes/api/boldJourneyInterviewUsers.js",
+        "routes/api/brandBInterviewUsers.js",
         "routes/api/inspiringInterviewUsers.js",
     ]
 
@@ -596,22 +596,22 @@ def test_resolve_secondary_targets_dedups_across_all_three_sources():
     agent = _make_agent()
     incident = _make_incident(
         diagnosis_blast_radius=[
-            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "handler", "snippet": "s1"},
+            {"file": "routes/api/brandAInterviewUsers.js", "function": "handler", "snippet": "s1"},
         ],
         diagnosis_additional_fix_targets=[
-            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "handler", "snippet": "s2"},
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": "s3"},
+            {"file": "routes/api/brandAInterviewUsers.js", "function": "handler", "snippet": "s2"},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": "s3"},
         ],
-        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",
         diagnosis_additional_fix_function="handler",
     )
 
-    targets = agent._resolve_secondary_targets(incident, "routes/api/crInterviewUsers.js")
+    targets = agent._resolve_secondary_targets(incident, "routes/api/brandCInterviewUsers.js")
 
     files = [f for f, _, _ in targets]
-    assert files == ["routes/api/shoutoutInterviewUsers.js", "routes/api/boldJourneyInterviewUsers.js"]
+    assert files == ["routes/api/brandAInterviewUsers.js", "routes/api/brandBInterviewUsers.js"]
     # blast_radius's entry wins for the duplicate — first source checked, not overwritten later
-    assert targets[0] == ("routes/api/shoutoutInterviewUsers.js", "handler", "s1")
+    assert targets[0] == ("routes/api/brandAInterviewUsers.js", "handler", "s1")
 
 
 def test_resolve_secondary_targets_carries_additional_fix_file_snippet():
@@ -620,15 +620,15 @@ def test_resolve_secondary_targets_carries_additional_fix_file_snippet():
     entries always could -- this was dropped on the floor when the field was added."""
     agent = _make_agent()
     incident = _make_incident(
-        diagnosis_additional_fix_file="routes/api/shoutoutInterviewUsers.js",
+        diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",
         diagnosis_additional_fix_function="handler",
         diagnosis_additional_fix_snippet="Model.find({ previewCode: id })",
     )
 
-    targets = agent._resolve_secondary_targets(incident, "routes/api/crInterviewUsers.js")
+    targets = agent._resolve_secondary_targets(incident, "routes/api/brandCInterviewUsers.js")
 
     assert targets == [(
-        "routes/api/shoutoutInterviewUsers.js",
+        "routes/api/brandAInterviewUsers.js",
         "handler",
         "Model.find({ previewCode: id })",
     )]
@@ -646,16 +646,16 @@ def test_skipped_secondary_files_handles_the_3_tuple_shape():
     with diagnosis_blast_radius populated hit this on every single run."""
     agent = _make_agent()
     targets = [
-        ("routes/api/shoutoutInterviewUsers.js", "handler", "snippet A"),
-        ("routes/api/crInterviewUsers.js", None, None),
-        ("routes/api/boldJourneyInterviewUsers.js", "handler", "snippet C"),
+        ("routes/api/brandAInterviewUsers.js", "handler", "snippet A"),
+        ("routes/api/brandCInterviewUsers.js", None, None),
+        ("routes/api/brandBInterviewUsers.js", "handler", "snippet C"),
     ]
 
     skipped = agent._skipped_secondary_files(
-        targets, secondary_files_changed=["routes/api/shoutoutInterviewUsers.js"],
+        targets, secondary_files_changed=["routes/api/brandAInterviewUsers.js"],
     )
 
-    assert skipped == ["routes/api/crInterviewUsers.js", "routes/api/boldJourneyInterviewUsers.js"]
+    assert skipped == ["routes/api/brandCInterviewUsers.js", "routes/api/brandBInterviewUsers.js"]
 
 
 def test_skipped_secondary_files_empty_when_all_fixed():

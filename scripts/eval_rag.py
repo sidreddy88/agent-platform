@@ -62,33 +62,33 @@ TEST_CASES: list[dict] = [
     {
         "query": "SyntaxError unexpected token JSON parse failed openai response",
         "should_match": SYNTAX_ID,
-        "should_not_match": [S3_ID],   # TYPEERR shares prankChecker tokens — ok in top-3
+        "should_not_match": [S3_ID],   # TYPEERR shares validation tokens — ok in top-3
         "notes": "Close to indexed text",
     },
     # ── JSON SyntaxError — paraphrased ───────────────────────────────────
     {
         "query": "openai returning markdown fenced JSON instead of plain JSON classifyFields",
         "should_match": SYNTAX_ID,
-        "should_not_match": [S3_ID],   # TYPEERR shares prankChecker tokens — ok in top-3
+        "should_not_match": [S3_ID],   # TYPEERR shares validation tokens — ok in top-3
         "notes": "Root cause angle — response_format missing",
     },
     # ── TypeError — exact wording ────────────────────────────────────────
     {
         "query": "Cannot read properties of undefined reading publish_decision",
         "should_match": TYPEERR_ID,
-        "should_not_match": [S3_ID],   # SYNTAX shares prankChecker tokens — ok in top-3
+        "should_not_match": [S3_ID],   # SYNTAX shares validation tokens — ok in top-3
         "notes": "Exact error message fragment",
     },
     # ── TypeError — paraphrased ──────────────────────────────────────────
     {
-        "query": "classification field missing on llm response prankChecker",
+        "query": "classification field missing on llm response validationCheck",
         "should_match": TYPEERR_ID,
-        "should_not_match": [S3_ID],   # SYNTAX shares prankChecker tokens — ok in top-3
+        "should_not_match": [S3_ID],   # SYNTAX shares validation tokens — ok in top-3
         "notes": "Root cause angle — incomplete object returned",
     },
     # ── Cross-type: should NOT confuse S3 with JSON error ────────────────
     {
-        "query": "JSON parse error in prankCheckerOpenAI",
+        "query": "JSON parse error in validationOpenAI",
         "should_match": SYNTAX_ID,
         "should_not_match": [S3_ID],
         "notes": "Precision check — S3 incident must not outrank SYNTAX",

@@ -1,6 +1,6 @@
 # Target app error monitoring
 
-Push-based error monitoring for the target production ECS service. Watches `/ecs/TaskAllInterviews` for Node.js error signatures, fires CloudWatch alarms, and pushes them to the agent-platform webhook at `https://app.remediatelabs.io/webhooks/cloudwatch-alarm`.
+Push-based error monitoring for the target production ECS service. Watches the target app's configured log group for Node.js error signatures, fires CloudWatch alarms, and pushes them to the agent-platform webhook at `https://app.remediatelabs.io/webhooks/cloudwatch-alarm`.
 
 **Why a separate Terraform module:** the target app lives in AWS account `950252867672` (us-east-2). The main `agent_platform` module targets account `542337758768` (us-east-1). State and credentials are cleanly separated so neither account ever needs to know about the other.
 
@@ -10,13 +10,20 @@ Push-based error monitoring for the target production ECS service. Watches `/ecs
 |---|---|
 | `aws_sns_topic.alarms` | SNS topic that CloudWatch alarms publish to |
 | `aws_sns_topic_subscription.webhook` | HTTPS subscription POSTing to `/webhooks/cloudwatch-alarm` (auto-confirms via the webhook handler) |
-| `aws_cloudwatch_log_metric_filter.errors` | Pattern match on Node error signatures in `/ecs/TaskAllInterviews` |
+| `aws_cloudwatch_log_metric_filter.errors` | Pattern match on Node error signatures in the target app's log group |
 | `aws_cloudwatch_metric_alarm.errors` | Fires on any matched error in a 60s window (tunable) |
 
 ## Apply
 
 ```bash
 cd infra/target_monitoring
+
+# log_group_name, name_prefix, and cloudwatch_namespace have no committed
+# defaults (real external identifiers) -- set them via a gitignored
+# terraform.tfvars or TF_VAR_* env vars before the first apply, e.g.:
+#   export TF_VAR_log_group_name="/ecs/<your-real-task-name>"
+#   export TF_VAR_name_prefix="<your-prefix>-prod"
+#   export TF_VAR_cloudwatch_namespace="<YourNamespace>"
 
 # Pull the webhook token from agent-platform's SSM (uses the
 # agent-platform AWS profile, not the target app's one)

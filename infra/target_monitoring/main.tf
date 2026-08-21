@@ -9,8 +9,8 @@
 # we don't currently have. Keep the boundary clean: this module is owned
 # by whoever has admin credentials in the target app's account.
 #
-# Outcome: CloudWatch metric filter watches /ecs/TaskAllInterviews for
-# Node.js error signatures, fires an alarm, alarm publishes to an SNS
+# Outcome: CloudWatch metric filter watches the target app's configured
+# log group for Node.js error signatures, fires an alarm, alarm publishes to an SNS
 # topic, SNS POSTs to the agent-platform webhook. The webhook handler
 # (validated end-to-end against the agent-platform-prod SNS topic
 # already) normalises the payload into a pending event in the dashboard.
@@ -34,7 +34,7 @@ provider "aws" {
   default_tags {
     tags = {
       Project   = "agent-platform"
-      Purpose   = "allinterviews-error-monitoring"
+      Purpose   = "target-app-error-monitoring"
       ManagedBy = "terraform"
     }
   }

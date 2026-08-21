@@ -445,14 +445,14 @@ class TestApprovalResolution:
                 approval.id,
                 ApproveBody(
                     approver="siddharth",
-                    notes="diagnosis's file list looks fabricated -- only models/PrankCheckerLog.js is real",
+                    notes="diagnosis's file list looks fabricated -- only models/ValidationLog.js is real",
                 ),
             )
 
         updated = store.get(incident.id)
         assert updated.human_notes is not None
         assert "HUMAN INSTRUCTION:" in updated.human_notes
-        assert "models/PrankCheckerLog.js" in updated.human_notes
+        assert "models/ValidationLog.js" in updated.human_notes
         mock_resume_fix.assert_called_once_with(incident.id)
 
     @pytest.mark.asyncio

@@ -135,7 +135,7 @@ async def test_confidence_threshold_constant():
 # additional_fix_file content-currency grounding
 #
 # Real production bug: the diagnosis claimed "Apply the identical guard to
-# shoutoutInterviewUsers.js and smallBusinessOfTheDayInterviewUsers.js — both
+# brandAInterviewUsers.js and smallBusinessOfTheDayInterviewUsers.js — both
 # confirmed by grep to still have the unguarded pattern," but both files had
 # already been fixed by earlier, unrelated incidents.
 # ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ async def test_submission_rejects_additional_fix_when_snippet_not_grounded():
         "root_cause": "x", "confidence": 0.9,
         "affected_function": "primaryFn", "affected_file": "a.js",
         "additional_fix": "apply identical guard",
-        "additional_fix_file": "routes/api/shoutoutInterviewUsers.js",
+        "additional_fix_file": "routes/api/brandAInterviewUsers.js",
         "additional_fix_snippet": (
             "router.get('/getPreviewUser/:id', (req, res) => {\n"
             "  const { id } = req.params;\n"
@@ -193,7 +193,7 @@ async def test_submission_passes_when_additional_fix_snippet_grounded():
         "affected_function": "primaryFn", "affected_file": "a.js",
         "root_cause_snippet": "function primaryFn() {}",
         "additional_fix": "apply identical guard",
-        "additional_fix_file": "routes/api/boldJourneyInterviewUsers.js",
+        "additional_fix_file": "routes/api/brandBInterviewUsers.js",
         "additional_fix_snippet": vulnerable_snippet,
     }
 
@@ -236,8 +236,8 @@ async def test_submission_rejects_additional_fix_when_snippet_omitted_but_verifi
     data = {
         "root_cause": "x", "confidence": 0.9,
         "affected_function": "primaryFn", "affected_file": "a.js",
-        "additional_fix": "apply identical guard to shoutoutInterviewUsers.js — confirmed still vulnerable",
-        "additional_fix_file": "routes/api/shoutoutInterviewUsers.js",
+        "additional_fix": "apply identical guard to brandAInterviewUsers.js — confirmed still vulnerable",
+        "additional_fix_file": "routes/api/brandAInterviewUsers.js",
         # no additional_fix_snippet supplied
     }
 
@@ -261,7 +261,7 @@ async def test_submission_rejects_prose_naming_file_with_no_structured_backing()
         "root_cause": "x", "confidence": 0.9,
         "affected_function": "primaryFn", "affected_file": "a.js",
         "additional_fix": (
-            "Apply the identical isNaN guard to shoutoutInterviewUsers.js and "
+            "Apply the identical isNaN guard to brandAInterviewUsers.js and "
             "smallBusinessOfTheDayInterviewUsers.js — both confirmed still-vulnerable."
         ),
         "additional_fix_file": None,
@@ -269,7 +269,7 @@ async def test_submission_rejects_prose_naming_file_with_no_structured_backing()
 
     problems = await agent._validate_diagnosis_submission(data)
 
-    assert any("shoutoutInterviewUsers.js" in p for p in problems)
+    assert any("brandAInterviewUsers.js" in p for p in problems)
     assert any("smallBusinessOfTheDayInterviewUsers.js" in p for p in problems)
 
 
@@ -321,7 +321,7 @@ async def test_submission_passes_when_targets_grounded():
         "affected_function": "primaryFn", "affected_file": "a.js",
         "root_cause_snippet": "function primaryFn() {}",
         "additional_fix_targets": [
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
             {"file": "routes/api/inspiringInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
         ],
     }
@@ -341,22 +341,22 @@ async def test_submission_rejects_targets_without_grounded_snippet():
     already_fixed_content = "if (!/^\\d+$/.test(id)) { return res.status(400).json({}); } Model.find({ previewCode: Number(id) })"
     local_repo = MagicMock(ready=True)
     local_repo.read_file.side_effect = lambda path: (
-        already_fixed_content if "shoutout" in path else "Model.find({ previewCode: id })"
+        already_fixed_content if "brandA" in path else "Model.find({ previewCode: id })"
     )
     agent = _make_agent(found, local_repo=local_repo)
     data = {
         "root_cause": "x", "confidence": 0.9,
         "affected_function": "primaryFn", "affected_file": "a.js",
         "additional_fix_targets": [
-            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
+            {"file": "routes/api/brandAInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
         ],
     }
 
     problems = await agent._validate_diagnosis_submission(data)
 
-    assert any("shoutoutInterviewUsers.js" in p and "[0]" in p for p in problems)
-    assert not any("boldJourneyInterviewUsers.js" in p for p in problems)
+    assert any("brandAInterviewUsers.js" in p and "[0]" in p for p in problems)
+    assert not any("brandBInterviewUsers.js" in p for p in problems)
 
 
 @pytest.mark.asyncio
@@ -373,13 +373,13 @@ async def test_submission_rejects_targets_with_no_snippet_at_all():
         "root_cause": "x", "confidence": 0.9,
         "affected_function": "primaryFn", "affected_file": "a.js",
         "additional_fix_targets": [
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": ""},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": ""},
         ],
     }
 
     problems = await agent._validate_diagnosis_submission(data)
 
-    assert any("boldJourneyInterviewUsers.js" in p for p in problems)
+    assert any("brandBInterviewUsers.js" in p for p in problems)
 
 
 @pytest.mark.asyncio
@@ -393,7 +393,7 @@ async def test_submission_passes_targets_when_cannot_verify_at_all():
         "root_cause": "x", "confidence": 0.9,
         "affected_function": "primaryFn", "affected_file": "a.js",
         "additional_fix_targets": [
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": ""},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": ""},
         ],
     }
 
@@ -419,10 +419,10 @@ async def test_submission_passes_prose_when_targets_grounded():
         "root_cause": "x", "confidence": 0.9,
         "affected_function": "primaryFn", "affected_file": "a.js",
         "root_cause_snippet": "function primaryFn() {}",
-        "additional_fix": "Apply the identical guard to boldJourneyInterviewUsers.js.",
+        "additional_fix": "Apply the identical guard to brandBInterviewUsers.js.",
         "additional_fix_file": None,
         "additional_fix_targets": [
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
         ],
     }
 
@@ -438,7 +438,7 @@ async def test_submission_passes_prose_when_targets_grounded():
 # Real production bug, the worst fabrication found this session: a diagnosis
 # named affected_file="models/MasterInspiring.js" (a real file, module-level,
 # no function claimed) and quoted a root_cause code snippet
-# ("errors: { prank: {...}, contentFlags: {...} }") that existed NOWHERE in
+# ("errors: { flagged: {...}, contentFlags: {...} }") that existed NOWHERE in
 # the real repo -- not in that file, not in any file.
 # ---------------------------------------------------------------------------
 
@@ -455,9 +455,9 @@ async def test_submission_passes_when_root_cause_snippet_grounded():
     )
     agent = _make_agent(found, local_repo=local_repo)
     data = {
-        "root_cause": "PrankCheckerLog.js defines a reserved `errors` schema pathname",
+        "root_cause": "ValidationLog.js defines a reserved `errors` schema pathname",
         "confidence": 0.85,
-        "affected_file": "models/PrankCheckerLog.js",
+        "affected_file": "models/ValidationLog.js",
         "root_cause_snippet": real_snippet,
     }
 
@@ -483,7 +483,7 @@ async def test_submission_rejects_fabricated_root_cause_snippet():
         "root_cause": "All four Mongoose model files define an errors field...",
         "confidence": 0.55,
         "affected_file": "models/MasterInspiring.js",
-        "root_cause_snippet": "errors: { prank: { type: Boolean, default: false }, contentFlags: { type: Array, default: [] } }",
+        "root_cause_snippet": "errors: { flagged: { type: Boolean, default: false }, contentFlags: { type: Array, default: [] } }",
     }
 
     problems = await agent._validate_diagnosis_submission(data)
@@ -502,7 +502,7 @@ async def test_submission_rejects_root_cause_snippet_omitted_but_verifiable():
     agent = _make_agent(found, local_repo=local_repo)
     data = {
         "root_cause": "x", "confidence": 0.9,
-        "affected_file": "models/PrankCheckerLog.js",
+        "affected_file": "models/ValidationLog.js",
         # no root_cause_snippet
     }
 
@@ -520,7 +520,7 @@ async def test_submission_passes_when_cannot_verify_affected_file_at_all():
     agent = _make_agent(found)  # default: ready=False
     data = {
         "root_cause": "x", "confidence": 0.9,
-        "affected_file": "models/PrankCheckerLog.js",
+        "affected_file": "models/ValidationLog.js",
         # no root_cause_snippet — still passes since we can't verify at all
     }
 

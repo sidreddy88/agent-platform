@@ -1,11 +1,11 @@
 """
 Regression tests for DiagnosisAgent's blast_radius snippet verification.
 
-Real production bug: a diagnosis correctly read crInterviewUsers.js and found its
+Real production bug: a diagnosis correctly read brandCInterviewUsers.js and found its
 real, still-vulnerable previewCode handler. It then listed 3 sibling files
-(shoutoutInterviewUsers.js, cityNationalInterviewUsers.js,
+(brandAInterviewUsers.js, cityNationalInterviewUsers.js,
 smallBusinessOfTheDayInterviewUsers.js) as having "the identical missing guard",
-each with a detailed, plausible-looking snippet -- the crInterviewUsers.js snippet
+each with a detailed, plausible-looking snippet -- the brandCInterviewUsers.js snippet
 with the Mongoose model name swapped. All 3 files are real (existing checks caught
 nothing), but all 3 snippets were completely fabricated: those files were fixed via
 earlier, separate incidents and no longer contain anything resembling that code.
@@ -46,8 +46,8 @@ def _make_agent(file_contents: dict[str, str]) -> DiagnosisAgent:
 # ---------------------------------------------------------------------------
 
 def test_snippet_skeleton_strips_pascal_case_identifiers():
-    a = _snippet_skeleton("await MasterShoutout.findOne({ previewCode: Number(previewCode) })")
-    b = _snippet_skeleton("await MasterCr.findOne({ previewCode: Number(previewCode) })")
+    a = _snippet_skeleton("await MasterBrandA.findOne({ previewCode: Number(previewCode) })")
+    b = _snippet_skeleton("await MasterBrandC.findOne({ previewCode: Number(previewCode) })")
     assert a == b  # only the model name differs -- must normalize to the same skeleton
 
 
@@ -66,20 +66,20 @@ async def test_fabricated_sibling_snippet_is_rejected():
     real_snippet = (
         "router.get('/preview/:previewCode', authenticateToken, async (req, res) => {\n"
         "  const { previewCode } = req.params;\n"
-        "  const interview = await MasterCr.findOne({ previewCode: Number(previewCode) });\n"
+        "  const interview = await MasterBrandC.findOne({ previewCode: Number(previewCode) });\n"
         "  res.json(interview);\n"
         "});"
     )
-    fabricated_snippet = real_snippet.replace("MasterCr", "MasterShoutout")
-    # shoutoutInterviewUsers.js is REAL, but its actual content is nothing like the
+    fabricated_snippet = real_snippet.replace("MasterBrandC", "MasterBrandA")
+    # brandAInterviewUsers.js is REAL, but its actual content is nothing like the
     # fabricated snippet -- already fixed via a separate, earlier incident.
-    actual_shoutout_content = (
+    actual_brand_a_content = (
         'router.get("/getPreviewUser/:id", (req, res) => {\n'
         '  const { id } = req.params;\n'
         '  if (!/^\\d+$/.test(id)) {\n'
         '    return res.status(400).json({ message: "Invalid previewCode" });\n'
         '  }\n'
-        '  ShoutoutInterviewUser.find({ previewCode: Number(id) }).then((users) => {\n'
+        '  BrandAInterviewUser.find({ previewCode: Number(id) }).then((users) => {\n'
         '      res.json(users);\n'
         '  }).catch(() => {\n'
         '    res.status(500).json({ message: "Internal server error" });\n'
@@ -87,38 +87,38 @@ async def test_fabricated_sibling_snippet_is_rejected():
         '});'
     )
     agent = _make_agent({
-        "routes/api/crInterviewUsers.js": real_snippet,
-        "routes/api/shoutoutInterviewUsers.js": actual_shoutout_content,
+        "routes/api/brandCInterviewUsers.js": real_snippet,
+        "routes/api/brandAInterviewUsers.js": actual_brand_a_content,
     })
     data = {
         "root_cause": "x", "confidence": 0.9,
         "blast_radius": [
-            {"file": "routes/api/crInterviewUsers.js", "function": "(handler)", "snippet": real_snippet},
-            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "(handler)", "snippet": fabricated_snippet},
+            {"file": "routes/api/brandCInterviewUsers.js", "function": "(handler)", "snippet": real_snippet},
+            {"file": "routes/api/brandAInterviewUsers.js", "function": "(handler)", "snippet": fabricated_snippet},
         ],
     }
 
     problems = await agent._validate_diagnosis_submission(data)
 
-    assert any("shoutoutInterviewUsers.js" in p for p in problems)
-    assert not any("crInterviewUsers.js" in p for p in problems)  # real snippet, no problem
+    assert any("brandAInterviewUsers.js" in p for p in problems)
+    assert not any("brandCInterviewUsers.js" in p for p in problems)  # real snippet, no problem
 
 
 @pytest.mark.asyncio
 async def test_snippet_matching_only_by_model_name_passes():
     """A genuine sibling with the SAME real bug, differing only by model name
     (the actual legitimate case this whole feature exists to fix), must pass."""
-    snippet_a = "await MasterCr.findOne({ previewCode: Number(previewCode) });"
-    snippet_b = "await MasterBoldJourney.findOne({ previewCode: Number(previewCode) });"
+    snippet_a = "await MasterBrandC.findOne({ previewCode: Number(previewCode) });"
+    snippet_b = "await MasterBrandB.findOne({ previewCode: Number(previewCode) });"
     agent = _make_agent({
-        "routes/api/crInterviewUsers.js": f"router.get('/x', async (req,res) => {{ {snippet_a} }});",
-        "routes/api/boldJourneyInterviewUsers.js": f"router.get('/x', async (req,res) => {{ {snippet_b} }});",
+        "routes/api/brandCInterviewUsers.js": f"router.get('/x', async (req,res) => {{ {snippet_a} }});",
+        "routes/api/brandBInterviewUsers.js": f"router.get('/x', async (req,res) => {{ {snippet_b} }});",
     })
     data = {
         "root_cause": "x", "confidence": 0.9,
         "blast_radius": [
-            {"file": "routes/api/crInterviewUsers.js", "function": "(handler)", "snippet": snippet_a},
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "(handler)", "snippet": snippet_b},
+            {"file": "routes/api/brandCInterviewUsers.js", "function": "(handler)", "snippet": snippet_a},
+            {"file": "routes/api/brandBInterviewUsers.js", "function": "(handler)", "snippet": snippet_b},
         ],
     }
 

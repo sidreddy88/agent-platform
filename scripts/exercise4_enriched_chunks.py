@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-TARGET_FILE    = "/Users/Sidreddy/VoyageCode/AllInterviews/routes/services/image.js"
+TARGET_FILE    = os.environ.get("TARGET_APP_PATH", "/path/to/target-app") + "/routes/services/image.js"
 RELATIVE_PATH  = "routes/services/image.js"
 TARGET_FN      = "moveAndRemoveFileFromS3"
 TARGET_LINE_CHUNKS = {441, 481}

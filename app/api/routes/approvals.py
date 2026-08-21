@@ -31,7 +31,7 @@ class ApproveBody(BaseModel):
     # Only consumed for the approve_diagnosis_escalation action -- a human
     # approving a low-confidence diagnosis could always say yes/no, but had
     # no way to correct or steer it (e.g. "diagnosis's file list looks
-    # fabricated, only models/PrankCheckerLog.js is real -- focus there").
+    # fabricated, only models/ValidationLog.js is real -- focus there").
     # Threaded into incident.human_notes before resume_fix, the same
     # mechanism refix-with-notes already uses to inject human feedback into
     # FixGenerationAgent's prompt (see fix_generation.py's

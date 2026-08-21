@@ -1,6 +1,6 @@
 # ECS Fargate cluster + service for the agent platform.
 #
-# Cluster is dedicated (separate from any existing AllInterviews cluster
+# Cluster is dedicated (separate from any existing target-app cluster
 # you run today) for blast-radius isolation: the agent platform's
 # bursty LLM calls and chaos-test-shaped behaviour can't take down a
 # production workload sharing the same cluster.
@@ -44,20 +44,20 @@ locals {
     # SNS topic the MonitorGenerationAgent wires into AlarmActions when
     # creating new CloudWatch alarms. Not a secret — just an ARN.
     { name = "CLOUDWATCH_ALARM_SNS_TOPIC_ARN", value = aws_sns_topic.alarms.arn },
-    # DetectionService scans this log group every 5 min for AllInterviews
+    # DetectionService scans this log group every 5 min for target-app
     # error lines and surfaces them in the dashboard for fix-agent triage.
     # ECS_LOG_GROUPS_REGION lets the boto3 client target a different region
     # than agent-platform's own infrastructure (us-east-1).
-    { name = "ECS_LOG_GROUPS",        value = "/ecs/TaskAllInterviews" },
+    { name = "ECS_LOG_GROUPS",        value = var.ecs_log_groups },
     { name = "ECS_LOG_GROUPS_REGION", value = "us-east-2" },
     # Target repo for AI-generated fix PRs. Previously carried only by
     # app/core/config.py's hardcoded default -- that default was changed to
     # a generic placeholder in PR #151 (scrubbing the real org/repo name out
     # of source ahead of the repo eventually going public), which silently
     # broke this in prod since nothing else was ever setting it here. Not a
-    # secret -- this file already names the target app in plain text above
-    # (ECS_LOG_GROUPS) -- so it's a plain env var, not routed through SSM.
-    { name = "FIX_TARGET_REPO", value = "VoyageGroupMag/AllInterviews" },
+    # secret -- just a real external identifier this repo doesn't control the
+    # naming of, so it's a plain tfvars-sourced env var, not routed through SSM.
+    { name = "FIX_TARGET_REPO", value = var.fix_target_repo },
     # Langfuse's generic host (settings.langfuse_host's default,
     # "https://cloud.langfuse.com") does not accept this project's keys --
     # this specific project lives on the US-region-specific ingest host.

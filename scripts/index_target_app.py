@@ -1,15 +1,15 @@
 """
-One-shot script: index AllInterviews codebase into the RAG vector store.
+One-shot script: index the target app's codebase into the RAG vector store.
 
 JS/TS files are indexed using function-boundary chunking — one chunk per top-level
 function. This eliminates the dilution problem where short functions get mixed with
 unrelated code in a fixed 50-line window. Python/other files fall back to line-based.
 
 Usage:
-    python scripts/index_allinterviews.py                          # index
-    python scripts/index_allinterviews.py --query "classifyFields json parse"
-    python scripts/index_allinterviews.py --search-only --query "NoSuchKey S3"
-    python scripts/index_allinterviews.py --search-only --hybrid --query "NoSuchKey"
+    python scripts/index_target_app.py                          # index
+    python scripts/index_target_app.py --query "classifyFields json parse"
+    python scripts/index_target_app.py --search-only --query "NoSuchKey S3"
+    python scripts/index_target_app.py --search-only --hybrid --query "NoSuchKey"
 
 The index is persisted to .chromadb/ (ChromaDB sqlite). Re-running is safe — upserts.
 """
@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-ALLINTERVIEWS_PATH = "/Users/Sidreddy/VoyageCode/AllInterviews"
+TARGET_APP_PATH = os.environ.get("TARGET_APP_PATH", "/path/to/target-app")
 
 RESET  = "\033[0m"
 GREEN  = "\033[32m"
@@ -82,7 +82,7 @@ if __name__ == "__main__":
         pass
 
     if not args.search_only:
-        asyncio.run(index(ALLINTERVIEWS_PATH))
+        asyncio.run(index(TARGET_APP_PATH))
 
     if args.query:
         asyncio.run(search(args.query, args.n, hybrid=args.hybrid))

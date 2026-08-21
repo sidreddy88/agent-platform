@@ -85,7 +85,7 @@ async def test_resolves_source_function_end_to_end():
     agent = _make_agent()
     agent._llm_haiku.complete = AsyncMock(return_value="classifyFields")
     agent._github.search_code = AsyncMock(
-        return_value=[{"path": "constants/prankCheckerOpenAI.js"}]
+        return_value=[{"path": "constants/validationOpenAI.js"}]
     )
     producer_content = (
         "async function classifyFields(fields) {\n"
@@ -96,11 +96,11 @@ async def test_resolves_source_function_end_to_end():
 
     result = await agent._trace_undefined_source(
         "const r = classifyFields(x); r.publish_decision;",
-        "constants/prankCheckerMain.js",
+        "constants/validationMain.js",
         _null_access_incident(),
     )
 
-    assert result == ("constants/prankCheckerOpenAI.js", "classifyFields", producer_content)
+    assert result == ("constants/validationOpenAI.js", "classifyFields", producer_content)
 
 
 @pytest.mark.asyncio

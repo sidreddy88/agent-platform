@@ -51,7 +51,7 @@ async def test_run_review_accepts_clarity_result():
     loop, review_agent = _make_loop()
     incident = _make_incident()
     clarity = ClarityResult(
-        summary="Added a log line to PrankCheckerLog.js",
+        summary="Added a log line to ValidationLog.js",
         pr_url="https://github.com/owner/repo/pull/99",
         pr_number=99,
     )

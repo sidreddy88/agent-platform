@@ -108,7 +108,7 @@ _KNOWN_INCIDENTS: list[dict] = [
     {
         "id": "INC-008",
         "symptoms": ["TypeError", "undefined", "cannot read property", "publish_decision", "classification", "wrapper", "intermediate"],
-        "root_cause": "Intermediate wrapper function (e.g. runPrankChecker) already guards the underlying API failure but its error/early-exit return paths omit the `classification` field that callers always access — the direct producer of the crashing object is the wrapper, not the deep API call",
+        "root_cause": "Intermediate wrapper function (e.g. runValidationCheck) already guards the underlying API failure but its error/early-exit return paths omit the `classification` field that callers always access — the direct producer of the crashing object is the wrapper, not the deep API call",
         "resolution": "Added `classification: { publish_decision: 'block', ... }` to every return path in the wrapper that previously omitted it, so all callers always receive a complete object regardless of which code path executed",
     },
     {
@@ -165,7 +165,7 @@ _MAX_PROSE_CANDIDATES = 8
 _PASCAL_CASE_RE = re.compile(r"\b[A-Z][A-Za-z0-9]*\b")
 
 # Matches a plausible repo-relative source file mention in prose, e.g.
-# "shoutoutInterviewUsers.js" or "routes/api/foo.js" — used to catch
+# "brandAInterviewUsers.js" or "routes/api/foo.js" — used to catch
 # additional_fix prose asserting a specific file is still vulnerable with no
 # grounded additional_fix_file/_snippet behind the claim (see _enforce_grounding).
 _FILE_MENTION_RE = re.compile(r"\b[\w./-]+\.(?:js|ts|jsx|tsx|py)\b")
@@ -245,8 +245,8 @@ class DiagnosisResult:
     root_cause_snippet: str | None = None      # verbatim excerpt of the CURRENT code in
     # affected_file that actually shows the claimed bug -- the PRIMARY-target counterpart
     # to additional_fix_snippet below. Real production bug, the worst fabrication found
-    # this session: a diagnosis named affected_file="models/MasterInspiring.js" and quoted
-    # a root_cause code snippet ("errors: { prank: {...}, contentFlags: {...} }") that
+    # this session: a diagnosis named affected_file="models/MasterBrandA.js" and quoted
+    # a root_cause code snippet ("errors: { flagged: {...}, contentFlags: {...} }") that
     # exists NOWHERE in the real repo -- not even in a different file. The real bug was a
     # single, unrelated file (a log model with its own genuinely-real `errors` field) that
     # was never found at all. affected_file's existence-only check passed trivially (the
@@ -261,7 +261,7 @@ class DiagnosisResult:
     additional_fix_snippet: str | None = None  # excerpt of the vulnerable code CURRENTLY
     # in additional_fix_file, so _enforce_grounding can verify it's still actually there
     # (see _snippet_is_grounded) instead of just checking the file exists. Without this,
-    # a claim like "still broken in shoutoutInterviewUsers.js" sails through ungrounded
+    # a claim like "still broken in brandAInterviewUsers.js" sails through ungrounded
     # even when that file was fixed by an earlier, separate incident — the exact failure
     # mode blast_radius entries were already protected against, replayed through this
     # sibling field instead.
@@ -629,7 +629,7 @@ class DiagnosisAgent(BaseAgent):
                 "If the file calls workers, helpers, or other modules relevant to the failure, "
                 "call this again on those files. Follow the code until you reach the failure site. "
                 "If a file is truncated, search for the specific function name via search_codebase. "
-                "Input: {file_path: string (e.g. 'constants/prankCheckerMain.js')}"
+                "Input: {file_path: string (e.g. 'constants/validationMain.js')}"
             ),
         )
         self.register_tool(
@@ -783,11 +783,11 @@ class DiagnosisAgent(BaseAgent):
 
         _file_exists_in_repo only confirms the FILE is real -- it says nothing about
         whether the snippet is. Confirmed in production: a diagnosis correctly read
-        crInterviewUsers.js and found its real, still-vulnerable handler, then listed
-        3 sibling files (shoutoutInterviewUsers.js, cityNationalInterviewUsers.js,
-        smallBusinessOfTheDayInterviewUsers.js) as having "the identical missing
+        brandCInterviewUsers.js and found its real, still-vulnerable handler, then listed
+        3 sibling files (brandAInterviewUsers.js, brandBInterviewUsers.js,
+        brandDInterviewUsers.js) as having "the identical missing
         guard" with detailed, plausible-looking snippets -- one per file, each just
-        the crInterviewUsers.js snippet with the Mongoose model name swapped. All 3
+        the brandCInterviewUsers.js snippet with the Mongoose model name swapped. All 3
         files are real and all 3 snippets passed the file-existence check. All 3
         were also completely fabricated: those files were fixed via earlier, separate
         incidents and no longer contain anything resembling that code -- different
@@ -1250,7 +1250,7 @@ If the error is a TypeError (cannot read property, undefined, null) or NullPoint
 STEP 1 — identify the DIRECT producer of the crashing object:
   The crash is `obj.field` or `obj.field.subfield`. Find the function whose RETURN VALUE
   is assigned to `obj` at the crash site. That is the direct producer.
-  - It may be a wrapper/intermediate function (e.g. runPrankChecker), NOT the deep API call.
+  - It may be a wrapper/intermediate function (e.g. runValidationCheck), NOT the deep API call.
   - The direct producer may already handle errors internally — but its error return paths
     may omit the field callers expect. That IS the root cause.
 

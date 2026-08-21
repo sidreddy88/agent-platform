@@ -157,7 +157,7 @@ Explicit rules in _generate_fix:
 ## The classifyFields Incident
 
 **Error:** Unexpected token \ in JSON at position 9655
-**Stack trace:** constants/prankCheckerOpenAI.js → classifyFields
+**Stack trace:** constants/validationOpenAI.js → classifyFields
 **First agent fix (symptom):** Regex sanitization inside classifyFields before JSON.parse
 **Code review:** "Symptom fix — security risk from regex JSON manipulation, root cause unaddressed"
 **Correct fix:** response_format: { type: "json_object" } on the OpenAI API call in classifyFields

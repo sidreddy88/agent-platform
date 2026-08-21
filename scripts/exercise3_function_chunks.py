@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-TARGET_FILE = "/Users/Sidreddy/VoyageCode/AllInterviews/routes/services/image.js"
+TARGET_FILE = os.environ.get("TARGET_APP_PATH", "/path/to/target-app") + "/routes/services/image.js"
 RELATIVE_PATH = "routes/services/image.js"
 
 QUERIES = [
@@ -65,7 +65,7 @@ def extract_functions(content: str, file_path: str) -> list[FunctionChunk]:
     Uses brace-depth tracking to find the matching closing brace.
     Known limitation: brace characters inside string literals are counted,
     which can cause false positives in files with many inline JSON strings.
-    In practice this is rare in the AllInterviews codebase.
+    In practice this is rare in the target-app codebase.
     """
     lines = content.splitlines()
     functions: list[FunctionChunk] = []

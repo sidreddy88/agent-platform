@@ -29,10 +29,10 @@ from app.core.config import settings
 from app.models.events import ErrorEvent, EventSource, IncidentState, IncidentStatus, Severity
 from app.services.aws import AWSService, AWSError
 
-LOG_GROUP = "/ecs/TaskAllInterviews"
+LOG_GROUP = settings.ecs_log_groups or "/ecs/target-app-task"
 PATTERN = "NoSuchKey"
 ERROR_TYPE = "S3_NO_SUCH_KEY"
-SERVICE = "allinterviews"
+SERVICE = "target-app"
 LOOKBACK_HOURS = 24  # search window
 
 
@@ -84,7 +84,7 @@ def _synthetic_incident() -> IncidentState:
             "pattern": PATTERN,
             "match_count": 47,
             "evidence": [
-                "47 occurrences of NoSuchKey in /ecs/TaskAllInterviews in last 24h",
+                f"47 occurrences of NoSuchKey in {LOG_GROUP} in last 24h",
                 "Error originates in moveAndRemoveFileFromS3 at routes/services/image.js",
                 "S3 key missing at copy step — race condition between upload and move",
             ],

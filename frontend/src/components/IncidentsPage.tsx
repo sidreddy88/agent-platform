@@ -555,7 +555,7 @@ function IncidentCard({ inc }: { inc: Incident }) {
               <textarea
                 value={escalationNotes}
                 onChange={e => setEscalationNotes(e.target.value)}
-                placeholder="Optional instruction for the fix agent (e.g. 'diagnosis's file list looks fabricated — only models/PrankCheckerLog.js is real, focus there')..."
+                placeholder="Optional instruction for the fix agent (e.g. 'diagnosis's file list looks fabricated — only models/ValidationLog.js is real, focus there')..."
                 rows={3}
                 style={{
                   width: "100%", boxSizing: "border-box" as const, padding: "6px 8px",

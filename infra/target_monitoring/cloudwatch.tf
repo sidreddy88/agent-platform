@@ -19,7 +19,7 @@ resource "aws_cloudwatch_log_metric_filter" "errors" {
 
   metric_transformation {
     name          = "${var.name_prefix}-error-count"
-    namespace     = "AllInterviews"
+    namespace     = var.cloudwatch_namespace
     value         = "1"
     default_value = "0"
     unit          = "Count"
@@ -28,7 +28,7 @@ resource "aws_cloudwatch_log_metric_filter" "errors" {
 
 resource "aws_cloudwatch_metric_alarm" "errors" {
   alarm_name          = "${var.name_prefix}-errors"
-  alarm_description   = "AllInterviews ECS task emitted a Node error signature (TypeError/ReferenceError/RangeError/SyntaxError/UnhandledPromiseRejection/Error:)."
+  alarm_description   = "Target app's ECS task emitted a Node error signature (TypeError/ReferenceError/RangeError/SyntaxError/UnhandledPromiseRejection/Error:)."
   metric_name         = aws_cloudwatch_log_metric_filter.errors.metric_transformation[0].name
   namespace           = aws_cloudwatch_log_metric_filter.errors.metric_transformation[0].namespace
   statistic           = "Sum"
@@ -42,6 +42,6 @@ resource "aws_cloudwatch_metric_alarm" "errors" {
   ok_actions    = [aws_sns_topic.alarms.arn]
 
   tags = {
-    target = "ecs/TaskAllInterviews"
+    target = trimprefix(var.log_group_name, "/")
   }
 }

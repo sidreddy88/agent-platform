@@ -8,10 +8,11 @@ Two modes:
 Run unit tests:
     pytest tests/test_rag.py -v
 
-Run live test (indexes /Users/Sidreddy/VoyageCode/SerpApiTestTool):
+Run live test (indexes the path set via LIVE_TEST_CODEBASE_PATH, or CODEBASE_PATH below):
     pytest tests/test_rag.py -m live -s
 """
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,7 +26,7 @@ from app.services.rag import (
 )
 from app.services.vector_store import VectorMatch
 
-CODEBASE_PATH = "/Users/Sidreddy/VoyageCode/SerpApiTestTool"
+CODEBASE_PATH = os.environ.get("LIVE_TEST_CODEBASE_PATH", "/path/to/a/local/test/codebase")
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +284,7 @@ class TestClear:
 @pytest.mark.asyncio
 async def test_live_index_and_search():
     """
-    Indexes /Users/Sidreddy/VoyageCode/SerpApiTestTool and runs a search.
+    Indexes CODEBASE_PATH (see module docstring) and runs a search.
 
     Requires OPENAI_API_KEY in .env.
 

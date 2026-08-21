@@ -48,3 +48,10 @@ docs/GITHUB_TOKEN_SETUP.md
 # directly, or running that script yourself with AWS credentials that can
 # read the bucket.
 targets/target-app/
+
+# Terraform variable files — real external identifiers (target repo name,
+# log group name, resource-name prefix) are supplied here rather than as
+# committed defaults. See infra/agent_platform/variables.tf and
+# infra/target_monitoring/variables.tf.
+*.tfvars
+*.tfvars.json

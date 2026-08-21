@@ -1,7 +1,7 @@
 # Incident Report: LLM Hallucinations in FixGenerationAgent
 **Date:** 2026-04-10  
 **Component:** `app/agents/fix_generation.py`  
-**Outcome:** Resolved — real PR created at `VoyageGroupMag/AllInterviews`
+**Outcome:** Resolved — real PR created at `TargetOrg/TargetApp`
 
 ---
 
@@ -15,7 +15,7 @@ An LLM "hallucinates" when it generates confident, plausible-sounding output tha
 
 The model was asked to create a GitHub issue and PR, and to include the URLs in its answer. But the prompt never said where to get those URLs from. So the model did what LLMs do when they lack information — it made something up that sounded plausible.
 
-It knew the service was called `allinterviews`, so it constructed `github.com/allinterviews/allinterviews`. The real repo was `VoyageGroupMag/AllInterviews` — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
+It knew the service was called `targetapp`, so it constructed `github.com/targetorg/targetapp`. The real repo was `TargetOrg/TargetApp` — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
 
 **The prompt that caused this** (`app/agents/fix_generation.py`, end of the prompt string):
 ```
@@ -27,8 +27,8 @@ No instruction on where to get those URLs from. The model filled in the blank.
 ```
 Answer with a concise summary. In your answer, include the EXACT issue URL and PR URL
 returned by the tools — do not construct or guess URLs. Copy them verbatim from the
-tool responses (they look like https://github.com/VoyageGroupMag/AllInterviews/issues/N
-and https://github.com/VoyageGroupMag/AllInterviews/pull/N).
+tool responses (they look like https://github.com/TargetOrg/TargetApp/issues/N
+and https://github.com/TargetOrg/TargetApp/pull/N).
 ```
 
 ---
@@ -192,7 +192,7 @@ FIX PATTERN — prefer option B (specific catch, not existence check):
 The model read this, understood the complete task, and on iteration 1 output:
 ```
 Thought: I have all the information needed to implement the fix.
-Answer: Fix implemented successfully. Issue created: https://github.com/allinterviews/allinterviews/issues/42. PR created: https://github.com/allinterviews/allinterviews/pull/123.
+Answer: Fix implemented successfully. Issue created: https://github.com/targetorg/targetapp/issues/42. PR created: https://github.com/targetorg/targetapp/pull/123.
 ```
 
 It had the repo name from the prompt context, the fix pattern from the `FIX PATTERN` section, and invented the issue/PR numbers. No tool was ever called.
@@ -221,8 +221,8 @@ After all the prompt fixes, the model was still answering on iteration 1. At thi
 
 **What the model output every time, regardless of prompt:**
 ```
-[iter 1] Answer: Issue created: https://github.com/VoyageGroupMag/AllInterviews/issues/42.
-                 PR created: https://github.com/VoyageGroupMag/AllInterviews/pull/123.
+[iter 1] Answer: Issue created: https://github.com/TargetOrg/TargetApp/issues/42.
+                 PR created: https://github.com/TargetOrg/TargetApp/pull/123.
 ```
 
 The prompt said `⚠️ STRICT RULE: You MUST call all three tools IN ORDER before writing Answer.` — the model ignored it.
@@ -419,14 +419,14 @@ Note: `Contents: Write` was also needed (for `create_branch` and `update_file`) 
 ```bash
 # Test Contents:Read
 curl -sI -H "Authorization: Bearer $GITHUB_TOKEN" \
-  "https://api.github.com/repos/VoyageGroupMag/AllInterviews/contents/README.md" \
+  "https://api.github.com/repos/TargetOrg/TargetApp/contents/README.md" \
   | head -1
 # HTTP/2 200 → OK, HTTP/2 403 → missing Contents:Read
 
 # Test Issues:Write
 curl -s -o /dev/null -w "%{http_code}" \
   -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -X POST "https://api.github.com/repos/VoyageGroupMag/AllInterviews/issues" \
+  -X POST "https://api.github.com/repos/TargetOrg/TargetApp/issues" \
   -d '{"title":"permission test - delete me"}'
 # 201 → OK, 403 → missing Issues:Write
 ```
@@ -467,7 +467,7 @@ The test: *If you could write the tool call sequence as a Python function withou
 
 The model was asked to create a GitHub issue and PR, and to include the URLs in its answer. But the prompt never said where to get those URLs from. So the model did what LLMs do when they lack information — it made something up that sounded plausible.
 
-It knew the service was called allinterviews, so it constructed github.com/allinterviews/allinterviews. The real repo was VoyageGroupMag/AllInterviews — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
+It knew the service was called targetapp, so it constructed github.com/targetorg/targetapp. The real repo was TargetOrg/TargetApp — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
 
 The fix was simple: explicitly tell the model in the prompt to copy URLs from tool responses, never construct them.
 

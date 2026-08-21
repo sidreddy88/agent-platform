@@ -3,10 +3,10 @@ CLI — bulk index the target codebase into the call graph.
 
 Usage:
     # Use a local path:
-    python scripts/index_code_graph.py /path/to/AllInterviews
+    python scripts/index_code_graph.py /path/to/target-app
 
     # Clone from GitHub (uses GITHUB_TOKEN env var):
-    python scripts/index_code_graph.py --repo VoyageGroupMag/AllInterviews
+    python scripts/index_code_graph.py --repo TargetOrg/TargetApp
 
     # No args — falls back to settings.codebase_path, then settings.fix_target_repo:
     python scripts/index_code_graph.py
