@@ -304,6 +304,7 @@ function IncidentCard({ inc }: { inc: Incident }) {
   const [flagDone, setFlagDone] = useState(false);
   const [flagRunsLoading, setFlagRunsLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [runningClarity, setRunningClarity] = useState(false);
 
   async function handleDelete() {
     if (!window.confirm("Delete this incident? Flagged failures in the dataset are kept.")) return;
@@ -404,6 +405,14 @@ function IncidentCard({ inc }: { inc: Incident }) {
       });
     } finally {
       setApproving(false);
+    }
+  }
+  async function handleRunErrorClarity() {
+    setRunningClarity(true);
+    try {
+      await fetch(`/incidents/${inc.id}/run-error-clarity`, { method: "POST" });
+    } finally {
+      setRunningClarity(false);
     }
   }
   async function handleRejectEscalation() {
@@ -585,6 +594,18 @@ function IncidentCard({ inc }: { inc: Incident }) {
         ) : (
           <button style={restartBtn(restarting)} onClick={() => setShowNotes(true)} disabled={restarting} title="Restart pipeline with optional feedback">
             ↺ Restart
+          </button>
+        )}
+        {!inc.pr_url && !inc.clarity_pr_url && inc.status !== "fixing" && (
+          <button
+            onClick={handleRunErrorClarity}
+            disabled={runningClarity}
+            style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #818cf855",
+              background: runningClarity ? "#818cf81a" : "transparent",
+              color: "#818cf8", fontSize: 11, cursor: runningClarity ? "not-allowed" : "pointer", fontWeight: 600 }}
+            title="Manually run ErrorClarityAgent — useful when the normal escalation path didn't produce a PR"
+          >
+            {runningClarity ? "Running…" : "Try Error Clarity"}
           </button>
         )}
         <button
