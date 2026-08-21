@@ -1,11 +1,26 @@
 """
 Regression tests for DiagnosisAgent's code-grounding guard.
 
-The guard prevents fabricated function names (a name the LLM invented that does not
-actually exist on the target repo's default branch) from leaking into downstream
-agents. Reproduces the failure mode where the diagnosis agent named
-`processAndStoreImage` — a symbol that didn't exist anywhere in the repo — and
-the Fix Generation agent then targeted a non-existent function.
+Two layers, tested separately:
+  - _validate_diagnosis_submission: the submit_diagnosis tool's inline gate.
+    Runs BEFORE a diagnosis is accepted -- a failure here becomes a same-turn
+    tool rejection (a list of problem strings), not a silent null-and-cap.
+    This is where fabricated function names, file paths, file<->function
+    pairings, and snippets (primary + additional_fix_file + every
+    additional_fix_targets/blast_radius entry) get caught, plus the
+    prose-names-a-file-with-no-structured-backing check.
+  - _enforce_grounding: the smaller, complementary check that still runs
+    AFTER a submission is accepted -- prose symbol-scan (fabricated names
+    mentioned only in reasoning, never assigned to any field the submission
+    gate validates) and blast_radius coverage (a completeness nudge, not a
+    fabrication check).
+
+Reproduces several real production fabrications, preserved from this file's
+history: `processAndStoreImage` (a symbol that didn't exist anywhere in the
+repo), sibling files claimed "still vulnerable" that had already been fixed
+by earlier incidents, and the worst one found this session -- a diagnosis
+that named a real file (`models/MasterInspiring.js`) and quoted a root-cause
+snippet that existed nowhere in the actual repo.
 """
 from __future__ import annotations
 
@@ -37,110 +52,77 @@ def _make_agent(search_code_side_effect, local_repo=None):
     return agent
 
 
+# ---------------------------------------------------------------------------
+# _validate_diagnosis_submission — the submit_diagnosis inline gate
+# ---------------------------------------------------------------------------
+
 @pytest.mark.asyncio
-async def test_grounding_passes_when_function_exists():
+async def test_submission_passes_when_function_exists():
     async def found(owner, repo, query):
         return [{"path": "routes/services/image.js", "fragment": "function realFn() {}"}]
 
     agent = _make_agent(found)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="realFn",
-        affected_file="routes/services/image.js",
-    )
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "realFn", "affected_file": "routes/services/image.js",
+    }
 
-    out = await agent._enforce_grounding(result)
+    problems = await agent._validate_diagnosis_submission(data)
 
-    assert out.affected_function == "realFn"
-    assert out.affected_file == "routes/services/image.js"
-    assert out.confidence == 0.9
-    assert out.escalate is False
-    assert all("GROUNDING FAILURE" not in e for e in out.evidence)
+    assert problems == []
 
 
 @pytest.mark.asyncio
-async def test_grounding_nulls_fabricated_function():
-    """Reproduces the processAndStoreImage failure: name doesn't exist → nulled.
-
-    Per commit 3599fb0 ("decouple function/file grounding"), a bad function name
-    nulls ONLY the function field — not affected_file. Express anonymous route
-    handlers have no searchable symbol, and the file path alone is still useful
-    to the fix agent, so it's kept rather than thrown away. Confidence is only
-    capped when affected_file is ALSO null.
-    """
+async def test_submission_rejects_fabricated_function():
+    """Reproduces the processAndStoreImage failure: name doesn't exist → rejected."""
     async def not_found(owner, repo, query):
         return []
 
     agent = _make_agent(not_found)
-    result = DiagnosisResult(
-        root_cause="HEIF upload, sharp throws on unsupported codec",
-        confidence=0.91,
-        evidence=["log: bad seek to 1668282", "log: Unsupported codec (4.3000)"],
-        affected_function="processAndStoreImage",
-        affected_file="routes/services/image-service.js",
-    )
+    data = {
+        "root_cause": "HEIF upload, sharp throws on unsupported codec",
+        "confidence": 0.91,
+        "affected_function": "processAndStoreImage",
+        "affected_file": "routes/services/image-service.js",
+    }
 
-    out = await agent._enforce_grounding(result)
+    problems = await agent._validate_diagnosis_submission(data)
 
-    assert out.affected_function is None
-    assert out.affected_file == "routes/services/image-service.js"  # kept, not nulled
-    assert out.confidence == 0.91  # not capped — the file is still verified
-    assert out.escalate is False
-    assert any("GROUNDING NOTE" in e and "processAndStoreImage" in e for e in out.evidence)
+    assert any("processAndStoreImage" in p for p in problems)
 
 
 @pytest.mark.asyncio
-async def test_grounding_nulls_fabricated_secondary_function():
-    """A fabricated additional_fix_function nulls only itself, not additional_fix_file
-    (same decoupled-grounding rule as the primary field — see commit 3599fb0)."""
+async def test_submission_rejects_fabricated_secondary_function():
     async def selective(owner, repo, query):
-        # Primary function exists; secondary does not.
         if "primaryFn" in query:
             return [{"path": "a.js", "fragment": "primaryFn()"}]
         return []
 
     agent = _make_agent(selective)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.85,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix="cleanup",
-        additional_fix_function="madeUpHelper",
-        additional_fix_file="b.js",
-    )
+    data = {
+        "root_cause": "x", "confidence": 0.85,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "additional_fix": "cleanup",
+        "additional_fix_function": "madeUpHelper", "additional_fix_file": "b.js",
+    }
 
-    out = await agent._enforce_grounding(result)
+    problems = await agent._validate_diagnosis_submission(data)
 
-    assert out.affected_function == "primaryFn"  # primary survives
-    assert out.affected_file == "a.js"
-    assert out.additional_fix_function is None  # secondary function nulled
-    assert out.additional_fix_file == "b.js"  # secondary file kept — affected_file also verified
-    assert out.confidence == 0.85  # not capped — affected_file is verified
-    assert out.escalate is False
+    assert any("madeUpHelper" in p for p in problems)
 
 
 @pytest.mark.asyncio
-async def test_grounding_skipped_when_no_function_named():
-    """Low-confidence diagnosis with no function named should not be re-capped."""
+async def test_submission_passes_when_no_function_named():
+    """Low-confidence diagnosis with no function named has nothing to check here."""
     async def never_called(owner, repo, query):  # pragma: no cover
         raise AssertionError("search_code should not be called when no function is named")
 
     agent = _make_agent(never_called)
-    result = DiagnosisResult(
-        root_cause="unclear",
-        confidence=0.55,
-        affected_function=None,
-        affected_file=None,
-        escalate=True,
-    )
+    data = {"root_cause": "unclear", "confidence": 0.55}
 
-    out = await agent._enforce_grounding(result)
+    problems = await agent._validate_diagnosis_submission(data)
 
-    assert out.confidence == 0.55
-    assert out.escalate is True
-    assert all("GROUNDING FAILURE" not in e for e in out.evidence)
+    assert problems == []
 
 
 @pytest.mark.asyncio
@@ -148,6 +130,452 @@ async def test_confidence_threshold_constant():
     """Sanity: changing CONFIDENCE_THRESHOLD must keep the guard's escalation aligned."""
     assert CONFIDENCE_THRESHOLD == 0.70
 
+
+# ---------------------------------------------------------------------------
+# additional_fix_file content-currency grounding
+#
+# Real production bug: the diagnosis claimed "Apply the identical guard to
+# shoutoutInterviewUsers.js and smallBusinessOfTheDayInterviewUsers.js — both
+# confirmed by grep to still have the unguarded pattern," but both files had
+# already been fixed by earlier, unrelated incidents.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_submission_rejects_additional_fix_when_snippet_not_grounded():
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        "router.get('/getPreviewUser/:id', (req, res) => {\n"
+        "  const { id } = req.params;\n"
+        "  if (!/^\\d+$/.test(id)) { return res.status(400).json({message: 'Invalid'}); }\n"
+        "  Model.find({ previewCode: Number(id) }).then(users => res.json(users));\n"
+        "});"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "additional_fix": "apply identical guard",
+        "additional_fix_file": "routes/api/shoutoutInterviewUsers.js",
+        "additional_fix_snippet": (
+            "router.get('/getPreviewUser/:id', (req, res) => {\n"
+            "  const { id } = req.params;\n"
+            "  Model.find({ previewCode: id }).then(users => res.json(users));\n"
+            "});"
+        ),
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("additional_fix_file" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_submission_passes_when_additional_fix_snippet_grounded():
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    vulnerable_snippet = (
+        "router.get('/getPreviewUser/:id', (req, res) => {\n"
+        "  const { id } = req.params;\n"
+        "  Model.find({ previewCode: id }).then(users => res.json(users));\n"
+        "});"
+    )
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.side_effect = lambda p: (
+        "function primaryFn() {}" if p == "a.js" else vulnerable_snippet
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "root_cause_snippet": "function primaryFn() {}",
+        "additional_fix": "apply identical guard",
+        "additional_fix_file": "routes/api/boldJourneyInterviewUsers.js",
+        "additional_fix_snippet": vulnerable_snippet,
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert problems == []
+
+
+@pytest.mark.asyncio
+async def test_submission_passes_when_cannot_verify_at_all():
+    """Fail-open when _local_repo isn't ready — same policy as every check."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    agent = _make_agent(found)  # default local_repo: ready=False, fails open
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "additional_fix": "add strictQuery to server.js too",
+        "additional_fix_file": "server.js",
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert problems == []
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_additional_fix_when_snippet_omitted_but_verifiable():
+    """Real production bug: the model left additional_fix_snippet out entirely,
+    which skipped verification completely and let an unverified "confirmed
+    still-vulnerable" claim through. A missing snippet is no more trustworthy
+    than a wrong one when we CAN verify."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "router.get('/getPreviewUser/:id', ...) { /* already has guard */ }"
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "additional_fix": "apply identical guard to shoutoutInterviewUsers.js — confirmed still vulnerable",
+        "additional_fix_file": "routes/api/shoutoutInterviewUsers.js",
+        # no additional_fix_snippet supplied
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("additional_fix_file" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_prose_naming_file_with_no_structured_backing():
+    """Real production bug: additional_fix_file correctly came back null (no wrong
+    commit followed), but additional_fix prose still asserted specific files were
+    'confirmed still-vulnerable' with nothing backing it — displayed verbatim on the
+    incident dashboard as if it were checked."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "additional_fix": (
+            "Apply the identical isNaN guard to shoutoutInterviewUsers.js and "
+            "smallBusinessOfTheDayInterviewUsers.js — both confirmed still-vulnerable."
+        ),
+        "additional_fix_file": None,
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("shoutoutInterviewUsers.js" in p for p in problems)
+    assert any("smallBusinessOfTheDayInterviewUsers.js" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_submission_passes_prose_without_file_mentions():
+    """Prose that doesn't name a specific file (e.g. a pure conceptual description)
+    isn't penalized — the check is specifically for unverifiable per-file claims."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "function primaryFn() {}"
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "root_cause_snippet": "function primaryFn() {}",
+        "additional_fix": "Also validate the same field server-side on the client form.",
+        "additional_fix_file": None,
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert problems == []
+
+
+# ---------------------------------------------------------------------------
+# additional_fix_targets — multi-file counterpart to additional_fix_file
+#
+# Real production bug: a diagnosis correctly identified 3 sibling files needing
+# the identical per-brand-duplication fix in its prose, but additional_fix_file
+# can only ever carry ONE.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_submission_passes_when_targets_grounded():
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    vulnerable_snippet = "Model.find({ previewCode: id }).then(users => res.json(users));"
+    sibling_content = f"router.get('/getPreviewUser/:id', (req, res) => {{ {vulnerable_snippet} }});"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.side_effect = lambda p: (
+        "function primaryFn() {}" if p == "a.js" else sibling_content
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "root_cause_snippet": "function primaryFn() {}",
+        "additional_fix_targets": [
+            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
+            {"file": "routes/api/inspiringInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
+        ],
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert problems == []
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_targets_without_grounded_snippet():
+    """Real production bug: 1 of 3 named sibling files was already fixed (wrong
+    claim) — each entry must be checked independently, not accepted as a batch."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    already_fixed_content = "if (!/^\\d+$/.test(id)) { return res.status(400).json({}); } Model.find({ previewCode: Number(id) })"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.side_effect = lambda path: (
+        already_fixed_content if "shoutout" in path else "Model.find({ previewCode: id })"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "additional_fix_targets": [
+            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
+            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
+        ],
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("shoutoutInterviewUsers.js" in p and "[0]" in p for p in problems)
+    assert not any("boldJourneyInterviewUsers.js" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_targets_with_no_snippet_at_all():
+    """Omitting the snippet is not a way around verification — same policy as
+    additional_fix_file."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "Model.find({ previewCode: id })"
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "additional_fix_targets": [
+            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": ""},
+        ],
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("boldJourneyInterviewUsers.js" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_submission_passes_targets_when_cannot_verify_at_all():
+    """Fail-open when _local_repo isn't ready — same policy as every other check."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    agent = _make_agent(found)  # default: ready=False
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "additional_fix_targets": [
+            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": ""},
+        ],
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert problems == []
+
+
+@pytest.mark.asyncio
+async def test_submission_passes_prose_when_targets_grounded():
+    """additional_fix_file is None, but additional_fix_targets is genuinely
+    grounded — the prose-mention check must not fire in this case."""
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    vulnerable_snippet = "Model.find({ previewCode: id })"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.side_effect = lambda p: (
+        "function primaryFn() {}" if p == "a.js" else vulnerable_snippet
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "primaryFn", "affected_file": "a.js",
+        "root_cause_snippet": "function primaryFn() {}",
+        "additional_fix": "Apply the identical guard to boldJourneyInterviewUsers.js.",
+        "additional_fix_file": None,
+        "additional_fix_targets": [
+            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
+        ],
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert problems == []
+
+
+# ---------------------------------------------------------------------------
+# affected_file / root_cause_snippet grounding — the PRIMARY-target counterpart
+# to additional_fix_file's mandatory-snippet policy.
+#
+# Real production bug, the worst fabrication found this session: a diagnosis
+# named affected_file="models/MasterInspiring.js" (a real file, module-level,
+# no function claimed) and quoted a root_cause code snippet
+# ("errors: { prank: {...}, contentFlags: {...} }") that existed NOWHERE in
+# the real repo -- not in that file, not in any file.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_submission_passes_when_root_cause_snippet_grounded():
+    async def found(owner, repo, query):
+        return []
+
+    real_snippet = "errors: { type: Array },"
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        "const schema = new mongoose.Schema({\n  fields: { type: Object },\n"
+        f"  {real_snippet}\n  result: {{ type: String }},\n}});"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "PrankCheckerLog.js defines a reserved `errors` schema pathname",
+        "confidence": 0.85,
+        "affected_file": "models/PrankCheckerLog.js",
+        "root_cause_snippet": real_snippet,
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert problems == []
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_fabricated_root_cause_snippet():
+    """The actual real-world bug: a snippet that matches nothing in the real file."""
+    async def found(owner, repo, query):
+        return []
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = (
+        "const MasterInspiringSchema = new schema({\n"
+        "  email: { type: String, required: true, unique: true },\n"
+        "}, { timestamps: true });"
+    )
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "All four Mongoose model files define an errors field...",
+        "confidence": 0.55,
+        "affected_file": "models/MasterInspiring.js",
+        "root_cause_snippet": "errors: { prank: { type: Boolean, default: false }, contentFlags: { type: Array, default: [] } }",
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("root_cause_snippet" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_root_cause_snippet_omitted_but_verifiable():
+    """Omitting the snippet is not a way around verification."""
+    async def found(owner, repo, query):
+        return []
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "some real file content"
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_file": "models/PrankCheckerLog.js",
+        # no root_cause_snippet
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("root_cause_snippet" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_submission_passes_when_cannot_verify_affected_file_at_all():
+    """Fail-open when _local_repo isn't ready — same policy as every other check."""
+    async def found(owner, repo, query):
+        return []
+
+    agent = _make_agent(found)  # default: ready=False
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_file": "models/PrankCheckerLog.js",
+        # no root_cause_snippet — still passes since we can't verify at all
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert problems == []
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_function_not_paired_with_file():
+    """A real fabrication slipped through exactly this gap in production: the LLM
+    claimed a real symbol (found via search_code — just in a different file) was
+    defined in a real file — just without that symbol. Both individual checks
+    passed; the pairing was never verified."""
+    async def found(owner, repo, query):
+        return [{"path": "some/other/file.js", "fragment": "REFERRAL_MODEL_MAP"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "module.exports = { run() { /* nothing relevant here */ } };"
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "REFERRAL_MODEL_MAP",
+        "affected_file": "create-post-fargate.js",
+        "root_cause_snippet": "some snippet",
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("does not appear inside" in p for p in problems)
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_nonexistent_affected_file():
+    async def found(owner, repo, query):
+        return [{"path": "a.js", "fragment": "primaryFn()"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.file_exists.return_value = False
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_file": "does/not/exist.js",
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert any("does not exist" in p for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# _enforce_grounding — complementary checks that run AFTER acceptance
+# (prose symbol-scan + blast_radius coverage). Unaffected by the
+# submit_diagnosis migration; kept as regression coverage.
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_prose_scan_catches_fabricated_name_in_root_cause():
@@ -162,7 +590,7 @@ async def test_prose_scan_catches_fabricated_name_in_root_cause():
             "with the hardcoded model identifier 'gpt-4-vision'."
         ),
         confidence=0.65,
-        affected_function=None,           # structured slot already null
+        affected_function=None,
         affected_file=None,
         additional_fix=(
             "In processAndStoreImage, skip the analyzeImageWithLLM fire-and-forget call."
@@ -171,12 +599,10 @@ async def test_prose_scan_catches_fabricated_name_in_root_cause():
 
     out = await agent._enforce_grounding(result)
 
-    # Prose scan should fire — confidence capped tighter than the structured cap (0.65).
     assert out.confidence <= 0.55
     assert out.escalate is True
     note = next((e for e in out.evidence if "PROSE GROUNDING" in e), None)
     assert note is not None
-    # All three fabricated names should be flagged.
     assert "callVisionAPI" in note
     assert "processAndStoreImage" in note
     assert "analyzeImageWithLLM" in note
@@ -202,8 +628,7 @@ async def test_prose_scan_skips_verified_structured_names():
 
     out = await agent._enforce_grounding(result)
 
-    # Only the structured-field check should run; prose mention dedupes.
-    assert len(calls) <= 2  # at most 2 queries for the single structured check
+    assert len(calls) == 0  # nothing left in prose that isn't already in already_seen
     assert out.confidence == 0.9
     assert out.escalate is False
 
@@ -244,78 +669,9 @@ async def test_prose_scan_extraction_patterns():
     assert "processAndStoreImage" in names
     assert "analyzeImageWithLLM" in names
     assert "helperFn" in names
-    assert "toString" not in names  # builtin filtered
-    assert "lower" not in names      # no capital
-    assert "ABC" not in names        # doesn't start lowercase
-
-
-# ---------------------------------------------------------------------------
-# Pre-fix-reasoning fields: blast_radius + contract_change
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_parser_extracts_blast_radius_and_contract_change():
-    """Schema-shaped JSON should populate the new fields."""
-    from app.agents.diagnosis import _parse_diagnosis_result
-
-    answer = """```json
-    {
-      "root_cause": "x",
-      "confidence": 0.85,
-      "fix_approach": "y",
-      "affected_function": "processOrder",
-      "affected_file": "src/orders.js",
-      "reproduction_confirmed": true,
-      "blast_radius": [
-        {"file": "src/api.js", "function": "submitOrder", "snippet": "await processOrder(payload)"},
-        {"file": "src/cron/retry.js", "function": "retryFailed", "snippet": "processOrder(...)"}
-      ],
-      "contract_change": "signature",
-      "contract_change_detail": "added retries param"
-    }
-    ```"""
-
-    result = _parse_diagnosis_result(answer)
-    assert result.affected_function == "processOrder"
-    assert len(result.blast_radius) == 2
-    assert result.blast_radius[0]["file"] == "src/api.js"
-    assert result.blast_radius[0]["function"] == "submitOrder"
-    assert result.contract_change == "signature"
-    assert result.contract_change_detail == "added retries param"
-
-
-@pytest.mark.asyncio
-async def test_parser_drops_invalid_blast_radius_entries():
-    """Entries missing `file` should be dropped silently rather than crashing."""
-    from app.agents.diagnosis import _parse_diagnosis_result
-
-    answer = """{
-      "root_cause": "x",
-      "confidence": 0.85,
-      "blast_radius": [
-        {"file": "src/a.js", "function": "callerA"},
-        {"function": "noFile"},
-        "not a dict"
-      ]
-    }"""
-
-    result = _parse_diagnosis_result(answer)
-    assert len(result.blast_radius) == 1
-    assert result.blast_radius[0]["file"] == "src/a.js"
-
-
-@pytest.mark.asyncio
-async def test_parser_normalises_unknown_contract_change():
-    """Unknown contract_change values must clamp to 'none' rather than leaking through."""
-    from app.agents.diagnosis import _parse_diagnosis_result
-
-    answer = """{
-      "root_cause": "x",
-      "confidence": 0.85,
-      "contract_change": "???"
-    }"""
-    result = _parse_diagnosis_result(answer)
-    assert result.contract_change == "none"
+    assert "toString" not in names
+    assert "lower" not in names
+    assert "ABC" not in names
 
 
 @pytest.mark.asyncio
@@ -326,31 +682,26 @@ async def test_grounding_warns_when_blast_radius_empty_for_helper():
 
     agent = _make_agent(found)
     result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="processOrder",
-        affected_file="src/orders.js",
-        blast_radius=[],   # no callers reported
+        root_cause="x", confidence=0.9,
+        affected_function="processOrder", affected_file="src/orders.js",
+        blast_radius=[],
     )
 
     out = await agent._enforce_grounding(result)
 
-    assert out.confidence == 0.9   # not capped — this is observability, not correctness
+    assert out.confidence == 0.9
     assert any("BLAST RADIUS WARNING" in e for e in out.evidence)
 
 
 @pytest.mark.asyncio
 async def test_grounding_skips_blast_radius_warning_for_entry_points():
-    """Route handlers / cron jobs naturally have no callers — no warning."""
     async def found(owner, repo, query):
         return [{"path": "src/routes/api.js", "fragment": "function paymentHandler() {}"}]
 
     agent = _make_agent(found)
     result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="paymentHandler",
-        affected_file="src/routes/api.js",
+        root_cause="x", confidence=0.9,
+        affected_function="paymentHandler", affected_file="src/routes/api.js",
         blast_radius=[],
     )
 
@@ -360,16 +711,13 @@ async def test_grounding_skips_blast_radius_warning_for_entry_points():
 
 @pytest.mark.asyncio
 async def test_grounding_skips_blast_radius_warning_when_evidence_explains():
-    """If the diagnosis evidence already says 'no callers — entry point', no warning."""
     async def found(owner, repo, query):
         return [{"path": "src/x.js", "fragment": "function processOrder() {}"}]
 
     agent = _make_agent(found)
     result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="processOrder",
-        affected_file="src/x.js",
+        root_cause="x", confidence=0.9,
+        affected_function="processOrder", affected_file="src/x.js",
         blast_radius=[],
         evidence=["affected_function is a route handler — no callers"],
     )
@@ -385,653 +733,13 @@ async def test_grounding_no_blast_radius_warning_when_callers_present():
 
     agent = _make_agent(found)
     result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="processOrder",
-        affected_file="src/x.js",
-        blast_radius=[
-            {"file": "src/api.js", "function": "submit", "snippet": "processOrder()"},
-        ],
+        root_cause="x", confidence=0.9,
+        affected_function="processOrder", affected_file="src/x.js",
+        blast_radius=[{"file": "src/api.js", "function": "submit", "snippet": "processOrder()"}],
     )
 
     out = await agent._enforce_grounding(result)
     assert all("BLAST RADIUS WARNING" not in e for e in out.evidence)
-
-
-# ---------------------------------------------------------------------------
-# additional_fix_file content-currency grounding (PR #178)
-#
-# Real production bug: the diagnosis claimed "Apply the identical guard to
-# shoutoutInterviewUsers.js and smallBusinessOfTheDayInterviewUsers.js — both
-# confirmed by grep to still have the unguarded pattern," but both files had
-# already been fixed by earlier, unrelated incidents. additional_fix_file only
-# checked file EXISTENCE (always true — the file is real), never whether the
-# claimed vulnerability was still CURRENTLY there. blast_radius entries already
-# had this protection via _snippet_is_grounded; additional_fix_file did not.
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_additional_fix_nulled_when_snippet_not_grounded():
-    """A claimed-still-vulnerable file that no longer contains the snippet is nulled."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = (
-        "router.get('/getPreviewUser/:id', (req, res) => {\n"
-        "  const { id } = req.params;\n"
-        "  if (!/^\\d+$/.test(id)) { return res.status(400).json({message: 'Invalid'}); }\n"
-        "  Model.find({ previewCode: Number(id) }).then(users => res.json(users));\n"
-        "});"
-    )
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix="apply identical guard",
-        additional_fix_file="routes/api/shoutoutInterviewUsers.js",
-        additional_fix_snippet=(
-            "router.get('/getPreviewUser/:id', (req, res) => {\n"
-            "  const { id } = req.params;\n"
-            "  Model.find({ previewCode: id }).then(users => res.json(users));\n"
-            "});"
-        ),
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.additional_fix_file is None
-    assert out.additional_fix_snippet is None
-    assert out.additional_fix_function is None
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_prose_flagged_unverified_when_snippet_fabricated():
-    """Nulling the structured fields isn't enough on its own — incident_loop.py never
-    persists additional_fix_file/_snippet, only the free-text additional_fix. If that
-    text still repeats the fabricated claim unflagged, a human reviewer sees zero
-    indication the system already disproved it."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = (
-        "router.get('/getPreviewUser/:id', (req, res) => {\n"
-        "  const { id } = req.params;\n"
-        "  if (!/^\\d+$/.test(id)) { return res.status(400).json({message: 'Invalid'}); }\n"
-        "  Model.find({ previewCode: Number(id) }).then(users => res.json(users));\n"
-        "});"
-    )
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix="this route is still vulnerable to the same unguarded query",
-        additional_fix_file="routes/api/exampleInterviewUsers.js",
-        additional_fix_snippet=(
-            "router.get('/getPreviewUser/:id', (req, res) => {\n"
-            "  const { id } = req.params;\n"
-            "  Model.find({ previewCode: id }).then(users => res.json(users));\n"
-            "});"
-        ),
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.additional_fix.startswith("UNVERIFIED")
-    assert "this route is still vulnerable" in out.additional_fix
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_survives_when_snippet_grounded():
-    """A claimed-still-vulnerable file that genuinely still has the pattern survives."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    vulnerable_snippet = (
-        "router.get('/getPreviewUser/:id', (req, res) => {\n"
-        "  const { id } = req.params;\n"
-        "  Model.find({ previewCode: id }).then(users => res.json(users));\n"
-        "});"
-    )
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = vulnerable_snippet
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix="apply identical guard",
-        additional_fix_file="routes/api/boldJourneyInterviewUsers.js",
-        additional_fix_snippet=vulnerable_snippet,
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.additional_fix_file == "routes/api/boldJourneyInterviewUsers.js"
-    assert out.additional_fix_snippet == vulnerable_snippet
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_survives_when_cannot_verify_at_all():
-    """When _local_repo isn't ready (can't verify anything), fail open — same
-    policy as every other check in this file. This is the ONLY case a missing
-    snippet doesn't cost the claim its file."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    agent = _make_agent(found)  # default local_repo: ready=False, fails open
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix="add strictQuery to server.js too",
-        additional_fix_file="server.js",
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.additional_fix_file == "server.js"
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_nulled_when_snippet_omitted_but_verifiable():
-    """Real production bug, recurred AFTER the snippet-grounding check above already
-    existed: the model just left additional_fix_snippet out entirely, which skipped
-    the check completely and let an unverified "confirmed still-vulnerable" claim
-    through. A missing snippet is no more trustworthy than a wrong one when we CAN
-    verify — both must be discarded, not just the wrong one."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = "router.get('/getPreviewUser/:id', ...) { /* already has guard */ }"
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix="apply identical guard to shoutoutInterviewUsers.js — confirmed still vulnerable",
-        additional_fix_file="routes/api/shoutoutInterviewUsers.js",
-        # no additional_fix_snippet supplied
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.additional_fix_file is None
-    assert out.additional_fix_function is None
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_prose_flagged_when_file_field_null_but_prose_names_files():
-    """Real production bug: additional_fix_file correctly came back null (no wrong
-    commit followed), but additional_fix prose still asserted specific files were
-    'confirmed still-vulnerable' with nothing backing it — displayed verbatim on the
-    incident dashboard as if it were checked. Prose making an unverifiable per-file
-    claim must be flagged, not presented as fact."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    local_repo = MagicMock(ready=True)
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix=(
-            "Apply the identical isNaN guard to shoutoutInterviewUsers.js and "
-            "smallBusinessOfTheDayInterviewUsers.js — both confirmed still-vulnerable."
-        ),
-        additional_fix_file=None,
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert any("ADDITIONAL_FIX UNVERIFIED" in e for e in out.evidence)
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_prose_not_flagged_without_file_mentions():
-    """Prose that doesn't name a specific file (e.g. a pure conceptual description)
-    isn't penalized — the flag is specifically for unverifiable per-file claims."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    local_repo = MagicMock(ready=True)
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix="Also validate the same field server-side on the client form.",
-        additional_fix_file=None,
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert all("ADDITIONAL_FIX UNVERIFIED" not in e for e in out.evidence)
-
-
-# ---------------------------------------------------------------------------
-# additional_fix_targets — multi-file counterpart to additional_fix_file (PR #180)
-#
-# Real production bug: a diagnosis correctly identified 3 sibling files needing
-# the identical per-brand-duplication fix in its prose, but additional_fix_file
-# can only ever carry ONE — FixGenerationAgent structurally never had a path to
-# attempt more than one secondary fix, even when the diagnosis got every file
-# right. additional_fix_targets is the fix: a proper list, each entry grounded
-# the same (mandatory-snippet) way as additional_fix_file.
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_parser_extracts_additional_fix_targets():
-    """Schema-shaped JSON should populate additional_fix_targets."""
-    from app.agents.diagnosis import _parse_diagnosis_result
-
-    answer = """{
-      "root_cause": "x",
-      "confidence": 0.85,
-      "additional_fix_targets": [
-        {"file": "routes/api/boldJourneyInterviewUsers.js", "function": null, "snippet": "Model.find({ previewCode: id })"},
-        {"file": "routes/api/inspiringInterviewUsers.js", "function": null, "snippet": "Model.find({ previewCode: id })"}
-      ]
-    }"""
-
-    result = _parse_diagnosis_result(answer)
-    assert len(result.additional_fix_targets) == 2
-    assert result.additional_fix_targets[0]["file"] == "routes/api/boldJourneyInterviewUsers.js"
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_targets_survive_when_grounded():
-    """Multiple genuinely-vulnerable sibling files, each with a real snippet, all
-    survive — this is the whole point of the field."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    vulnerable_snippet = "Model.find({ previewCode: id }).then(users => res.json(users));"
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = f"router.get('/getPreviewUser/:id', (req, res) => {{ {vulnerable_snippet} }});"
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix_targets=[
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
-            {"file": "routes/api/inspiringInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
-        ],
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert len(out.additional_fix_targets) == 2
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_targets_drops_entries_without_grounded_snippet():
-    """Real production bug: 1 of 3 named sibling files was already fixed (wrong
-    claim) — each entry must be checked independently, not accepted as a batch."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    already_fixed_content = "if (!/^\\d+$/.test(id)) { return res.status(400).json({}); } Model.find({ previewCode: Number(id) })"
-    local_repo = MagicMock(ready=True)
-    # shoutout is already fixed (real content doesn't match the claimed vulnerable snippet);
-    # boldJourney genuinely still has it.
-    local_repo.read_file.side_effect = lambda path: (
-        already_fixed_content if "shoutout" in path else "Model.find({ previewCode: id })"
-    )
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix_targets=[
-            {"file": "routes/api/shoutoutInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": "Model.find({ previewCode: id })"},
-        ],
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    surviving_files = [e["file"] for e in out.additional_fix_targets]
-    assert surviving_files == ["routes/api/boldJourneyInterviewUsers.js"]
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_targets_drops_entries_with_no_snippet_at_all():
-    """Omitting the snippet is not a way around verification — same policy as
-    additional_fix_file."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = "Model.find({ previewCode: id })"
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix_targets=[
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": ""},
-        ],
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.additional_fix_targets == []
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_targets_survive_when_cannot_verify_at_all():
-    """Fail-open when _local_repo isn't ready — same policy as every other check."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    agent = _make_agent(found)  # default: ready=False
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix_targets=[
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": ""},
-        ],
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert len(out.additional_fix_targets) == 1
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_prose_not_flagged_when_targets_grounded():
-    """additional_fix_file is None, but additional_fix_targets is genuinely
-    grounded — the prose-unverified flag must not fire in this case."""
-    async def found(owner, repo, query):
-        return [{"path": "a.js", "fragment": "primaryFn()"}]
-
-    vulnerable_snippet = "Model.find({ previewCode: id })"
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = vulnerable_snippet
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_function="primaryFn",
-        affected_file="a.js",
-        additional_fix="Apply the identical guard to boldJourneyInterviewUsers.js.",
-        additional_fix_file=None,
-        additional_fix_targets=[
-            {"file": "routes/api/boldJourneyInterviewUsers.js", "function": "", "snippet": vulnerable_snippet},
-        ],
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert all("ADDITIONAL_FIX UNVERIFIED" not in e for e in out.evidence)
-
-
-# ---------------------------------------------------------------------------
-# affected_file / root_cause_snippet grounding — the PRIMARY-target counterpart
-# to additional_fix_file's mandatory-snippet policy (PR after #182).
-#
-# Real production bug, the worst fabrication found this session: a diagnosis
-# named affected_file="models/MasterInspiring.js" (a real file, module-level,
-# no function claimed) and quoted a root_cause code snippet
-# ("errors: { prank: {...}, contentFlags: {...} }") that existed NOWHERE in
-# the real repo -- not in that file, not in any file. The real bug (a
-# different, unrelated file) was never found at all. affected_file's
-# existence-only check passed trivially; there was no equivalent of
-# additional_fix_file's snippet-grounding for the PRIMARY target -- backwards,
-# since affected_file is what FixGenerationAgent actually edits.
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_parser_extracts_root_cause_snippet():
-    from app.agents.diagnosis import _parse_diagnosis_result
-
-    answer = """{
-      "root_cause": "x",
-      "confidence": 0.85,
-      "affected_file": "models/PrankCheckerLog.js",
-      "root_cause_snippet": "errors: { type: Array },"
-    }"""
-
-    result = _parse_diagnosis_result(answer)
-    assert result.affected_file == "models/PrankCheckerLog.js"
-    assert result.root_cause_snippet == "errors: { type: Array },"
-
-
-@pytest.mark.asyncio
-async def test_affected_file_survives_when_root_cause_snippet_grounded():
-    async def found(owner, repo, query):
-        return []
-
-    real_snippet = "errors: { type: Array },"
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = (
-        "const schema = new mongoose.Schema({\n  fields: { type: Object },\n"
-        f"  {real_snippet}\n  result: {{ type: String }},\n}});"
-    )
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="PrankCheckerLog.js defines a reserved `errors` schema pathname",
-        confidence=0.85,
-        affected_file="models/PrankCheckerLog.js",
-        root_cause_snippet=real_snippet,
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.affected_file == "models/PrankCheckerLog.js"
-    assert out.confidence == 0.85
-    assert out.escalate is False
-
-
-@pytest.mark.asyncio
-async def test_affected_file_nulled_when_root_cause_snippet_fabricated():
-    """The actual real-world bug: a snippet that matches nothing in the real file."""
-    async def found(owner, repo, query):
-        return []
-
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = (
-        "const MasterInspiringSchema = new schema({\n"
-        "  email: { type: String, required: true, unique: true },\n"
-        "}, { timestamps: true });"
-    )
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="All four Mongoose model files define an errors field...",
-        confidence=0.55,
-        affected_file="models/MasterInspiring.js",
-        root_cause_snippet="errors: { prank: { type: Boolean, default: false }, contentFlags: { type: Array, default: [] } }",
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.affected_file is None
-    assert out.affected_function is None
-    assert out.root_cause_snippet is None
-    assert out.confidence <= 0.65
-    assert out.escalate is True
-
-
-@pytest.mark.asyncio
-async def test_root_cause_prose_flagged_unverified_when_snippet_fabricated():
-    """The actual gap this closes: incident_loop.py copies result.root_cause verbatim
-    into incident.diagnosis -- the ONLY field a human reviewer reads on the approval
-    dashboard. Nulling affected_file/root_cause_snippet above doesn't stop the free-text
-    root_cause from repeating the exact same fabricated file/line/code claim with zero
-    indication the system already proved it false. Real production bug: a diagnosis
-    named affected_file="models/MasterShoutout.js" citing a specific line number and
-    field that don't exist in the real (17-line) file -- correctly nulled by the check
-    above, but the human-facing root_cause paragraph was untouched and still read as a
-    confident, fully-detailed explanation."""
-    async def found(owner, repo, query):
-        return []
-
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = (
-        "const MasterShoutoutSchema = new schema({\n"
-        "  email: { type: String, required: true, unique: true },\n"
-        "}, { timestamps: true });"
-    )
-    agent = _make_agent(found, local_repo=local_repo)
-    original_root_cause = (
-        "In `models/MasterShoutout.js`, the Mongoose Schema is defined with a field "
-        "named `errors: { type: String }` (line 49)."
-    )
-    result = DiagnosisResult(
-        root_cause=original_root_cause,
-        confidence=0.65,
-        affected_file="models/MasterShoutout.js",
-        root_cause_snippet="errors: { type: String, required: false, default: '', trim: true },",
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.affected_file is None
-    assert out.root_cause.startswith("UNVERIFIED")
-    # The original narrative should still be present (for audit/debugging) --
-    # just no longer the ONLY thing a reviewer sees.
-    assert original_root_cause in out.root_cause
-
-
-@pytest.mark.asyncio
-async def test_root_cause_prose_untouched_when_snippet_grounded():
-    """No caveat, no mutation, when the claim actually checks out."""
-    async def found(owner, repo, query):
-        return []
-
-    real_snippet = "errors: { type: Array },"
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = (
-        f"const schema = new mongoose.Schema({{\n  {real_snippet}\n}});"
-    )
-    agent = _make_agent(found, local_repo=local_repo)
-    original_root_cause = "PrankCheckerLog.js defines a reserved `errors` schema pathname"
-    result = DiagnosisResult(
-        root_cause=original_root_cause,
-        confidence=0.85,
-        affected_file="models/PrankCheckerLog.js",
-        root_cause_snippet=real_snippet,
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.root_cause == original_root_cause
-
-
-@pytest.mark.asyncio
-async def test_additional_fix_prose_flagged_when_only_function_name_nulled():
-    """The actual live-incident gap this generalized fix closes: a diagnosis whose
-    root cause and affected_file/root_cause_snippet were ALL genuinely grounded (a
-    real axios.get() 404 in createThumbnailFromUrl) still had its additional_fix
-    prose invent a whole corroborating guard mechanism -- 'processInterviews guards
-    against re-creating an already-existing thumbnail (HeadObjectCommand at line
-    1757, NoSuchKey at line 1763)' -- naming a function that doesn't exist anywhere
-    in the repo. additional_fix_function correctly got nulled by the function-name
-    check (a DIFFERENT branch than the file/snippet-grounding check the earlier
-    MasterShoutout fix targeted) -- additional_fix_file/_snippet both survived
-    because the proposed fix's location and existing-code excerpt were real. Only
-    additional_fix (not root_cause) should get the caveat: the primary diagnosis
-    was never in question."""
-    async def found(owner, repo, query):
-        if "processInterviews" in query:
-            return []  # fabricated — doesn't exist anywhere in the repo
-        return [{"path": "routes/api/interviewUsers.js", "fragment": "match"}]
-
-    real_snippet = "} catch (err) {\n  console.log('Failed to process image', err);\n}"
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = (
-        f"async function createThumbnailFromUrl(url) {{\n  {real_snippet}\n}}"
-    )
-    agent = _make_agent(found, local_repo=local_repo)
-    original_root_cause = (
-        "createThumbnailFromUrl calls axios.get(imageUrl) with no existence check; "
-        "the source image is missing from S3/CDN, so it 404s."
-    )
-    original_additional_fix = (
-        "In `processInterviews` (line 1789), add a HeadObjectCommand pre-check. "
-        "processInterviews already guards against re-creating an existing thumbnail "
-        "(HeadObjectCommand at line 1757, NoSuchKey at line 1763)."
-    )
-    result = DiagnosisResult(
-        root_cause=original_root_cause,
-        confidence=0.55,
-        affected_function="createThumbnailFromUrl",
-        additional_fix=original_additional_fix,
-        additional_fix_function="processInterviews",
-        additional_fix_file="routes/api/interviewUsers.js",
-        additional_fix_snippet=real_snippet,
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.additional_fix_function is None
-    assert out.additional_fix_file == "routes/api/interviewUsers.js"  # survived — real
-    assert out.additional_fix.startswith("UNVERIFIED")
-    assert original_additional_fix in out.additional_fix
-    # The primary diagnosis was never in question — no caveat should leak onto it.
-    assert out.root_cause == original_root_cause
-
-
-@pytest.mark.asyncio
-async def test_affected_file_nulled_when_snippet_omitted_but_verifiable():
-    """Omitting the snippet is not a way around verification — same policy as
-    additional_fix_file."""
-    async def found(owner, repo, query):
-        return []
-
-    local_repo = MagicMock(ready=True)
-    local_repo.read_file.return_value = "some real file content"
-    agent = _make_agent(found, local_repo=local_repo)
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_file="models/PrankCheckerLog.js",
-        # no root_cause_snippet
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.affected_file is None
-    assert out.confidence <= 0.65
-
-
-@pytest.mark.asyncio
-async def test_affected_file_survives_when_cannot_verify_at_all():
-    """Fail-open when _local_repo isn't ready — same policy as every other check."""
-    async def found(owner, repo, query):
-        return []
-
-    agent = _make_agent(found)  # default: ready=False
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        affected_file="models/PrankCheckerLog.js",
-        # no root_cause_snippet — still survives since we can't verify at all
-    )
-
-    out = await agent._enforce_grounding(result)
-
-    assert out.affected_file == "models/PrankCheckerLog.js"
-    assert out.confidence == 0.9
 
 
 @pytest.mark.asyncio
@@ -1039,15 +747,12 @@ async def test_entry_point_helper_name_hints():
     """Spot-check the entry-point name detector."""
     from app.agents.diagnosis import _looks_like_entry_point
 
-    # Names that suggest entry points:
     assert _looks_like_entry_point("paymentHandler", [])
     assert _looks_like_entry_point("getUserRoute", [])
     assert _looks_like_entry_point("nightlyCron", [])
     assert _looks_like_entry_point("queueWorker", [])
 
-    # Names that don't:
     assert not _looks_like_entry_point("processOrder", [])
     assert not _looks_like_entry_point("validateInput", [])
 
-    # Evidence override:
     assert _looks_like_entry_point("processOrder", ["this is the express handler — no callers"])
