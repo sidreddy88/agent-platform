@@ -602,44 +602,7 @@ class IncidentLoop:
             # to add observability before escalating to human. This improves diagnosability
             # for the next occurrence even if we can't fix this one yet.
             if not diagnosis.affected_file:
-                try:
-                    from app.agents.error_clarity import ErrorClarityAgent
-                    clarity_agent = ErrorClarityAgent()
-                    # Without this, clarity_agent._llm is a bare LLMService (only
-                    # has complete()) and every complete_with_tools() call inside
-                    # analyze()'s tool loop raises AttributeError on iteration 0 --
-                    # confirmed in production: every real invocation silently
-                    # produced 0 additions/patterns and fell back to the generic
-                    # "could not identify observability gaps" message, masking a
-                    # total failure as a legitimate "nothing found" conclusion.
-                    # Mirrors the same override already done for self._fix_agent.
-                    clarity_agent._llm = llm_gateway.get_llm_service_for("clarity")
-                    clarity = await clarity_agent.analyze(incident)
-                    incident.clarity_summary = clarity.summary
-                    incident.clarity_pr_url = clarity.pr_url
-                    incident.clarity_pr_number = clarity.pr_number
-                    incident_store.update(incident)
-                    logger.info(
-                        "[IncidentLoop] %s — ErrorClarityAgent: %d addition(s), pr=%s",
-                        incident.id, len(clarity.additions), clarity.pr_url or "none",
-                    )
-
-                    # Real gap: CodeReviewAgent was only ever wired to fix.pr_url (the
-                    # two call sites a few hundred lines down), never to clarity.pr_url —
-                    # ErrorClarityAgent's PRs went straight to a human with zero automated
-                    # review, even though _run_review only actually needs .pr_number/
-                    # .pr_url (see HandoffValidator.validate_fix_for_review), both of
-                    # which ClarityResult already has. Skip the fix-specific DoD/dedup/
-                    # merge-decision machinery around the other two call sites — none of
-                    # it applies to an observability-only addition — and just run the
-                    # review itself.
-                    if clarity.pr_number:
-                        clarity_review_text = await self._run_review(incident, clarity, review_kind="clarity")
-                        if clarity_review_text:
-                            incident.review_posted = True
-                            incident_store.update(incident)
-                except Exception as exc:
-                    logger.error("[IncidentLoop] ErrorClarityAgent failed for %s: %s", incident.id, exc)
+                await self._run_error_clarity(incident)
 
             sev_str = str(event.severity).split(".")[-1] if event.severity else "P2"
             approval_req = await approval_service.request_approval(
@@ -1048,6 +1011,83 @@ class IncidentLoop:
         incident.human_notes = f"HUMAN INSTRUCTION: {notes.strip()}\n\n{existing}".strip()
         incident_store.update(incident)
         await self._execute_refix(incident)
+
+    async def _run_error_clarity(self, incident: IncidentState) -> ClarityResult | None:
+        """Run ErrorClarityAgent against `incident` and persist the result.
+
+        Shared by the automatic no-affected-file escalation path above and the
+        manual `run_error_clarity` entry point below -- same agent invocation,
+        same result handling, two different triggers. Returns the ClarityResult
+        on success, None on failure (already logged)."""
+        try:
+            from app.agents.error_clarity import ErrorClarityAgent
+            clarity_agent = ErrorClarityAgent()
+            # Without this, clarity_agent._llm is a bare LLMService (only
+            # has complete()) and every complete_with_tools() call inside
+            # analyze()'s tool loop raises AttributeError on iteration 0 --
+            # confirmed in production: every real invocation silently
+            # produced 0 additions/patterns and fell back to the generic
+            # "could not identify observability gaps" message, masking a
+            # total failure as a legitimate "nothing found" conclusion.
+            # Mirrors the same override already done for self._fix_agent.
+            clarity_agent._llm = llm_gateway.get_llm_service_for("clarity")
+            clarity = await clarity_agent.analyze(incident)
+            incident.clarity_summary = clarity.summary
+            incident.clarity_pr_url = clarity.pr_url
+            incident.clarity_pr_number = clarity.pr_number
+            incident_store.update(incident)
+            logger.info(
+                "[IncidentLoop] %s — ErrorClarityAgent: %d addition(s), pr=%s",
+                incident.id, len(clarity.additions), clarity.pr_url or "none",
+            )
+
+            # Real gap: CodeReviewAgent was only ever wired to fix.pr_url (the
+            # two call sites a few hundred lines down), never to clarity.pr_url —
+            # ErrorClarityAgent's PRs went straight to a human with zero automated
+            # review, even though _run_review only actually needs .pr_number/
+            # .pr_url (see HandoffValidator.validate_fix_for_review), both of
+            # which ClarityResult already has. Skip the fix-specific DoD/dedup/
+            # merge-decision machinery around the other two call sites — none of
+            # it applies to an observability-only addition — and just run the
+            # review itself.
+            if clarity.pr_number:
+                clarity_review_text = await self._run_review(incident, clarity, review_kind="clarity")
+                if clarity_review_text:
+                    incident.review_posted = True
+                    incident_store.update(incident)
+            return clarity
+        except Exception as exc:
+            logger.error("[IncidentLoop] ErrorClarityAgent failed for %s: %s", incident.id, exc)
+            return None
+
+    async def run_error_clarity(self, incident_id: str) -> None:
+        """Manually kick off ErrorClarityAgent for an incident.
+
+        Real gap this closes: the automatic path (above, gated on
+        diagnosis.escalate + no affected_file) only fires once, at diagnosis
+        time. If it doesn't produce a PR -- ErrorClarityAgent ran but couldn't
+        locate the code, or diagnosis.escalate was never true in the first
+        place because confidence cleared the threshold but fix generation
+        itself then failed to produce a PR either -- there was no way to
+        retry it from the app; a human's only option was to intervene outside
+        it entirely. Usable any time an incident has no PR of either kind yet,
+        regardless of what path it originally took."""
+        incident = incident_store.get(incident_id)
+        if incident is None:
+            logger.error("[IncidentLoop] run_error_clarity: incident %s not found", incident_id)
+            return
+        if incident.status == IncidentStatus.FIXING:
+            logger.warning(
+                "[IncidentLoop] run_error_clarity: %s is mid-fix — ignoring", incident_id,
+            )
+            return
+        if incident.pr_url or incident.clarity_pr_url:
+            logger.warning(
+                "[IncidentLoop] run_error_clarity: %s already has a PR (fix=%s, clarity=%s) — ignoring",
+                incident_id, incident.pr_url, incident.clarity_pr_url,
+            )
+            return
+        await self._run_error_clarity(incident)
 
     async def _execute_refix(self, incident: IncidentState) -> None:
         """Shared refix execution: close the old PR, re-run FixGenerationAgent with
