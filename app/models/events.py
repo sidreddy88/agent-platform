@@ -98,13 +98,18 @@ class IncidentState(BaseModel):
     # copy-pasted-per-brand/tenant duplication case where MULTIPLE sibling files need
     # the identical fix (diagnosis_additional_fix_file only ever carries one). Each
     # entry is grounded the same way as diagnosis_blast_radius entries -- see
-    # DiagnosisAgent._enforce_grounding.
+    # DiagnosisAgent._validate_diagnosis_submission (the submit_diagnosis tool gate).
     # Pre-fix-reasoning fields (populated by DiagnosisAgent, consumed by FixGenerationAgent
     # as Tier 2 constraints in the fix prompt).
     diagnosis_blast_radius: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ each entry: {"file": str, "function": str, "snippet": str}
     diagnosis_contract_change: Optional[str] = None  # "none" | "signature" | "return_type" | "side_effect"
     diagnosis_contract_change_detail: Optional[str] = None
+    diagnosis_grounding_rejections: int = 0
+    # ^ how many times submit_diagnosis was rejected (a fabricated/ungrounded field)
+    # before this diagnosis finalized -- 0 means it was right the first time. Lets
+    # scripts/measure_diagnosis_grounding.py report a real rejection rate instead of
+    # relying on anecdote. See DiagnosisAgent._validate_diagnosis_submission.
 
     # Fix
     fix_attempted: Optional[str] = None

@@ -287,6 +287,10 @@ class DiagnosisResult:
     contract_change: str = "none"  # "none" | "signature" | "return_type" | "side_effect"
     contract_change_detail: str | None = None
     raw_llm: str = ""
+    grounding_rejections: int = 0
+    # ^ how many submit_diagnosis attempts were rejected before this one succeeded
+    # (or, on the fail-closed fallback, before the agent gave up entirely). Set in
+    # diagnose() from DiagnosisAgent._rejection_count -- see measure_diagnosis_grounding.py.
 
 
 def _parse_file_entries(raw: object) -> list[dict]:
@@ -371,6 +375,12 @@ class DiagnosisAgent(BaseAgent):
         # None means the model never got a submission through (see diagnose()'s
         # fail-closed fallback). Reset at the top of every diagnose() call.
         self._diagnosis_submitted: DiagnosisResult | None = None
+        # Counts rejected submit_diagnosis attempts within one diagnose() call --
+        # 0 means the first submission was already grounded. Feeds
+        # DiagnosisResult.grounding_rejections -> incident.diagnosis_grounding_rejections
+        # -> scripts/measure_diagnosis_grounding.py's rejection-rate metric. Reset at
+        # the top of every diagnose() call, same as _diagnosis_submitted.
+        self._rejection_count = 0
 
     def _register_tools(self) -> None:
         aws = self._aws
@@ -688,6 +698,7 @@ class DiagnosisAgent(BaseAgent):
         async def _submit_diagnosis(**kwargs) -> str:
             problems = await self._validate_diagnosis_submission(kwargs)
             if problems:
+                self._rejection_count += 1
                 return (
                     "REJECTED — fix the following and call submit_diagnosis again:\n"
                     + "\n".join(f"- {p}" for p in problems)
@@ -715,6 +726,7 @@ class DiagnosisAgent(BaseAgent):
                 contract_change=contract_change,
                 contract_change_detail=kwargs.get("contract_change_detail"),
                 raw_llm=json.dumps(kwargs, default=str),
+                grounding_rejections=self._rejection_count,
             )
             return "Diagnosis accepted. Write a brief final Answer to finish (e.g. \"Answer: Diagnosis submitted.\")."
 
@@ -1029,6 +1041,7 @@ class DiagnosisAgent(BaseAgent):
         # Reset in case this agent instance is reused across diagnose() calls —
         # a stale value from a previous call must never leak into this one.
         self._diagnosis_submitted = None
+        self._rejection_count = 0
 
         event = incident.error_event
         log_group = event.metadata.get("log_group", "")
@@ -1364,4 +1377,5 @@ Confidence guide:
             root_cause="Diagnosis could not be grounded — manual review required",
             confidence=0.0,
             escalate=True,
+            grounding_rejections=self._rejection_count,
         )
