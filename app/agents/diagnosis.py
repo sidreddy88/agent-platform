@@ -12,7 +12,16 @@ Flow:
   5. search_codebase        → RAG search to find candidate file paths
   6. get_file_contents      → fetch the FULL source of the candidate file(s)
                               (RAG returns fragments; full file needed to audit all return paths)
-  7. Answer: structured JSON diagnosis
+  7. verify_symbol_in_repo  → confirm any named function actually exists
+  8. submit_diagnosis       → the ONLY way to finalize. Every grounding-relevant
+                              field (affected_file/root_cause_snippet pairing,
+                              every additional_fix_targets/blast_radius entry,
+                              any file named in prose) is checked inline before
+                              acceptance — a failed check rejects the tool call
+                              with a specific reason and the model retries in the
+                              same conversation, rather than the old design (a
+                              free-text JSON answer parsed and grounded only
+                              after the fact — see git history for that version).
 
 Confidence gate (CONFIDENCE_THRESHOLD = 0.70):
   ≥ 0.70 → status = FIXING (proceed to Fix Generation Agent — Week 3)
@@ -298,113 +307,6 @@ def _parse_file_entries(raw: object) -> list[dict]:
     return entries
 
 
-def _extract_json_object(text: str) -> str | None:
-    """Return the first top-level {...} from text, respecting quoted strings and nested braces."""
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_string = False
-    escaped = False
-    for i, ch in enumerate(text[start:], start):
-        if escaped:
-            escaped = False
-            continue
-        if ch == "\\" and in_string:
-            escaped = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-        elif not in_string:
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start : i + 1]
-    return None
-
-
-def _parse_diagnosis_result(answer: str) -> DiagnosisResult:
-    # Extraction strategies in priority order:
-    # 1. JSON fenced code block  (```json ... ```)
-    # 2. Unclosed fence  (```json {...   — LLM hit max_tokens or dropped the
-    #    closing fence). Without this, a truncation drops us straight to the
-    #    placeholder fallback.
-    # 3. Balanced brace extraction — handles {} nested inside string values
-    candidates: list[str] = []
-    code_block = re.search(r"```(?:json)?\s*(.*?)\s*```", answer, re.DOTALL)
-    if code_block:
-        block = code_block.group(1).strip()
-        if block.startswith("{"):
-            candidates.append(block)
-    else:
-        unclosed = re.search(r"```(?:json)?\s*(\{.*)", answer, re.DOTALL)
-        if unclosed:
-            candidates.append(unclosed.group(1).strip())
-    outer = _extract_json_object(answer)
-    if outer:
-        candidates.append(outer)
-
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-            if not isinstance(data, dict):
-                continue
-            confidence = float(data.get("confidence", 0.5))
-
-            # Normalise blast_radius / additional_fix_targets — both accept the same
-            # {file, function, snippet} shape from the prompt schema; drop entries
-            # missing a usable file path.
-            blast_radius = _parse_file_entries(data.get("blast_radius"))
-            additional_fix_targets = _parse_file_entries(data.get("additional_fix_targets"))
-
-            contract_change = str(data.get("contract_change", "none") or "none").lower()
-            if contract_change not in ("none", "signature", "return_type", "side_effect"):
-                contract_change = "none"
-            contract_detail = data.get("contract_change_detail")
-            if contract_detail is not None and not isinstance(contract_detail, str):
-                contract_detail = str(contract_detail)
-
-            return DiagnosisResult(
-                root_cause=data.get("root_cause", "Unknown"),
-                confidence=confidence,
-                evidence=data.get("evidence", []),
-                fix_approach=data.get("fix_approach", ""),
-                affected_function=data.get("affected_function"),
-                affected_file=data.get("affected_file"),
-                root_cause_snippet=data.get("root_cause_snippet"),
-                additional_fix=data.get("additional_fix"),
-                additional_fix_function=data.get("additional_fix_function"),
-                additional_fix_file=data.get("additional_fix_file"),
-                additional_fix_snippet=data.get("additional_fix_snippet"),
-                additional_fix_targets=additional_fix_targets,
-                reproduction_confirmed=bool(data.get("reproduction_confirmed", False)),
-                escalate=confidence < CONFIDENCE_THRESHOLD,
-                blast_radius=blast_radius,
-                contract_change=contract_change,
-                contract_change_detail=contract_detail,
-                raw_llm=answer,
-            )
-        except (json.JSONDecodeError, ValueError, TypeError):
-            continue
-
-    # 200-char truncation made past failures unactionable. 4000 covers the
-    # full LLM response in practice (max_tokens is 4096).
-    logger.warning("DiagnosisAgent returned non-JSON answer — using low-confidence fallback. Raw: %.4000s", answer)
-    return DiagnosisResult(
-        root_cause="Could not parse diagnosis — manual review required",
-        confidence=0.0,
-        escalate=True,
-        raw_llm=answer,
-    )
-
-
-# Sentinel for the parse-failure fallback — callers test against this to
-# decide whether to retry or accept the result.
-_PARSE_FAILURE_ROOT_CAUSE = "Could not parse diagnosis — manual review required"
-
-
 # ---------------------------------------------------------------------------
 # DiagnosisAgent
 # ---------------------------------------------------------------------------
@@ -462,6 +364,13 @@ class DiagnosisAgent(BaseAgent):
         self._required_tool_names_before_answer = {
             "get_file_contents", "search_codebase", "grep_codebase",
         }
+        # Set by the submit_diagnosis tool handler once a submission passes every
+        # grounding check. diagnose() reads this after self.run() returns instead
+        # of parsing the free-text Answer as JSON -- grounding now gates finalizing
+        # the diagnosis, not something that happens to the answer after the fact.
+        # None means the model never got a submission through (see diagnose()'s
+        # fail-closed fallback). Reset at the top of every diagnose() call.
+        self._diagnosis_submitted: DiagnosisResult | None = None
 
     def _register_tools(self) -> None:
         aws = self._aws
@@ -776,6 +685,62 @@ class DiagnosisAgent(BaseAgent):
             ),
         )
 
+        async def _submit_diagnosis(**kwargs) -> str:
+            problems = await self._validate_diagnosis_submission(kwargs)
+            if problems:
+                return (
+                    "REJECTED — fix the following and call submit_diagnosis again:\n"
+                    + "\n".join(f"- {p}" for p in problems)
+                )
+            confidence = float(kwargs.get("confidence", 0.5))
+            contract_change = str(kwargs.get("contract_change", "none") or "none").lower()
+            if contract_change not in ("none", "signature", "return_type", "side_effect"):
+                contract_change = "none"
+            self._diagnosis_submitted = DiagnosisResult(
+                root_cause=kwargs.get("root_cause", "Unknown"),
+                confidence=confidence,
+                evidence=list(kwargs.get("evidence") or []),
+                fix_approach=kwargs.get("fix_approach", ""),
+                affected_function=kwargs.get("affected_function"),
+                affected_file=kwargs.get("affected_file"),
+                root_cause_snippet=kwargs.get("root_cause_snippet"),
+                additional_fix=kwargs.get("additional_fix"),
+                additional_fix_function=kwargs.get("additional_fix_function"),
+                additional_fix_file=kwargs.get("additional_fix_file"),
+                additional_fix_snippet=kwargs.get("additional_fix_snippet"),
+                additional_fix_targets=_parse_file_entries(kwargs.get("additional_fix_targets")),
+                reproduction_confirmed=bool(kwargs.get("reproduction_confirmed", False)),
+                escalate=confidence < CONFIDENCE_THRESHOLD,
+                blast_radius=_parse_file_entries(kwargs.get("blast_radius")),
+                contract_change=contract_change,
+                contract_change_detail=kwargs.get("contract_change_detail"),
+                raw_llm=json.dumps(kwargs, default=str),
+            )
+            return "Diagnosis accepted. Write a brief final Answer to finish (e.g. \"Answer: Diagnosis submitted.\")."
+
+        self.register_tool(
+            "submit_diagnosis",
+            _submit_diagnosis,
+            (
+                "Finalize your diagnosis. Every grounding-relevant field is checked before this "
+                "is accepted — root_cause_snippet must be verbatim from affected_file, every "
+                "additional_fix_targets entry needs its own real snippet, and any file named in "
+                "root_cause/additional_fix text must have a matching structured entry. A "
+                "rejection tells you exactly what's wrong — re-verify with your other tools and "
+                "call this again. This is the ONLY way to finalize; do not write the diagnosis "
+                "as JSON in your Answer. "
+                "Input: {root_cause: string, confidence: float, evidence: [string], "
+                "fix_approach: string, affected_function: string|null, affected_file: string|null, "
+                "root_cause_snippet: string|null, additional_fix: string|null, "
+                "additional_fix_function: string|null, additional_fix_file: string|null, "
+                "additional_fix_snippet: string|null, "
+                "additional_fix_targets: [{file, function, snippet}], "
+                "reproduction_confirmed: bool, blast_radius: [{file, function, snippet}], "
+                "contract_change: 'none'|'signature'|'return_type'|'side_effect', "
+                "contract_change_detail: string|null}"
+            ),
+        )
+
     async def _ensure_local_repo(self) -> bool:
         """Ensure the local clone is fresh. Returns True on success, False on failure."""
         try:
@@ -855,269 +820,142 @@ class DiagnosisAgent(BaseAgent):
                 return True
         return False
 
+    async def _validate_diagnosis_submission(self, data: dict) -> list[str]:
+        """Validate one submit_diagnosis attempt. Returns a list of problems —
+        empty means the submission is grounded and can be accepted.
+
+        This is what used to be _enforce_grounding's structural checks
+        (function/file existence, file<->function pairing, verbatim snippet
+        matching on the primary claim, every blast_radius/additional_fix_targets
+        entry, additional_fix_file/_snippet) run BEFORE acceptance instead of
+        after — a failure here becomes a same-turn tool rejection the model
+        sees and can act on, not a silent null-and-cap the model never sees.
+        Same underlying helpers as before (_symbol_exists_in_repo,
+        _file_exists_in_repo, _snippet_is_grounded) — only the timing and the
+        outcome on failure changed.
+        """
+        problems: list[str] = []
+        # Note: no blanket "not self._local_repo.ready" bypass here — function-name
+        # existence (_symbol_exists_in_repo) uses GitHub Code Search, not the local
+        # clone, so it must still run even when the clone isn't ready. Each
+        # file/snippet-based check below fails open internally via its own helper
+        # (_file_exists_in_repo / _snippet_is_grounded) instead.
+        affected_file = data.get("affected_file")
+        affected_function = data.get("affected_function")
+        root_cause_snippet = data.get("root_cause_snippet")
+
+        for fn_attr in ("affected_function", "additional_fix_function"):
+            fn = data.get(fn_attr)
+            if fn and not await self._symbol_exists_in_repo(fn):
+                problems.append(
+                    f"{fn_attr} '{fn}' not found in {self._owner}/{self._repo}. "
+                    f"Call verify_symbol_in_repo to confirm, or set {fn_attr} to null."
+                )
+
+        file_ok = True
+        if affected_file and not await self._file_exists_in_repo(affected_file):
+            file_ok = False
+            problems.append(
+                f"affected_file '{affected_file}' does not exist in {self._owner}/{self._repo}. "
+                f"Re-check the path via search_codebase or grep_codebase."
+            )
+        elif affected_file and affected_function:
+            try:
+                content = self._local_repo.read_file(affected_file) if self._local_repo.ready else None
+            except Exception:
+                content = None
+            if content is not None and affected_function not in content:
+                file_ok = False
+                problems.append(
+                    f"'{affected_function}' does not appear inside '{affected_file}' — both exist "
+                    f"in the repo independently, but not together. Re-read the file to confirm "
+                    f"the function actually lives there, or correct the pairing."
+                )
+
+        # Snippet-mandatory checks below are explicitly gated on self._local_repo.ready
+        # (not just relying on _snippet_is_grounded's own internal fail-open) because a
+        # MISSING snippet needs the same "can't verify, don't punish" treatment as a
+        # present-but-unverifiable one -- _snippet_is_grounded only fails open once
+        # called, but `bool(snippet) and ...` short-circuits before ever calling it.
+        if affected_file and file_ok and self._local_repo.ready:
+            if not root_cause_snippet or not await self._snippet_is_grounded(affected_file, root_cause_snippet):
+                problems.append(
+                    f"root_cause_snippet is missing or doesn't match {affected_file}'s actual "
+                    f"current content. Call get_file_contents on {affected_file} and copy a real "
+                    f"excerpt showing the claimed bug."
+                )
+
+        additional_fix_file = data.get("additional_fix_file")
+        additional_fix_snippet = data.get("additional_fix_snippet")
+        if additional_fix_file and self._local_repo.ready:
+            if not additional_fix_snippet or not await self._snippet_is_grounded(
+                additional_fix_file, additional_fix_snippet
+            ):
+                problems.append(
+                    f"additional_fix_file '{additional_fix_file}' has no verbatim-matching "
+                    f"additional_fix_snippet. Read the file to confirm it, or remove this field."
+                )
+
+        additional_fix_targets = _parse_file_entries(data.get("additional_fix_targets"))
+        if self._local_repo.ready:
+            for i, target in enumerate(additional_fix_targets):
+                snippet = target.get("snippet", "")
+                if not snippet or not await self._snippet_is_grounded(target["file"], snippet):
+                    problems.append(
+                        f"additional_fix_targets[{i}] ({target['file']}) has no verbatim-matching "
+                        f"snippet. Read the file to confirm it, or remove this entry."
+                    )
+
+        blast_radius = _parse_file_entries(data.get("blast_radius"))
+        for i, entry in enumerate(blast_radius):
+            snippet = entry.get("snippet", "")
+            if snippet and not await self._snippet_is_grounded(entry["file"], snippet):
+                problems.append(
+                    f"blast_radius[{i}] ({entry['file']}) has a snippet that doesn't match the "
+                    f"file's actual current content. Re-read the file, or drop the snippet field."
+                )
+
+        # The gap a coarse "is additional_fix_targets completely empty" check missed:
+        # once even ONE entry is grounded, a second, third, fabricated file name sitting
+        # in the same prose paragraph passed silently. Check every file-like mention
+        # individually against the structured entries instead.
+        structured_files = {f for f in (affected_file, additional_fix_file) if f}
+        structured_files |= {t["file"] for t in additional_fix_targets}
+        prose = " ".join(filter(None, [data.get("root_cause", ""), data.get("additional_fix", "")]))
+        for mention in sorted(set(_FILE_MENTION_RE.findall(prose))):
+            if not any(mention == f or f.endswith("/" + mention) for f in structured_files):
+                problems.append(
+                    f"'{mention}' is named in root_cause/additional_fix text but has no matching "
+                    f"additional_fix_targets entry. Either add a verified entry for it (read the "
+                    f"file, include a real snippet), or remove it from the text."
+                )
+
+        return problems
+
     async def _enforce_grounding(
         self, result: DiagnosisResult, incident_tokens: set[str] | None = None
     ) -> DiagnosisResult:
-        """Cap confidence and null out function names that don't exist in the repo.
+        """Complementary checks that run AFTER a submission already passed
+        _validate_diagnosis_submission — everything that check covers
+        (function/file existence, pairing, verbatim snippets on affected_file/
+        additional_fix_file/additional_fix_targets/blast_radius) is guaranteed
+        true by construction at this point, since submit_diagnosis rejected
+        anything that failed those checks before result ever existed.
 
-        Catches the case where the LLM violates the prompt's grounding rule and names
-        a fabricated function (e.g. processAndStoreImage that doesn't exist anywhere
-        in the codebase). Fabricated names would otherwise be handed to the Fix
-        Generation Agent, which would target a non-existent symbol.
+        What's left, and NOT redundant with that gate:
+          - Prose scan: the same fabricated names that used to leak into
+            root_cause/fix_approach/additional_fix prose can still appear there
+            even when every STRUCTURED field is clean -- a symbol mentioned only
+            in reasoning, never assigned to any field submit_diagnosis validates.
+          - Blast radius coverage: an empty blast_radius that ISN'T an honest
+            entry-point case is a completeness signal, not a fabrication one.
         """
-        ungrounded: list[str] = []
-
-        # Snapshot the two field groups that feed the human-facing prose (root_cause
-        # reads from the "primary" group, additional_fix from the "secondary" group)
-        # so we can tell, at the end of this function, whether ANY check below nulled
-        # something in that group -- regardless of which specific check did it. See
-        # the unified UNVERIFIED-caveat block right before `return result`.
-        _primary_before = (result.affected_file, result.affected_function, result.root_cause_snippet)
-        _secondary_before = (
-            result.additional_fix_file, result.additional_fix_function, result.additional_fix_snippet,
-        )
-
-        # Verify function names. A bad function name nulls only that function field —
-        # NOT the file field. Express anonymous handlers (no searchable name) are common
-        # and the file path is sufficient for fix generation.
-        for fn_attr in ("affected_function", "additional_fix_function"):
-            fn = getattr(result, fn_attr)
-            if fn and not await self._symbol_exists_in_repo(fn):
-                ungrounded.append(fn)
-                logger.warning(
-                    "DiagnosisAgent: %s '%s' not found in %s/%s — nulling function only",
-                    fn_attr, fn, self._owner, self._repo,
-                )
-                setattr(result, fn_attr, None)
-
-        # Verify file paths independently — a hallucinated file path nulls both
-        # the file field and its paired function field.
-        for file_attr, fn_attr in (
-            ("affected_file", "affected_function"),
-            ("additional_fix_file", "additional_fix_function"),
-        ):
-            path = getattr(result, file_attr)
-            if path and not await self._file_exists_in_repo(path):
-                logger.warning(
-                    "DiagnosisAgent: %s '%s' not found in %s/%s — nulling",
-                    file_attr, path, self._owner, self._repo,
-                )
-                ungrounded.append(path)
-                setattr(result, file_attr, None)
-                setattr(result, fn_attr, None)
-
-        # Verify file↔function PAIRING. The two checks above are each
-        # independently true-or-false — "does this file exist" and "does
-        # this symbol exist ANYWHERE in the repo" — but neither confirms
-        # the symbol actually lives in THIS specific file. A real
-        # fabrication slipped through exactly this gap in production: the
-        # LLM claimed `REFERRAL_MODEL_MAP` (a real symbol, found via
-        # search_code — just in a different file) was defined in
-        # `create-post-fargate.js` (a real file — just without that
-        # symbol). Both individual checks passed; the pairing was never
-        # verified. Read the claimed file's actual content and confirm the
-        # claimed symbol appears in it before trusting the pairing.
-        for file_attr, fn_attr in (
-            ("affected_file", "affected_function"),
-            ("additional_fix_file", "additional_fix_function"),
-        ):
-            path = getattr(result, file_attr)
-            fn = getattr(result, fn_attr)
-            if not (path and fn):
-                continue  # one or both already nulled above, or fn wasn't claimed
-            try:
-                content = self._local_repo.read_file(path) if self._local_repo.ready else None
-            except Exception:
-                content = None
-            if content is not None and fn not in content:
-                logger.warning(
-                    "DiagnosisAgent: %s '%s' not found inside %s '%s' — file and symbol each "
-                    "exist somewhere in the repo, but not together — nulling both",
-                    fn_attr, fn, file_attr, path,
-                )
-                ungrounded.append(f"{fn} in {path}")
-                setattr(result, file_attr, None)
-                setattr(result, fn_attr, None)
-
-        # Verify root_cause_snippet is actually IN affected_file. The checks above only
-        # confirm the file exists and (if a function was named) that the function lives
-        # there -- neither confirms the CODE root_cause describes is real. Real
-        # production bug, the worst fabrication found this session: a diagnosis named
-        # affected_file="models/MasterInspiring.js" (a real file, module-level, no
-        # function claimed -- so the pairing check above never ran) and quoted a
-        # root_cause code snippet that exists NOWHERE in the real repo, not even in a
-        # different file. The actual bug was a single, unrelated file the diagnosis
-        # never found at all. affected_file is the single most consequential field to
-        # leave ungrounded -- it's what FixGenerationAgent actually edits -- so it gets
-        # the same mandatory-snippet policy as additional_fix_file (a missing snippet is
-        # treated the same as a wrong one, not more trustworthy for having no evidence
-        # attached), not the weaker "only check if present" policy blast_radius uses.
-        if result.affected_file and self._local_repo.ready:
-            path = result.affected_file
-            grounded = bool(result.root_cause_snippet) and await self._snippet_is_grounded(
-                path, result.root_cause_snippet
-            )
-            if not grounded:
-                logger.warning(
-                    "DiagnosisAgent: affected_file '%s' has no verifiable root_cause_snippet "
-                    "(missing, or doesn't match the file's actual current content) — root "
-                    "cause claim is unconfirmed — nulling affected_file/_function",
-                    path,
-                )
-                ungrounded.append(path)
-                result.affected_file = None
-                result.affected_function = None
-                result.root_cause_snippet = None
-
-        # Verify additional_fix_file is still CURRENTLY vulnerable, not just that the
-        # file exists. _file_exists_in_repo above only confirms the path is real — it
-        # says nothing about whether the claimed bug is still there. Real production
-        # bug, seen TWICE in one session, the second time AFTER the snippet-grounding
-        # check below already existed: the diagnosis claimed 2-3 sibling files were
-        # "confirmed by grep / by reading current code to still have the unguarded
-        # pattern," but every one of them had already been fixed by earlier, unrelated
-        # incidents. The first occurrence had a fabricated snippet that this check
-        # correctly caught. The second occurrence just omitted additional_fix_snippet
-        # entirely — the check below only ever fires when a snippet IS present, so
-        # skipping it was a free way around verification. A claim with no evidence
-        # attached is not more trustworthy than a claim with fabricated evidence; both
-        # get discarded the same way. Only skipped when we genuinely cannot verify at
-        # all (_local_repo not ready) — same fail-open policy as every other check here.
-        if result.additional_fix_file and self._local_repo.ready:
-            path = result.additional_fix_file
-            grounded = bool(result.additional_fix_snippet) and await self._snippet_is_grounded(
-                path, result.additional_fix_snippet
-            )
-            if not grounded:
-                logger.warning(
-                    "DiagnosisAgent: additional_fix_file '%s' has no verifiable "
-                    "additional_fix_snippet (or the snippet doesn't match the file's actual "
-                    "current content) — claim is unconfirmed, treating as likely already "
-                    "fixed or fabricated — nulling additional_fix_file/_function/_snippet",
-                    path,
-                )
-                ungrounded.append(path)
-                result.additional_fix_file = None
-                result.additional_fix_function = None
-                result.additional_fix_snippet = None
-
-        # Verify blast_radius entries — each has a "file" key AND a "snippet" that may
-        # be hallucinated independently of each other (see _snippet_is_grounded).
-        if result.blast_radius:
-            verified = []
-            dropped = []
-            for entry in result.blast_radius:
-                path = entry.get("file", "")
-                snippet = entry.get("snippet", "")
-                if not path:
-                    verified.append(entry)
-                    continue
-                if not await self._file_exists_in_repo(path):
-                    dropped.append(path)
-                    logger.warning(
-                        "DiagnosisAgent: blast_radius file '%s' not found in %s/%s — removing entry",
-                        path, self._owner, self._repo,
-                    )
-                elif snippet and not await self._snippet_is_grounded(path, snippet):
-                    dropped.append(path)
-                    logger.warning(
-                        "DiagnosisAgent: blast_radius snippet for '%s' not found in the file's actual "
-                        "content — likely pattern-completed from another file rather than read — "
-                        "removing entry",
-                        path,
-                    )
-                else:
-                    verified.append(entry)
-            result.blast_radius = verified
-            if dropped:
-                ungrounded.extend(dropped)
-
-        # Verify additional_fix_targets entries — the multi-file counterpart to
-        # additional_fix_file. Same fabrication risk, so same policy as the
-        # single-file check above: a snippet is MANDATORY here (not merely checked
-        # when present, like blast_radius above) whenever we can verify at all,
-        # since this field exists specifically to replace the hallucination-prone
-        # "name some sibling files in prose" pattern with something checkable.
-        if result.additional_fix_targets and self._local_repo.ready:
-            verified_targets = []
-            dropped_targets = []
-            for entry in result.additional_fix_targets:
-                path = entry.get("file", "")
-                snippet = entry.get("snippet", "")
-                if not path:
-                    continue
-                if not snippet or not await self._snippet_is_grounded(path, snippet):
-                    dropped_targets.append(path)
-                    logger.warning(
-                        "DiagnosisAgent: additional_fix_targets entry for '%s' has no "
-                        "verifiable snippet (missing, or doesn't match the file's actual "
-                        "current content) — claim is unconfirmed — removing entry",
-                        path,
-                    )
-                else:
-                    verified_targets.append(entry)
-            result.additional_fix_targets = verified_targets
-            if dropped_targets:
-                ungrounded.extend(dropped_targets)
-
-        # additional_fix (prose) can still assert "file X is confirmed still
-        # vulnerable" even after BOTH structured channels above end up empty —
-        # either because they just got nulled/dropped for lacking evidence, or
-        # because the model never populated either in the first place and only
-        # ever put its claim in prose. Real production bug: this is exactly what
-        # happened — additional_fix_file came back null (correctly; no wrong
-        # commit followed), but additional_fix still read "...confirmed
-        # still-vulnerable by reading current code" naming two files, displayed
-        # verbatim on the incident dashboard with nothing to indicate it was never
-        # verified. A claim with no structured, checkable file attached is not
-        # more trustworthy for being in prose instead — same policy as above: no
-        # verified file/snippet pairing means don't assert "confirmed" in what a
-        # human reads. Checked against the POST-verification state of both fields
-        # (not the raw parse) — a claim backed by a genuinely-grounded
-        # additional_fix_targets entry isn't flagged.
-        if (
-            result.additional_fix_file is None
-            and not result.additional_fix_targets
-            and result.additional_fix
-            and self._local_repo.ready
-            and _FILE_MENTION_RE.search(result.additional_fix)
-        ):
-            logger.warning(
-                "DiagnosisAgent: additional_fix prose names file(s) with no verified "
-                "additional_fix_file/additional_fix_targets backing the claim — %r — "
-                "flagging as unconfirmed",
-                result.additional_fix,
-            )
-            ungrounded.append(f"additional_fix prose: {result.additional_fix[:120]}")
-            result.evidence = [
-                *result.evidence,
-                (
-                    "ADDITIONAL_FIX UNVERIFIED: the additional_fix text names specific file(s) "
-                    "as still vulnerable, but no additional_fix_file/additional_fix_targets "
-                    "survived grounding to back that claim — treat the file list in "
-                    "additional_fix as unconfirmed, not as evidence any of them are actually "
-                    "still broken."
-                ),
-            ]
-
-        if ungrounded:
-            note = (
-                f"GROUNDING NOTE: {ungrounded} not found in "
-                f"{self._owner}/{self._repo} — may be anonymous/inline handler."
-            )
-            result.evidence = [*result.evidence, note]
-            # Only cap confidence if the file itself is also unverified.
-            # A missing function name with a verified file is common for Express
-            # anonymous route handlers and should not block fix generation.
-            if result.affected_file is None:
-                result.confidence = min(result.confidence, 0.65)
-            result.escalate = result.confidence < CONFIDENCE_THRESHOLD
-
         # ----- Prose scan -----------------------------------------------
-        # Structured fields can be nulled but the same fabricated names often
-        # leak into root_cause / fix_approach / additional_fix prose, where
-        # downstream agents still read them. Verify any function-shaped tokens
-        # there too.
+        # Structured fields are already grounded by submit_diagnosis at this
+        # point, but the same fabricated names can still leak into root_cause /
+        # fix_approach / additional_fix prose, mentioned only in reasoning and
+        # never assigned to a field that gate checks. Verify any function-shaped
+        # tokens there too.
         prose = " ".join(filter(None, [
             result.root_cause,
             result.fix_approach,
@@ -1125,8 +963,8 @@ class DiagnosisAgent(BaseAgent):
         ]))
         candidates = _extract_prose_symbols(prose)
 
-        # Skip names already resolved above (verified-good or already-flagged-bad).
-        already_seen: set[str] = set(ungrounded)
+        # Skip names already verified as part of the submission itself.
+        already_seen: set[str] = set()
         for n in (result.affected_function, result.additional_fix_function):
             if n:
                 already_seen.add(n)
@@ -1183,95 +1021,14 @@ class DiagnosisAgent(BaseAgent):
                 ),
             ]
 
-        # ----- Flag the human-facing prose, not just the structured fields ---------
-        # Every check above nulls a structured field the moment it can't verify a
-        # claim -- but nulling affected_file/root_cause_snippet/additional_fix_function
-        # etc. does nothing to root_cause/additional_fix, the free-text narrative
-        # fields incident_loop.py copies verbatim into incident.diagnosis, the ONLY
-        # diagnosis text a human reviewer actually sees on the approval dashboard.
-        # (The per-failure GROUNDING NOTE above only ever reaches result.evidence,
-        # which incident_loop.py truncates into a Slack message and never persists
-        # onto the incident at all.)
-        #
-        # Two real production incidents, same underlying gap, caught by two DIFFERENT
-        # checks above: (1) a fabricated root_cause_snippet on models/MasterBrandA.js,
-        # caught by the snippet-grounding check a few blocks up; (2) a real, correctly-
-        # grounded root cause whose additional_fix prose separately invented a whole
-        # corroborating guard mechanism ("processInterviews guards against re-creating
-        # an already-existing thumbnail via HeadObjectCommand at line 1757") in a
-        # function name that got nulled by the FUNCTION-NAME check at the very top of
-        # this method -- a different branch than incident (1) hit. Patching each
-        # branch to prepend its own caveat (the first attempt at this fix) only covers
-        # whichever branches existed when it was written; the next fabrication just
-        # needs to trip a different one of the ~8 independent checks above. Comparing
-        # before/after on the two field GROUPS instead covers every branch uniformly,
-        # including ones added later, without needing to touch this file again.
-        primary_after = (result.affected_file, result.affected_function, result.root_cause_snippet)
-        secondary_after = (
-            result.additional_fix_file, result.additional_fix_function, result.additional_fix_snippet,
-        )
-        unverified_caveat = (
-            "UNVERIFIED — some of the specific file/line/code details below could not be "
-            "confirmed against the actual repository and may be fabricated. Treat this as "
-            "an unconfirmed hypothesis, not a confirmed fact.\n\n"
-        )
-        if (
-            primary_after != _primary_before
-            and result.root_cause
-            and not result.root_cause.startswith("UNVERIFIED")
-        ):
-            result.root_cause = unverified_caveat + result.root_cause
-        if (
-            secondary_after != _secondary_before
-            and result.additional_fix
-            and not result.additional_fix.startswith("UNVERIFIED")
-        ):
-            result.additional_fix = unverified_caveat + result.additional_fix
-
         return result
-
-    @staticmethod
-    def _build_parse_retry_prompt(original_prompt: str, failed_answer: str) -> str:
-        """Retry prompt for a non-JSON diagnosis response.
-
-        self.run() starts a completely fresh ReAct loop -- it does NOT resume the
-        failed attempt's conversation or tool-call history. A bare "please format as
-        JSON this time" retry throws away all the investigative work (file reads,
-        sibling searches) the first attempt already did and asks the model to redo it
-        independently from scratch. Since that's a fresh, non-deterministic run, it
-        can come back with LESS than the first attempt found -- not because anything
-        was verified as wrong, just because a second independent search explored
-        differently. Confirmed in production: attempt 1 (which failed to parse -- it
-        wrote a markdown incident report instead of JSON, apparently after a log-tool
-        call hit a real AccessDenied and derailed its output format) found previewCode
-        bugs in 3 files including brandCInterviewUsers.js. The retry succeeded at
-        producing valid JSON, but silently dropped brandCInterviewUsers.js from
-        blast_radius entirely -- neither confirmed vulnerable nor fixed, just never
-        mentioned again.
-
-        Fix: hand the retry the failed attempt's own raw text and ask it to convert
-        that analysis to valid JSON, rather than re-investigating from zero. This
-        can't be perfect (the first attempt might itself have been wrong about some
-        file), but it stops a pure formatting hiccup from silently erasing real
-        findings via reasoning non-determinism.
-        """
-        return (
-            original_prompt
-            + "\n\nYour previous response could not be parsed as JSON. Here is "
-              "what you wrote:\n\n---\n"
-            + failed_answer[:6000]
-            + "\n---\n\nConvert YOUR OWN analysis above into a single valid JSON "
-              "object matching the schema. Preserve every file and finding you "
-              "already identified there — do not drop a sibling file from "
-              "blast_radius/additional_fix just because you're reformatting, and "
-              "do not re-verify claims you already made unless something above "
-              "looks wrong on a second read. Return ONLY the JSON object — no "
-              "markdown fences, no commentary, no trailing text."
-        )
 
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
         await self._ensure_local_repo()
+        # Reset in case this agent instance is reused across diagnose() calls —
+        # a stale value from a previous call must never leak into this one.
+        self._diagnosis_submitted = None
 
         event = incident.error_event
         log_group = event.metadata.get("log_group", "")
@@ -1469,7 +1226,10 @@ Complete each step before moving to the next.
    tool calls and incorrectly lowers confidence when they are wrappers or test helpers
    that may not exist on the default branch.
 
-8. Answer with a JSON diagnosis.
+8. Call submit_diagnosis with your findings. It validates every grounding-relevant
+   field before accepting — a rejection tells you exactly what's wrong; fix it and
+   call submit_diagnosis again. Do NOT write the diagnosis as JSON in your Answer;
+   submit_diagnosis is the only way to finalize.
 
 CRITICAL — NULL / UNDEFINED ERRORS:
 If the error is a TypeError (cannot read property, undefined, null) or NullPointerException:
@@ -1539,7 +1299,7 @@ review cycle on a problem that didn't exist. Copy the exact string as it
 appears in the file; if you're describing it from memory rather than
 something you just read, that's the signal to go re-read the file first.
 
-Answer with ONLY a valid JSON object:
+Call submit_diagnosis with these fields — NOT a JSON Answer:
 {{
   "root_cause": "precise description of WHY the error occurs — name the upstream cause",
   "confidence": 0.82,
@@ -1565,6 +1325,9 @@ Answer with ONLY a valid JSON object:
   "contract_change": "none",
   "contract_change_detail": null
 }}
+submit_diagnosis will reject anything ungrounded and tell you exactly what's wrong —
+fix it and call it again. Only after it returns "Diagnosis accepted" should you write
+a final Answer to end the turn.
 
 Confidence guide:
   0.90+ → near certain, clear evidence in code + logs, AND affected_function verified FOUND
@@ -1579,42 +1342,26 @@ Confidence guide:
   If affected_function is null because the fix is at MODULE LEVEL (no enclosing function exists),
   this does NOT lower confidence — null is the correct answer for top-level script code."""
 
-        result = await self.run(prompt)
-        parsed = _parse_diagnosis_result(result.answer)
-        if parsed.root_cause == _PARSE_FAILURE_ROOT_CAUSE:
-            # See _build_parse_retry_prompt's docstring for why this hands the retry
-            # the failed attempt's own text instead of a bare "format as JSON" nudge.
-            retry_prompt = self._build_parse_retry_prompt(prompt, result.answer)
-            logger.info("DiagnosisAgent retrying after parse failure")
-            result = await self.run(retry_prompt)
-            parsed = _parse_diagnosis_result(result.answer)
-        grounded = await self._enforce_grounding(parsed, incident_tokens)
+        await self.run(prompt)
 
-        # Retry whenever the file was hallucinated — fix generation needs a real
-        # file path regardless of whether the function name survived grounding.
-        # (Original condition "both null" missed the case where the function
-        # passed the symbol check but the file was still wrong.)
-        file_was_nulled = grounded.affected_file is None and parsed.affected_file is not None
-        both_nulled = grounded.affected_function is None and grounded.affected_file is None
-        if file_was_nulled or both_nulled:
-            bad_names = [
-                n for n in [parsed.affected_function, parsed.affected_file]
-                if n
-            ]
-            if bad_names:
-                grounding_retry_prompt = (
-                    prompt
-                    + f"\n\nGROUNDING FAILURE: the following names you cited do not exist in "
-                    f"{self._owner}/{self._repo}: {bad_names}. "
-                    "You MUST call verify_symbol_in_repo and get_file_contents to confirm "
-                    "every function name and file path before writing them into the JSON. "
-                    "Return a corrected JSON using only names you have verified exist."
-                )
-                logger.info(
-                    "DiagnosisAgent retrying after grounding failure — bad names: %s", bad_names
-                )
-                result = await self.run(grounding_retry_prompt)
-                parsed = _parse_diagnosis_result(result.answer)
-                grounded = await self._enforce_grounding(parsed, incident_tokens)
+        if self._diagnosis_submitted is not None:
+            submitted = self._diagnosis_submitted
+            self._diagnosis_submitted = None  # don't leak into a future call on this instance
+            return await self._enforce_grounding(submitted, incident_tokens)
 
-        return grounded
+        # The model never got a submission through submit_diagnosis before exhausting
+        # its iteration budget — same fail-closed policy as BaseAgent.run()'s own
+        # "never verified any claim" fallback: don't trust free-text content that was
+        # never checked. There is no free-text JSON to fall back to parsing anymore —
+        # that's the point; a diagnosis that never passed the gate gets no structured
+        # fields at all, not fields nulled after the fact.
+        logger.warning(
+            "DiagnosisAgent: never received a successful submit_diagnosis call for incident %s "
+            "— degrading to escalate.",
+            incident.id,
+        )
+        return DiagnosisResult(
+            root_cause="Diagnosis could not be grounded — manual review required",
+            confidence=0.0,
+            escalate=True,
+        )

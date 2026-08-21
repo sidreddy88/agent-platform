@@ -10,10 +10,12 @@ with the Mongoose model name swapped. All 3 files are real (existing checks caug
 nothing), but all 3 snippets were completely fabricated: those files were fixed via
 earlier, separate incidents and no longer contain anything resembling that code.
 
-_file_exists_in_repo only verifies the FILE is real. This adds a second check --
-_snippet_is_grounded -- that verifies the snippet's actual code shape is present in
-that file, tolerant of the one thing that legitimately differs between real sibling
-files (the model class name) via _snippet_skeleton.
+_file_exists_in_repo only verifies the FILE is real. _snippet_is_grounded adds a
+second check -- verifying the snippet's actual code shape is present in that file,
+tolerant of the one thing that legitimately differs between real sibling files
+(the model class name) via _snippet_skeleton. This runs inline inside
+_validate_diagnosis_submission now (the submit_diagnosis gate), not as a post-hoc
+filter on an already-accepted result.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.agents.diagnosis import DiagnosisAgent, DiagnosisResult, _snippet_skeleton
+from app.agents.diagnosis import DiagnosisAgent, _snippet_skeleton
 
 
 def _make_agent(file_contents: dict[str, str]) -> DiagnosisAgent:
@@ -54,13 +56,13 @@ def test_snippet_skeleton_collapses_whitespace():
 
 
 # ---------------------------------------------------------------------------
-# _enforce_grounding — blast_radius snippet verification (integration)
+# _validate_diagnosis_submission — blast_radius snippet verification
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_fabricated_sibling_snippet_is_dropped():
+async def test_fabricated_sibling_snippet_is_rejected():
     """The exact production failure: a real file, with a fabricated snippet that
-    doesn't match its actual (already-fixed) content, must be removed."""
+    doesn't match its actual (already-fixed) content, must be rejected."""
     real_snippet = (
         "router.get('/preview/:previewCode', authenticateToken, async (req, res) => {\n"
         "  const { previewCode } = req.params;\n"
@@ -88,47 +90,41 @@ async def test_fabricated_sibling_snippet_is_dropped():
         "routes/api/brandCInterviewUsers.js": real_snippet,
         "routes/api/brandAInterviewUsers.js": actual_brandA_content,
     })
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        blast_radius=[
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "blast_radius": [
             {"file": "routes/api/brandCInterviewUsers.js", "function": "(handler)", "snippet": real_snippet},
             {"file": "routes/api/brandAInterviewUsers.js", "function": "(handler)", "snippet": fabricated_snippet},
         ],
-    )
+    }
 
-    out = await agent._enforce_grounding(result)
+    problems = await agent._validate_diagnosis_submission(data)
 
-    files = [e["file"] for e in out.blast_radius]
-    assert "routes/api/brandCInterviewUsers.js" in files       # real snippet kept
-    assert "routes/api/brandAInterviewUsers.js" not in files  # fabricated snippet dropped
-    assert any("brandAInterviewUsers.js" in e for e in out.evidence)
+    assert any("brandAInterviewUsers.js" in p for p in problems)
+    assert not any("brandCInterviewUsers.js" in p for p in problems)  # real snippet, no problem
 
 
 @pytest.mark.asyncio
-async def test_snippet_matching_only_by_model_name_is_kept():
+async def test_snippet_matching_only_by_model_name_passes():
     """A genuine sibling with the SAME real bug, differing only by model name
-    (the actual legitimate case this whole feature exists to fix), must be kept."""
+    (the actual legitimate case this whole feature exists to fix), must pass."""
     snippet_a = "await MasterBrandC.findOne({ previewCode: Number(previewCode) });"
     snippet_b = "await MasterBrandB.findOne({ previewCode: Number(previewCode) });"
     agent = _make_agent({
         "routes/api/brandCInterviewUsers.js": f"router.get('/x', async (req,res) => {{ {snippet_a} }});",
         "routes/api/brandBInterviewUsers.js": f"router.get('/x', async (req,res) => {{ {snippet_b} }});",
     })
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        blast_radius=[
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "blast_radius": [
             {"file": "routes/api/brandCInterviewUsers.js", "function": "(handler)", "snippet": snippet_a},
             {"file": "routes/api/brandBInterviewUsers.js", "function": "(handler)", "snippet": snippet_b},
         ],
-    )
+    }
 
-    out = await agent._enforce_grounding(result)
+    problems = await agent._validate_diagnosis_submission(data)
 
-    files = [e["file"] for e in out.blast_radius]
-    assert "routes/api/brandCInterviewUsers.js" in files
-    assert "routes/api/brandBInterviewUsers.js" in files
+    assert problems == []
 
 
 @pytest.mark.asyncio
@@ -136,28 +132,26 @@ async def test_short_snippet_is_not_verified():
     """Avoid false positives on trivially short snippets that could coincidentally
     substring-match unrelated file content."""
     agent = _make_agent({"routes/api/x.js": "totally unrelated file content"})
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        blast_radius=[{"file": "routes/api/x.js", "function": "(handler)", "snippet": "res.json()"}],
-    )
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "blast_radius": [{"file": "routes/api/x.js", "function": "(handler)", "snippet": "res.json()"}],
+    }
 
-    out = await agent._enforce_grounding(result)
+    problems = await agent._validate_diagnosis_submission(data)
 
-    assert len(out.blast_radius) == 1  # kept — too short to reliably verify
+    assert problems == []  # too short to reliably verify — passes
 
 
 @pytest.mark.asyncio
-async def test_missing_snippet_skips_verification():
+async def test_missing_blast_radius_snippet_skips_verification():
     """An entry with no snippet at all only goes through the existing file-exists
-    check, unaffected by this new verification."""
+    check, unaffected by snippet verification."""
     agent = _make_agent({"routes/api/x.js": "anything"})
-    result = DiagnosisResult(
-        root_cause="x",
-        confidence=0.9,
-        blast_radius=[{"file": "routes/api/x.js", "function": "(handler)", "snippet": ""}],
-    )
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "blast_radius": [{"file": "routes/api/x.js", "function": "(handler)", "snippet": ""}],
+    }
 
-    out = await agent._enforce_grounding(result)
+    problems = await agent._validate_diagnosis_submission(data)
 
-    assert len(out.blast_radius) == 1
+    assert problems == []
