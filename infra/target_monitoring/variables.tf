@@ -5,9 +5,8 @@ variable "region" {
 }
 
 variable "log_group_name" {
-  description = "CloudWatch log group the target app's ECS task writes to."
+  description = "CloudWatch log group the target app's ECS task writes to. Real external identifier this module doesn't control the naming of -- no default on purpose, pass via tfvars file (gitignored) or TF_VAR_log_group_name."
   type        = string
-  default     = "/ecs/TaskTargetApp"
 }
 
 variable "webhook_url_base" {
@@ -23,9 +22,13 @@ variable "webhook_token" {
 }
 
 variable "name_prefix" {
-  description = "Resource name prefix. Used for SNS topic, alarm, metric filter."
+  description = "Resource name prefix. Used for SNS topic, alarm, metric filter. No default on purpose -- pass via tfvars/TF_VAR_name_prefix."
   type        = string
-  default     = "target-app-prod"
+}
+
+variable "cloudwatch_namespace" {
+  description = "CloudWatch custom metric namespace for the error-count metric. No default on purpose -- pass via tfvars/TF_VAR_cloudwatch_namespace."
+  type        = string
 }
 
 variable "error_threshold" {

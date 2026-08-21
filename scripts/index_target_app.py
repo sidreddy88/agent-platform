@@ -1,5 +1,5 @@
 """
-One-shot script: index TargetApp codebase into the RAG vector store.
+One-shot script: index the target app's codebase into the RAG vector store.
 
 JS/TS files are indexed using function-boundary chunking — one chunk per top-level
 function. This eliminates the dilution problem where short functions get mixed with
@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-TARGET_APP_PATH = "/Users/Sidreddy/DevCode/TargetApp"
+TARGET_APP_PATH = os.environ.get("TARGET_APP_PATH", "/path/to/target-app")
 
 RESET  = "\033[0m"
 GREEN  = "\033[32m"

@@ -81,3 +81,13 @@ variable "db_allocated_storage_gb" {
   type        = number
   default     = 20
 }
+
+variable "fix_target_repo" {
+  description = "GitHub \"org/repo\" that FixGenerationAgent opens PRs against. Not a secret, but a real external identifier this repo doesn't own the naming of — pass via tfvars file (gitignored) or env var TF_VAR_fix_target_repo. No default on purpose: forgetting to set this should fail loudly rather than silently pointing at a placeholder repo."
+  type        = string
+}
+
+variable "ecs_log_groups" {
+  description = "CloudWatch log group(s) DetectionService polls for target-app error lines (comma-separated if more than one). Same reasoning as fix_target_repo — real external identifier, no default, pass via tfvars/TF_VAR_ecs_log_groups."
+  type        = string
+}

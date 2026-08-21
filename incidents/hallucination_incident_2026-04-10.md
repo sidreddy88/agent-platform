@@ -15,7 +15,7 @@ An LLM "hallucinates" when it generates confident, plausible-sounding output tha
 
 The model was asked to create a GitHub issue and PR, and to include the URLs in its answer. But the prompt never said where to get those URLs from. So the model did what LLMs do when they lack information — it made something up that sounded plausible.
 
-It knew the service was called `target-app`, so it constructed `github.com/targetorg/targetapp`. The real repo was `TargetOrg/TargetApp` — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
+It knew the service was called `targetapp`, so it constructed `github.com/targetorg/targetapp`. The real repo was `TargetOrg/TargetApp` — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
 
 **The prompt that caused this** (`app/agents/fix_generation.py`, end of the prompt string):
 ```
@@ -467,7 +467,7 @@ The test: *If you could write the tool call sequence as a Python function withou
 
 The model was asked to create a GitHub issue and PR, and to include the URLs in its answer. But the prompt never said where to get those URLs from. So the model did what LLMs do when they lack information — it made something up that sounded plausible.
 
-It knew the service was called target-app, so it constructed github.com/targetorg/targetapp. The real repo was TargetOrg/TargetApp — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
+It knew the service was called targetapp, so it constructed github.com/targetorg/targetapp. The real repo was TargetOrg/TargetApp — a completely different org and casing. The model had no way to know that without actually calling the tool, and it never did.
 
 The fix was simple: explicitly tell the model in the prompt to copy URLs from tool responses, never construct them.
 

@@ -3,7 +3,7 @@ CLI — bulk index the target codebase into the call graph.
 
 Usage:
     # Use a local path:
-    python scripts/index_code_graph.py /path/to/TargetApp
+    python scripts/index_code_graph.py /path/to/target-app
 
     # Clone from GitHub (uses GITHUB_TOKEN env var):
     python scripts/index_code_graph.py --repo TargetOrg/TargetApp

@@ -73,7 +73,7 @@ async def test_fabricated_sibling_snippet_is_rejected():
     fabricated_snippet = real_snippet.replace("MasterBrandC", "MasterBrandA")
     # brandAInterviewUsers.js is REAL, but its actual content is nothing like the
     # fabricated snippet -- already fixed via a separate, earlier incident.
-    actual_brandA_content = (
+    actual_brand_a_content = (
         'router.get("/getPreviewUser/:id", (req, res) => {\n'
         '  const { id } = req.params;\n'
         '  if (!/^\\d+$/.test(id)) {\n'
@@ -88,7 +88,7 @@ async def test_fabricated_sibling_snippet_is_rejected():
     )
     agent = _make_agent({
         "routes/api/brandCInterviewUsers.js": real_snippet,
-        "routes/api/brandAInterviewUsers.js": actual_brandA_content,
+        "routes/api/brandAInterviewUsers.js": actual_brand_a_content,
     })
     data = {
         "root_cause": "x", "confidence": 0.9,

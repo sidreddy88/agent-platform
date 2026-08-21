@@ -420,7 +420,7 @@ async def test_additional_fix_section_forbids_reading_other_files_with_secondary
     agent = _make_agent()
     incident = _make_incident(
         diagnosis_additional_fix=(
-            "Apply the identical fix to all 7 remaining sibling files: brandA.js, cr.js, "
+            "Apply the identical fix to all 7 remaining sibling files: brandA.js, brandC.js, "
             "brandB.js, artistOfTheDay.js, cityNational.js, highlightApp.js, smallBiz.js"
         ),
         diagnosis_additional_fix_file="routes/api/brandAInterviewUsers.js",

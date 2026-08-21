@@ -4,7 +4,7 @@ output "sns_topic_arn" {
 }
 
 output "alarm_arn" {
-  description = "CloudWatch alarm watching /ecs/TaskTargetApp for error signatures."
+  description = "CloudWatch alarm watching the target app's log group for error signatures."
   value       = aws_cloudwatch_metric_alarm.errors.arn
 }
 

@@ -245,7 +245,7 @@ class DiagnosisResult:
     root_cause_snippet: str | None = None      # verbatim excerpt of the CURRENT code in
     # affected_file that actually shows the claimed bug -- the PRIMARY-target counterpart
     # to additional_fix_snippet below. Real production bug, the worst fabrication found
-    # this session: a diagnosis named affected_file="models/MasterInspiring.js" and quoted
+    # this session: a diagnosis named affected_file="models/MasterBrandA.js" and quoted
     # a root_cause code snippet ("errors: { flagged: {...}, contentFlags: {...} }") that
     # exists NOWHERE in the real repo -- not even in a different file. The real bug was a
     # single, unrelated file (a log model with its own genuinely-real `errors` field) that
@@ -784,8 +784,8 @@ class DiagnosisAgent(BaseAgent):
         _file_exists_in_repo only confirms the FILE is real -- it says nothing about
         whether the snippet is. Confirmed in production: a diagnosis correctly read
         brandCInterviewUsers.js and found its real, still-vulnerable handler, then listed
-        3 sibling files (brandAInterviewUsers.js, cityNationalInterviewUsers.js,
-        smallBusinessOfTheDayInterviewUsers.js) as having "the identical missing
+        3 sibling files (brandAInterviewUsers.js, brandBInterviewUsers.js,
+        brandDInterviewUsers.js) as having "the identical missing
         guard" with detailed, plausible-looking snippets -- one per file, each just
         the brandCInterviewUsers.js snippet with the Mongoose model name swapped. All 3
         files are real and all 3 snippets passed the file-existence check. All 3
