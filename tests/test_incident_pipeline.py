@@ -402,6 +402,60 @@ class TestApprovalResolution:
         assert incident.resolved_at is None
 
     @pytest.mark.asyncio
+    async def test_approve_diagnosis_escalation_with_notes_sets_human_notes(self):
+        """Approving a low-confidence diagnosis escalation with notes threads
+        them into incident.human_notes (the same mechanism refix-with-notes
+        uses to inject human feedback into FixGenerationAgent's prompt)
+        before resume_fix runs -- lets a human correct/steer a diagnosis they
+        agree is directionally right but suspect is partly fabricated,
+        instead of only being able to say yes/no."""
+        from app.models.events import IncidentStatus
+        from app.services.approvals import ApprovalRequest, ApprovalStatus, RiskLevel, _store
+
+        store = IncidentStore.__new__(IncidentStore)
+        store._incidents = {}
+        store._monitor_pr_map = {}
+        event = make_error_event()
+        incident = store.create(event)
+        incident.status = IncidentStatus.AWAITING_APPROVAL
+        store.update(incident)
+
+        approval = ApprovalRequest(
+            agent_name="DiagnosisAgent",
+            action="approve_diagnosis_escalation",
+            parameters={"incident_id": incident.id},
+            risk_level=RiskLevel.HIGH,
+            description="Low-confidence diagnosis",
+        )
+        _store[approval.id] = approval
+
+        mock_resume_fix = AsyncMock()
+        with (
+            patch("app.api.routes.approvals.incident_store", store),
+            patch("app.api.routes.approvals.approval_service") as mock_svc,
+            patch("app.services.incident_loop.incident_loop") as mock_loop,
+        ):
+            mock_svc.approve.return_value = approval
+            approval.status = ApprovalStatus.APPROVED
+            approval.decided_by = "siddharth"
+            mock_loop.resume_fix = mock_resume_fix
+
+            from app.api.routes.approvals import ApproveBody, approve
+            await approve(
+                approval.id,
+                ApproveBody(
+                    approver="siddharth",
+                    notes="diagnosis's file list looks fabricated -- only models/PrankCheckerLog.js is real",
+                ),
+            )
+
+        updated = store.get(incident.id)
+        assert updated.human_notes is not None
+        assert "HUMAN INSTRUCTION:" in updated.human_notes
+        assert "models/PrankCheckerLog.js" in updated.human_notes
+        mock_resume_fix.assert_called_once_with(incident.id)
+
+    @pytest.mark.asyncio
     async def test_reject_marks_incident_rejected(self):
         from app.services.approvals import ApprovalRequest, ApprovalStatus, RiskLevel, _store
 
