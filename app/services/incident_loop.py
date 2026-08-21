@@ -593,6 +593,7 @@ class IncidentLoop:
         incident.diagnosis_blast_radius = list(diagnosis.blast_radius or [])
         incident.diagnosis_contract_change = diagnosis.contract_change
         incident.diagnosis_contract_change_detail = diagnosis.contract_change_detail
+        incident.diagnosis_grounding_rejections = getattr(diagnosis, "grounding_rejections", 0)
         incident.diagnosis_completed_at = datetime.now(timezone.utc)
 
         if diagnosis.escalate:
