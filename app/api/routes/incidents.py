@@ -656,6 +656,31 @@ async def reject_refix(incident_id: str) -> Dict[str, Any]:
     return {"status": "rejected", "incident_id": incident_id}
 
 
+@router.post("/{incident_id}/run-error-clarity")
+async def run_error_clarity(incident_id: str, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """
+    Manually kick off ErrorClarityAgent for an incident.
+
+    Usable any time the incident has no PR of either kind yet (fix or
+    clarity), regardless of whether the automatic escalation path ever ran
+    for it or ran and came back empty — a manual retry lever for exactly
+    that gap, not gated to a specific prior status the way /refix is.
+    """
+    incident = incident_store.get(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if incident.status == IncidentStatus.FIXING:
+        raise HTTPException(status_code=400, detail="Incident is mid-fix")
+    if incident.pr_url or incident.clarity_pr_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Incident already has a PR (fix or clarity) — nothing to retry",
+        )
+    from app.services.incident_loop import incident_loop
+    background_tasks.add_task(incident_loop.run_error_clarity, incident_id)
+    return {"status": "error_clarity_queued", "incident_id": incident_id}
+
+
 @router.post("/{incident_id}/resolve")
 async def resolve_incident(incident_id: str) -> Dict[str, Any]:
     """Manually mark an incident as resolved."""
