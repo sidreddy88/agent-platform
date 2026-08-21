@@ -305,6 +305,8 @@ function IncidentCard({ inc }: { inc: Incident }) {
   const [flagRunsLoading, setFlagRunsLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [runningClarity, setRunningClarity] = useState(false);
+  const [showEscalationNotes, setShowEscalationNotes] = useState(false);
+  const [escalationNotes, setEscalationNotes] = useState("");
 
   async function handleDelete() {
     if (!window.confirm("Delete this incident? Flagged failures in the dataset are kept.")) return;
@@ -401,8 +403,10 @@ function IncidentCard({ inc }: { inc: Incident }) {
       await fetch(`/approvals/${inc.approval_id}/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approver: "dashboard" }),
+        body: JSON.stringify({ approver: "dashboard", notes: escalationNotes.trim() || null }),
       });
+      setEscalationNotes("");
+      setShowEscalationNotes(false);
     } finally {
       setApproving(false);
     }
@@ -547,8 +551,27 @@ function IncidentCard({ inc }: { inc: Incident }) {
         )}
         {inc.status === "awaiting_approval" && inc.approval_id && !inc.human_decision ? (
           <>
+            {showEscalationNotes && (
+              <textarea
+                value={escalationNotes}
+                onChange={e => setEscalationNotes(e.target.value)}
+                placeholder="Optional instruction for the fix agent (e.g. 'diagnosis's file list looks fabricated — only models/PrankCheckerLog.js is real, focus there')..."
+                rows={3}
+                style={{
+                  width: "100%", boxSizing: "border-box" as const, padding: "6px 8px",
+                  fontSize: 12, borderRadius: 6, border: "1px solid #22c55e",
+                  resize: "vertical" as const, fontFamily: "inherit", marginBottom: 6,
+                }}
+              />
+            )}
             <button style={refixApproveBtn(approving)} onClick={handleApproveEscalation} disabled={approving || rejecting}>
               {approving ? "Approving..." : "✓ Approve — proceed to fix"}
+            </button>
+            <button
+              style={{ ...refixApproveBtn(false), background: "#6b7280" }}
+              onClick={() => setShowEscalationNotes(v => !v)}
+            >
+              {showEscalationNotes ? "Hide note" : "+ Add note"}
             </button>
             <button style={refixRejectBtn} onClick={handleRejectEscalation} disabled={approving || rejecting}>
               {rejecting ? "Rejecting..." : "✕ Reject"}

@@ -9,6 +9,7 @@ POST /approvals/{id}/reject      reject a pending request
 """
 
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -27,6 +28,15 @@ router = APIRouter(prefix="/approvals", tags=["approvals"])
 
 class ApproveBody(BaseModel):
     approver: str
+    # Only consumed for the approve_diagnosis_escalation action -- a human
+    # approving a low-confidence diagnosis could always say yes/no, but had
+    # no way to correct or steer it (e.g. "diagnosis's file list looks
+    # fabricated, only models/PrankCheckerLog.js is real -- focus there").
+    # Threaded into incident.human_notes before resume_fix, the same
+    # mechanism refix-with-notes already uses to inject human feedback into
+    # FixGenerationAgent's prompt (see fix_generation.py's
+    # human_notes_section).
+    notes: Optional[str] = None
 
 
 class RejectBody(BaseModel):
@@ -77,6 +87,10 @@ async def approve(request_id: str, body: ApproveBody):
                 import asyncio
 
                 from app.services.incident_loop import incident_loop
+                if body.notes and body.notes.strip():
+                    existing = incident.human_notes or ""
+                    incident.human_notes = f"HUMAN INSTRUCTION: {body.notes.strip()}\n\n{existing}".strip()
+                    incident_store.update(incident)
                 asyncio.create_task(incident_loop.resume_fix(incident_id))
             else:
                 # Record human approval but don't resolve — _check_merged_prs
