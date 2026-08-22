@@ -136,20 +136,8 @@ blobs and read back by Pydantic field name, not column name.
 
 ---
 
-## Preference Logger — Harness Failure Layers
+## Preference Logger
 
-`preference_logger.py` writes JSONL to `.preference_pairs.jsonl`. One record per human
-rejection. The `harness_failure_layer` field classifies which pipeline layer caused the
-bad fix:
-
-| Value | Meaning |
-|---|---|
-| `task_specification` | Agent misunderstood what to fix |
-| `context_provision` | Wrong file fetched, missing callers/imports |
-| `execution_environment` | GitHub 404, CloudWatch unavailable, tool failure |
-| `verification_feedback` | Fix not verified before PR, test missing |
-| `state_management` | Agent lost incident context mid-run |
-| `model_capability` | Genuine model failure; no harness change would have caught it |
-
-Field defaults to `None`. Set explicitly at the call site in `app/api/routes/approvals.py`.
-Filter `execution_environment` records out of RLHF training data — they are not model failures.
+`preference_logger.py` writes JSONL to `.preference_pairs.jsonl` — one record per
+human rejection of an AI-generated fix, in a shape usable as RLHF/DPO negative
+training examples. Called from `app/api/routes/approvals.py` on rejection.

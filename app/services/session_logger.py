@@ -3,13 +3,10 @@ AgentSessionLogger — writes a structured JSONL log of every agent run.
 
 One JSON record per incident, appended to logs/agent_sessions.jsonl.
 Each record captures the full pipeline: triage → diagnosis → fix (with
-sandbox attempts) → PR outcome, plus a harness_compliance block that
-shows whether agents read the required harness docs before working.
-
-The harness_compliance fields are all False by default. They flip to True
-only when an agent explicitly marks them (e.g. when harness doc injection
-is added to FixGenerationAgent). This makes process gaps immediately visible
-without any manual inspection.
+sandbox attempts) → PR outcome, plus whether the target app's harness docs
+(AGENTS.md/CONSTRAINTS.md, loaded via BaseAgent._load_harness_docs()) were
+actually present for this run. A silent harness-doc-loading failure would
+otherwise look identical to a normal run in every other respect.
 """
 from __future__ import annotations
 
@@ -24,14 +21,6 @@ logger = logging.getLogger(__name__)
 
 LOG_DIR = Path(__file__).parent.parent.parent / "logs"
 LOG_FILE = LOG_DIR / "agent_sessions.jsonl"
-
-_HARNESS_FILES = [
-    "AGENTS.md",
-    "CONSTRAINTS.md",
-    "DECISIONS.md",
-    "PROGRESS.md",
-    "QUALITY.md",
-]
 
 
 class AgentSession:
@@ -48,14 +37,13 @@ class AgentSession:
         self.ended_at: str | None = None
         self.outcome: str = "in_progress"
 
-        # Harness compliance — all False until explicitly marked
-        self.harness_compliance: dict[str, bool] = {
-            "agents_md_read": False,
-            "constraints_md_read": False,
-            "decisions_md_read": False,
-            "progress_md_updated": False,
-            "sprint_contract_created": False,
-            "exit_checklist_verified": False,
+        # Whether the target app's AGENTS.md/CONSTRAINTS.md were loaded for
+        # this run — false by default, flips true only when an agent that
+        # actually had them injected marks it. Catches a silent
+        # harness-doc-loading failure, which otherwise looks like a normal run.
+        self.harness_docs_loaded: dict[str, bool] = {
+            "agents_md": False,
+            "constraints_md": False,
         }
 
         # Pipeline stages
@@ -66,25 +54,14 @@ class AgentSession:
         # Full step log (raw strings from fix_with_steps)
         self.steps: list[str] = []
 
-    # ── Harness compliance ──────────────────────────────────────────────
+    # ── Harness doc loading ─────────────────────────────────────────────
 
     def mark_harness_file_read(self, filename: str) -> None:
-        """Call this when an agent reads a harness doc before starting work."""
-        key_map = {
-            "AGENTS.md": "agents_md_read",
-            "CONSTRAINTS.md": "constraints_md_read",
-            "DECISIONS.md": "decisions_md_read",
-            "PROGRESS.md": "progress_md_updated",
-        }
+        """Call this when an agent had this harness doc actually injected."""
+        key_map = {"AGENTS.md": "agents_md", "CONSTRAINTS.md": "constraints_md"}
         key = key_map.get(filename)
         if key:
-            self.harness_compliance[key] = True
-
-    def mark_sprint_contract_created(self) -> None:
-        self.harness_compliance["sprint_contract_created"] = True
-
-    def mark_exit_checklist_verified(self) -> None:
-        self.harness_compliance["exit_checklist_verified"] = True
+            self.harness_docs_loaded[key] = True
 
     # ── Pipeline stages ─────────────────────────────────────────────────
 
@@ -187,7 +164,7 @@ class AgentSession:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "outcome": self.outcome,
-            "harness_compliance": self.harness_compliance,
+            "harness_docs_loaded": self.harness_docs_loaded,
             "pipeline": {
                 "triage": self.triage,
                 "diagnosis": self.diagnosis,
