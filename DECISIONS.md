@@ -132,3 +132,47 @@ creates a tighter coupling than a standalone function.
 
 **Constraint:** All three call sites must call `_apply_dod_gate` and follow the same
 ordering: register PR → run gate → set REVIEWING only if gate returns True.
+
+---
+
+## 2026-08-19: Target harness content lives in a separate private repo, fetched at container startup
+
+**Decision:** `targets/target-app/` is no longer committed to this repo. It's fetched
+from a private S3 bucket at ECS container startup (`scripts/fetch_target_harness.py`)
+via the existing task IAM role.
+
+**Reason:** That directory holds real, load-bearing per-brand identifiers from the
+target application's actual codebase — not something to keep in a repo intended to
+go public eventually. Splitting it out also decouples harness-content updates from
+code deploys entirely.
+
+**Rejected:** Genericizing the content in place. Some of it (per-brand model name
+mappings) is structurally load-bearing for the harness to work at all — there's no
+generic placeholder that preserves the behavior being tested.
+
+**Constraint:** `HARNESS_DOCS_PATH`/`TARGET_HARNESS_BUCKET` must both be set for the
+container to start; `scripts/fetch_target_harness.py` fails startup outright if either
+is missing, on purpose — a silent skip would be worse than a loud failure here.
+
+---
+
+## 2026-08-21: DiagnosisAgent finalizes via a tool call, not a free-text answer
+
+**Decision:** `DiagnosisAgent` calls `submit_diagnosis` to finalize — there is no
+free-text JSON `Answer:` path anymore. Every structural grounding check
+(function/file existence, file↔function pairing, snippet verbatim-matching) runs
+inline, before the submission is accepted, not after.
+
+**Reason:** A real fabrication incident: the model wrote a full free-text diagnosis
+naming a plausible-but-nonexistent file and a snippet that existed nowhere in the
+repo. The grounding check that existed at the time ran *after* the answer was
+already final, in a pass the model never saw — a rejection there could only null
+out fields and cap confidence, not let the model see what was wrong and retry.
+
+**Rejected:** Keeping the post-hoc grounding pass and just making it stricter. That
+still leaves a whole free-text answer produced before anything is checked at all.
+
+**Constraint:** A rejection from `submit_diagnosis` must return a specific,
+actionable string describing exactly what failed — it feeds back into the same
+ReAct loop as the next `Observation:`, so vague rejection text just wastes the
+model's remaining iterations.

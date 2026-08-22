@@ -29,7 +29,7 @@ It is also a research substrate: every LLM call and tool execution is captured a
 | False-positive rate | < 8% | Triage decisions reviewed against ground truth |
 | Sample size | 7 incidents (current live DB row count) | Postgres `incidents` table, live deploy |
 
-Numbers refresh by re-running `scripts/measure_mttr.py --since YYYY-MM-DD`. Triage accuracy is sourced from the checked-in eval dataset (`app/evals/golden_dataset.jsonl`); sample size is a live, mutable count from the deploy's Postgres `incidents` table (verified directly against production — not reproducible from a fresh clone, and drops when incidents are cleared/deduped). The pre-agent baseline these are measured against is in [`docs/MANUAL_BASELINE.md`](docs/MANUAL_BASELINE.md) — currently a template pending real incident estimates.
+Numbers refresh by re-running `scripts/measure_mttr.py --since YYYY-MM-DD`. Triage accuracy is sourced from the checked-in eval dataset (`app/evals/golden_dataset.jsonl`); sample size is a live, mutable count from the deploy's Postgres `incidents` table (verified directly against production — not reproducible from a fresh clone, and drops when incidents are cleared/deduped). There's no manual pre-agent baseline to compare against yet — these numbers stand on their own until real "before" incident data exists.
 
 ---
 
@@ -135,8 +135,8 @@ infra/             # Terraform for ECS Fargate + Cloudflare + SNS
 scripts/           # measure_mttr.py, eval_rag.py, triage_replay.py
 targets/           # Fetched from S3 at container startup (scripts/fetch_target_harness.py) —
                    # empty on a fresh clone, not committed to this repo
-tests/             # pytest test suite (880 tests, mocked — no live API calls)
-docs/              # MANUAL_BASELINE, architecture notes
+tests/             # pytest test suite (871 tests, mocked — no live API calls)
+docs/              # architecture notes
 ```
 
 ---

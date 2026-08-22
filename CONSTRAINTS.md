@@ -7,8 +7,8 @@ Rules that cause **silent failures or data corruption** if violated. Not style â
 ## Review Feedback Promotion
 
 When a violation pattern is caught in code review, convert it into a permanent
-automated check so it never recurs undetected. The harness grows stronger with
-every session.
+automated check so it never recurs undetected. Every category caught this way
+becomes one less thing that depends on a human (or agent) remembering to check.
 
 **Process:**
 1. Identify the cleanest grep or lint check that catches the pattern without false positives

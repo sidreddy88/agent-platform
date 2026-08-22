@@ -48,34 +48,25 @@ make lint        # ruff check app/ tests/
 ```
 
 **Known pre-existing test failures** (do not fix by removing assertions):
-- `tests/test_blast_radius.py::TestFixGenerationBlastRadius` (2 tests)
-- `tests/test_orchestrator.py::TestPipelineDispatch::test_cloudwatch_incident_fires_enrichment`
-- `tests/test_orchestrator.py::TestRouteLog::test_stats_incremented_correctly`
+- `tests/test_drift_detector.py::TestCurrentDriftFloor` (2 tests)
+- `tests/test_drift_detector.py::TestCurrentDriftBaseline::test_no_drift_when_rates_similar`
 
 ---
 
-## Work Rules
+## Working Notes
 
-- Work on exactly one task at a time — finish it before starting the next
-- Do not expand scope mid-task ("also fix X while implementing Y")
-- Before starting any non-trivial task, write a sprint contract in PROGRESS.md:
-  - **Scope:** which files/areas to touch
-  - **Exclusions:** what not to touch
-  - **Pass criteria:** (the "Done when:" clause)
-- A task is done when its acceptance criterion passes, not when the code is written
-- Verification layers must pass in order before declaring done:
-  1. `make lint` — syntax and static analysis
-  2. `make test` — unit tests
-  3. End-to-end flow confirmed (manual for now — see FUTURE.md)
-- When declaring done, verify each dimension explicitly:
-  - **Correctness:** `make test` passes; pre-existing failures unchanged
-  - **Compliance:** no CONSTRAINTS.md violations; `make arch-check` passes
-  - **Coverage:** new behavior has at least one test
-  - **Scope:** only files listed in the sprint contract scope were modified
-- Do not refactor, optimize, or clean up style until all applicable layers pass
-- PROGRESS.md is the single source of truth for task state — do not maintain a parallel list
+- Work on one task at a time — finish it before starting the next, and don't expand
+  scope mid-task ("also fix X while implementing Y")
+- Before starting anything non-trivial, jot down in PROGRESS.md what you're touching,
+  what's explicitly out of scope, and what "done" looks like — cheap insurance against
+  scope creep and half-finished changes
+- A task is done when its acceptance criterion passes, not when the code is written.
+  Before calling something done: `make lint` passes, `make test` passes with no new
+  failures, and the change actually works end-to-end (manual for now — see FUTURE.md)
+- Don't refactor, optimize, or clean up style until the above passes
+- PROGRESS.md is the single source of truth for task state — don't maintain a
+  parallel list elsewhere
 - When moving an item to Completed, record the PR number as evidence
-- Before ending a session, verify all five items in the Session Exit Checklist in PROGRESS.md
 
 ---
 

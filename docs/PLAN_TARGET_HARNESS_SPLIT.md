@@ -1,6 +1,7 @@
-# Plan: split `targets/target-app/` into a separate private repo
+# Design record: splitting `targets/target-app/` into a separate private repo
 
-**Status:** deferred — not started. Revisit when ready to act on it.
+**Status:** Done. Implemented as the S3-backed option below — see DECISIONS.md
+for the summary and `scripts/fetch_target_harness.py` for the fetch mechanism.
 
 ## Why
 
@@ -86,9 +87,8 @@ Half a day to a full focused session (repo setup + infra/IAM + entrypoint script
 other config-wiring change from this session: test the failure path explicitly,
 verify live in the actual container, not just green CI.
 
-## Open decision when resuming this
+## What was actually chosen
 
-Pick one of the three fetch mechanisms above before starting implementation.
-Recommendation is S3-backed + startup-time fetch; build-time git-clone is the
-faster-to-implement fallback if this needs to ship sooner with less new
-infrastructure.
+S3-backed, fetched at container startup — the recommended option above. No
+token to rotate, reuses the existing task IAM roles, and decouples harness
+content updates from code deploys.
