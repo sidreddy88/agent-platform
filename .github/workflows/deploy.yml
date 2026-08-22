@@ -119,8 +119,13 @@ jobs:
       - name: Rebuild code graph index
         # Non-blocking: DiagnosisAgent/FixGenerationAgent fall back to RAG
         # search when the graph is empty, so a failed rebuild shouldn't
-        # fail the deploy.
+        # fail the deploy. ADMIN_API_TOKEN must match the value set in SSM
+        # at /agent-platform/ADMIN_API_TOKEN (see app/api/auth.py) -- this
+        # route now fails closed without it.
+        env:
+          ADMIN_API_TOKEN: ${{ secrets.ADMIN_API_TOKEN }}
         run: |
           curl -sf --max-time 120 --connect-to "app.remediatelabs.io:443:${ALB_DNS}:443" \
+            -H "X-Admin-Token: ${ADMIN_API_TOKEN}" \
             -X POST https://app.remediatelabs.io/debug/code-graph/index \
             || echo "Code graph index rebuild failed, continuing"

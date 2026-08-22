@@ -51,6 +51,7 @@ locals {
     "GITHUB_WEBHOOK_SECRET",
     "SLACK_WEBHOOK_URL",
     "CLOUDWATCH_WEBHOOK_TOKEN",
+    "ADMIN_API_TOKEN",
   ]
 }
 

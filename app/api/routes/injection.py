@@ -6,12 +6,16 @@ GET  /injection/scenarios list available scenarios with descriptions
 """
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.api.auth import require_admin_token
 from app.services.failure_injection import FailureScenario, failure_injector
 
-router = APIRouter(prefix="/injection", tags=["injection"])
+# Not called by the frontend dashboard — see app/api/auth.py for why
+# Cloudflare Access alone isn't sufficient protection for a route that can
+# inject fabricated events into the live incident pipeline.
+router = APIRouter(prefix="/injection", tags=["injection"], dependencies=[Depends(require_admin_token)])
 
 _SCENARIO_DOCS: dict[str, str] = {
     FailureScenario.FALSE_POSITIVE: (
