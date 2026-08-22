@@ -9,9 +9,15 @@ GET /debug/rag/corpus
     List every document currently indexed in the incident collection.
     Shows incident_id, status, service, and the exact text that was embedded.
 """
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
-router = APIRouter(prefix="/debug", tags=["debug"])
+from app.api.auth import require_admin_token
+
+# Every route here requires ADMIN_API_TOKEN — none of these are called by
+# the frontend dashboard, and /rag/corpus/codebase specifically returns real
+# indexed chunks of the target app's source code. See app/api/auth.py for why
+# Cloudflare Access alone isn't sufficient protection for routes like these.
+router = APIRouter(prefix="/debug", tags=["debug"], dependencies=[Depends(require_admin_token)])
 
 
 @router.post("/rag/index")

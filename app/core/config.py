@@ -140,6 +140,15 @@ class Settings(BaseSettings):
     # the long-term answer).
     cloudwatch_webhook_token: str = ""
 
+    # Shared secret gating /debug/* and /injection/trigger — routes with no
+    # frontend usage that would otherwise rely entirely on Cloudflare Access,
+    # which is bypassable by anyone who reaches the ALB directly rather than
+    # through the app.remediatelabs.io hostname. Unlike cloudwatch_webhook_token,
+    # this one is NOT optional: require_admin_token() fails closed (503) if
+    # it's unset, rather than silently disabling auth, since that's exactly
+    # the failure mode this setting exists to close.
+    admin_api_token: str = ""
+
     # SQLAlchemy connection URL.
     #   sqlite:///agent_platform.db    (default — local dev, no setup)
     #   postgresql+psycopg://user:pw@host:5432/agent_platform   (RDS in prod)

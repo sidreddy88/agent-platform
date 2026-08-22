@@ -130,13 +130,13 @@ The codebase has **12 agents** under `app/agents/` (plus `base.py`, the shared R
 | `events.py` | `/events` | `GET /pending`; `POST /{id}/approve`, `/approve-all`, `/{id}/dismiss` — the pending-event human gate |
 | `webhooks.py` | `/webhooks` | `POST /github` (PR open/sync → CodeReviewAgent; PR merge → MonitorGenerationAgent); `POST /cloudwatch-alarm` (SNS ingest — see §9 for the current no-op status) |
 | `approvals.py` | `/approvals` | `GET /pending`, `""`, `/{id}`; `POST /{id}/approve`, `/{id}/reject` — the `ApprovalService` gate for HIGH/CRITICAL actions |
-| `debug.py` | `/debug` | `POST /rag/index`, `POST /code-graph/index` (background full rebuild); `GET /rag`, `/rag/corpus`, `/rag/corpus/codebase` (retrieval-quality inspection) |
+| `debug.py` | `/debug` | `POST /rag/index`, `POST /code-graph/index` (background full rebuild); `GET /rag`, `/rag/corpus`, `/rag/corpus/codebase` (retrieval-quality inspection) — **entire router requires `ADMIN_API_TOKEN`** (`X-Admin-Token` header or `?token=`), fails closed if unset. Not used by the dashboard; Cloudflare Access alone doesn't protect these since it's bypassable via the ALB's own hostname |
 | `agents.py` | `/agents` | `GET /status`, `/prs`, `/pr-stats`, `/runs/incident/{id}`; `POST /runs/{id}/note`, `/demo` |
 | `monitors.py` | `/monitors` | `GET /generated`, `/coverage`; `POST /generate` |
 | `drift.py` | `/drift` | `GET ""`, `/stats` |
 | `evals.py` | `/evals` | `POST /run`, `/ab`; `GET /dataset` |
 | `circuit_breaker.py` | `/circuit-breakers` | `GET ""`; `POST /{name}/reset` |
-| `injection.py` | `/injection` | `GET /scenarios`; `POST /trigger` (chaos testing) |
+| `injection.py` | `/injection` | `GET /scenarios`; `POST /trigger` (chaos testing) — **entire router requires `ADMIN_API_TOKEN`**, same reasoning as `debug.py` above |
 | `metrics.py` | `/metrics` | `GET /latency`, `/latency/agents`, `/latency/pipeline` |
 | `dashboard.py` | `/dashboard` | `GET ""` (aggregate ECS/EC2/ALB/GitHub Actions view; DO/Cloudflare/Atlas pillars disabled) |
 | `logs.py`, `sessions.py`, `failures.py`, `orchestrator.py` | `/logs`, `/sessions`, `/failures`, `/orchestrator` | ECS log tail; recent session JSONL; chaos-failure log (append-only, no delete); orchestrator stats/routing table |

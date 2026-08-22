@@ -191,6 +191,9 @@ class TestStringInput:
 # ---------------------------------------------------------------------------
 
 class TestInjectionRoutes:
+    """All routes here require ADMIN_API_TOKEN (see app/api/auth.py) —
+    every request in this class carries the X-Admin-Token header."""
+
     def test_list_scenarios_returns_all_three(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -201,7 +204,8 @@ class TestInjectionRoutes:
         app.include_router(router)
         client = TestClient(app)
 
-        resp = client.get("/injection/scenarios")
+        with patch("app.api.auth.settings.admin_api_token", "test-admin-token"):
+            resp = client.get("/injection/scenarios", headers={"X-Admin-Token": "test-admin-token"})
         assert resp.status_code == 200
         scenarios = {s["scenario"] for s in resp.json()}
         assert "false_positive" in scenarios
@@ -225,7 +229,12 @@ class TestInjectionRoutes:
                 "event_ids": ["ev_abc"],
                 "description": "test",
             })
-            resp = client.post("/injection/trigger", json={"scenario": "false_positive"})
+            with patch("app.api.auth.settings.admin_api_token", "test-admin-token"):
+                resp = client.post(
+                    "/injection/trigger",
+                    json={"scenario": "false_positive"},
+                    headers={"X-Admin-Token": "test-admin-token"},
+                )
 
         assert resp.status_code == 200
         assert resp.json()["events_injected"] == 1
@@ -240,8 +249,41 @@ class TestInjectionRoutes:
         app.include_router(router)
         client = TestClient(app)
 
-        resp = client.post("/injection/trigger", json={"scenario": "explode_everything"})
+        with patch("app.api.auth.settings.admin_api_token", "test-admin-token"):
+            resp = client.post(
+                "/injection/trigger",
+                json={"scenario": "explode_everything"},
+                headers={"X-Admin-Token": "test-admin-token"},
+            )
         assert resp.status_code == 422   # Pydantic enum validation
+
+    def test_missing_token_returns_401(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.api.routes.injection import router
+
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+
+        with patch("app.api.auth.settings.admin_api_token", "test-admin-token"):
+            resp = client.get("/injection/scenarios")
+        assert resp.status_code == 401
+
+    def test_unset_token_fails_closed_503(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.api.routes.injection import router
+
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+
+        with patch("app.api.auth.settings.admin_api_token", ""):
+            resp = client.get("/injection/scenarios")
+        assert resp.status_code == 503
 
 
 # ---------------------------------------------------------------------------
