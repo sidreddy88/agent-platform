@@ -2,7 +2,7 @@
 
 > Autonomous incident remediation for production systems. CloudWatch alarm to fix-PR in single-digit minutes — no human in the loop until approval.
 
-**Live demo:** [app.remediatelabs.io](https://app.remediatelabs.io) (access on request — [reach out](mailto:sidreddy88@gmail.com)) · **Engineering blog:** [remediatelabs.io/blog](https://remediatelabs.io/blog) · **Architecture deep-dive:** [remediatelabs.io/projects/agent-platform](https://remediatelabs.io/projects/agent-platform)
+**Engineering blog:** [remediatelabs.io/blog](https://remediatelabs.io/blog) · **Architecture deep-dive:** [remediatelabs.io/projects/agent-platform](https://remediatelabs.io/projects/agent-platform)
 
 ---
 
