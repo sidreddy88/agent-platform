@@ -50,19 +50,10 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.models.events import IncidentState
-
-HarnessFailureLayer = Optional[Literal[
-    "task_specification",     # agent misunderstood what to fix
-    "context_provision",      # missing codebase context, wrong file fetched
-    "execution_environment",  # GitHub 404, CloudWatch unavailable, tool failure
-    "verification_feedback",  # fix not verified before PR, test missing
-    "state_management",       # agent lost incident context mid-run
-    "model_capability",       # genuine model failure, not a harness problem
-]]
 
 logger = logging.getLogger(__name__)
 
@@ -94,19 +85,14 @@ class PreferenceLogger:
         incident: IncidentState,
         approver: str,
         reason: str,
-        harness_failure_layer: HarnessFailureLayer = None,
     ) -> dict[str, Any]:
         """
         Build and persist a rejection preference pair.
 
-        harness_failure_layer optionally classifies which layer of the harness
-        is responsible for the failure (task_specification, context_provision, etc.).
-        Defaults to None — omit until the attribution signal is available.
-
         Returns the dict that was written (for callers that want to
         surface it in API responses or tests).
         """
-        pair = self._build_pair(incident, approver, reason, harness_failure_layer)
+        pair = self._build_pair(incident, approver, reason)
         self._write(pair)
         self.logged_count += 1
         logger.info(
@@ -143,7 +129,6 @@ class PreferenceLogger:
         incident: IncidentState,
         approver: str,
         reason: str,
-        harness_failure_layer: HarnessFailureLayer = None,
     ) -> dict[str, Any]:
         event = incident.error_event
         severity = str(event.severity).split(".")[-1] if event.severity else "unknown"
@@ -169,9 +154,8 @@ class PreferenceLogger:
                 "fix_description": incident.fix_description or incident.fix_attempted or "",
             },
             "rejection": {
-                "reason":                reason,
-                "approver":              approver,
-                "harness_failure_layer": harness_failure_layer,
+                "reason":   reason,
+                "approver": approver,
             },
         }
 

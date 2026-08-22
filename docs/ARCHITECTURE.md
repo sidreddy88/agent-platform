@@ -91,10 +91,10 @@ The codebase has **12 agents** under `app/agents/` (plus `base.py`, the shared R
 - **`golden_dataset_builder.py`** — Appends terminal incidents to `app/evals/golden_dataset.jsonl` with a quality filter (always capture human-adjudicated outcomes and duplicates; only capture noise/real cases with new `error_type`s or confidence ≥0.60).
 - **`eval_runner.py`** — Runs golden-dataset cases through a real `TriageAgent` with stubbed AWS/incident-store dependencies (no live credentials needed); supports A/B comparison (default Haiku vs. Sonnet) with pass-rate/latency deltas.
 - **`failure_injection.py`** — Synthetic chaos-testing: enqueues fabricated events (`false_positive`, `duplicate_alert`, `cascading_failure`) onto the *real* event queue via `POST /injection/trigger`.
-- **`preference_logger.py`** — Appends RLHF-style negative training pairs to `.preference_pairs.jsonl` on every human fix rejection, including a `harness_failure_layer` classification (task_specification/context_provision/execution_environment/verification_feedback/state_management/model_capability) — an unusually structured root-cause taxonomy for *agent* failures, not just code failures.
+- **`preference_logger.py`** — Appends RLHF-style negative training pairs to `.preference_pairs.jsonl` on every human fix rejection.
 
 ### Observability / session / approvals
-- **`session_logger.py`** — One JSONL record per incident to `logs/agent_sessions.jsonl`, including a `harness_compliance` dict that defaults to all-False and only flips True when an agent explicitly marks a doc as read — a lightweight process-compliance audit trail.
+- **`session_logger.py`** — One JSONL record per incident to `logs/agent_sessions.jsonl`, including a `harness_docs_loaded` dict that defaults to all-False and only flips True when an agent actually had the target app's `AGENTS.md`/`CONSTRAINTS.md` injected into its prompt — catches a silent harness-doc-loading failure that would otherwise look identical to a normal run.
 - **`agent_tracker.py`** — Live + historical agent-run tracking with hardcoded per-model cost tables (Sonnet 4: $3/$15 per MTok; Haiku 4.5: $0.80/$4 per MTok).
 - **`alerting.py`** — `AlertingService`: always logs to console; optionally POSTs Slack Block Kit messages. Provides budget/latency/error-rate threshold-check helpers used elsewhere.
 - **`approvals.py`** — `ApprovalService`: LOW auto-approved, MEDIUM auto-approved by default, HIGH/CRITICAL always queue for human decision. In-memory + DB-backed (survives restart, unlike `pending_events.py`).
