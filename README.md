@@ -119,6 +119,44 @@ Full agent docs: [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
+## Try it
+
+Quick start above gets you a running dashboard with an empty incident feed —
+here's how to see the pipeline actually do something, without needing AWS or
+CloudWatch at all.
+
+**1. Point it at a repo you control.** Not the real production target app —
+any repo you have write access to, ideally a throwaway test repo with a real
+bug planted in it.
+
+```
+# in .env
+FIX_TARGET_REPO=your-username/your-test-repo
+GITHUB_TOKEN=<a PAT with write access to that repo>
+```
+
+**2. Inject a synthetic incident.** `POST /incidents/trigger` bypasses
+CloudWatch entirely — describe the bug you planted:
+
+```bash
+curl -X POST localhost:8000/incidents/trigger \
+  -H "Content-Type: application/json" \
+  -d '{
+    "error_type": "TYPE_ERROR",
+    "title": "Cannot read properties of undefined (reading foo)",
+    "description": "TypeError at routes/api/example.js:42 — foo is undefined",
+    "service": "your-test-repo"
+  }'
+```
+
+**3. Watch the dashboard.** `TriageAgent` classifies it real/noise/duplicate;
+`DiagnosisAgent` reads your actual repo via GitHub Code Search to find the
+root cause. At ≥70% confidence, `FixGenerationAgent` opens a real PR against
+your test repo. Below threshold, it lands in `AWAITING_APPROVAL` instead —
+also a legitimate outcome, worth seeing either way.
+
+---
+
 ## Project structure
 
 ```
