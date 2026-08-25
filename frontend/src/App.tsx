@@ -18,14 +18,12 @@ import { EventApprovalPage } from "./components/EventApprovalPage";
 import { PRsPage } from "./components/PRsPage";
 import { StatsPage } from "./components/StatsPage";
 import { DatasetPage } from "./components/DatasetPage";
-// import { PerformancePage } from "./components/PerformancePage";  // disabled — Atlas-backed
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "stats" | "logs" | "dataset";
-// "performance" tab removed (Atlas-backed) — re-add to the union to re-enable.
 
 interface CBInfo { name: string; state: string; failure_count: number; total_rejected: number }
 
@@ -89,7 +87,6 @@ export default function App() {
             <button style={tabBtn(tab === "table")}     onClick={() => setTab("table")}>Table</button>
             <button style={tabBtn(tab === "prs")}       onClick={() => setTab("prs")}>Agent PRs</button>
             <button style={tabBtn(tab === "stats")}     onClick={() => setTab("stats")}>Stats</button>
-            {/* <button style={tabBtn(tab === "performance")} onClick={() => setTab("performance")}>Performance</button> */}
             <button style={tabBtn(tab === "logs")}      onClick={() => setTab("logs")}>Logs</button>
             <button style={tabBtn(tab === "dataset")}   onClick={() => setTab("dataset")}>Dataset</button>
           </div>
@@ -153,7 +150,6 @@ export default function App() {
         </main>
       )}
       {tab === "stats" && <StatsPage />}
-      {/* {tab === "performance" && <PerformancePage />} */}
       {datasetVisited && <DatasetPage hidden={tab !== "dataset"} />}
       {tab === "dashboard" && <main style={main}>
         {loading && !data && (

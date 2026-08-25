@@ -8,20 +8,20 @@ Architecture:
      └──► _classify(event) ──────►  Routing Table        │
                                  │  (rule-based, no LLM) │
                                  │                       │
-                                 │   METRIC_* ──► PerformanceAgent   │
-                                 │   CI_/BUILD_ ─► CICDAgent         │
                                  │   everything ─► IncidentLoop      │
                                  │                       │
                                  │   Priority semaphores:│
                                  │   P0 ─── Sem(2)       │
                                  │   P1 ─── Sem(4)       │
                                  │   P2/P3 ─ Sem(6)      │
-                                 │                       │
-                                 │   Parallel enrichment │
-                                 │   (CLOUDWATCH events):│
-                                 │   ┌─ IncidentLoop ────┤ gather()
-                                 │   └─ DeploymentAgent  │
                                  └─────────────────────────┘
+
+CICDAgent/DeploymentAgent/PerformanceAgent used to have their own routes here
+(METRIC_* -> PerformanceAgent, CI_/BUILD_ -> CICDAgent) plus a parallel
+DeploymentAgent enrichment alongside every CLOUDWATCH incident. Removed --
+those agents are target-integration tooling (app/integrations/), not part of
+the core pipeline this router drives, and the enrichment path was already
+dead code in production (its call site was commented out). See DECISIONS.md.
 
 Route decisions are logged to self.route_log (deque[RouteDecision]) for
 dashboard visibility via GET /orchestrator/routes.
@@ -35,12 +35,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from app.agents.cicd import CICDAgent
-from app.agents.deployment import DeploymentAgent
-from app.agents.performance import PerformanceAgent
 from app.models.events import ErrorEvent, EventSource
-from app.services.alerting import Alert, alerting_service
-from app.services.alerting import Severity as AlertSeverity
 from app.services.event_queue import event_queue
 from app.services.incident_loop import IncidentLoop
 
@@ -50,21 +45,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Routing constants
 # ---------------------------------------------------------------------------
-
-# Error types that should go to the PerformanceAgent (metric regressions)
-_METRIC_PATTERN = re.compile(
-    r"^(METRIC_|LATENCY_HIGH|CPU_HIGH|MEMORY_HIGH|ERROR_RATE_HIGH|P95_|P99_)",
-    re.IGNORECASE,
-)
-
-# Error types from APPLICATION source that route to CICDAgent
-_CICD_PATTERN = re.compile(
-    r"^(BUILD_|CI_|WORKFLOW_|GITHUB_ACTIONS_|TEST_FAIL)",
-    re.IGNORECASE,
-)
-
-# Sources that get parallel DeploymentAgent enrichment alongside IncidentLoop
-_ENRICHMENT_SOURCES = {EventSource.CLOUDWATCH, EventSource.APPLICATION}
 
 # Concurrency limits per priority lane
 _LANE_LIMITS: dict[str, int] = {
@@ -84,9 +64,7 @@ class RouteDecision:
     event_id: str
     event_title: str
     service: str
-    pipeline: str          # "incident" | "performance" | "cicd"
     priority: str          # "P0" | "P1" | "P2" | "P3"
-    enrichment: bool       # whether parallel DeploymentAgent enrichment fired
     dedup_skipped: bool    # True if event was dropped (same key already in-flight)
     routed_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -97,7 +75,8 @@ class RouteDecision:
 
 class MasterOrchestrator:
     """
-    Routes ErrorEvents to the right pipeline based on event type and priority.
+    Dispatches ErrorEvents to the incident pipeline under a priority-lane
+    semaphore, with in-flight dedup.
 
     Replaces the bare IncidentLoop in main.py — this is the single consumer
     of the EventQueue.
@@ -116,8 +95,6 @@ class MasterOrchestrator:
 
         # Sub-orchestrators / agents
         self._incident_loop = IncidentLoop()
-        self._deployment_agent = DeploymentAgent()
-        self._performance_agent = PerformanceAgent()
 
         # Route log — last 200 decisions (visible via /orchestrator/routes)
         self.route_log: deque[RouteDecision] = deque(maxlen=200)
@@ -127,9 +104,6 @@ class MasterOrchestrator:
             "total_routed": 0,
             "dedup_dropped": 0,
             "incident_pipeline": 0,
-            "performance_pipeline": 0,
-            "cicd_pipeline": 0,
-            "enrichment_fired": 0,
         }
 
     # ------------------------------------------------------------------
@@ -167,216 +141,66 @@ class MasterOrchestrator:
     # Routing
     # ------------------------------------------------------------------
 
-    def _classify(self, event: ErrorEvent) -> tuple[str, str]:
+    def _classify(self, event: ErrorEvent) -> str:
         """
-        Rule-based classification — no LLM, runs in microseconds.
+        Rule-based priority estimate — no LLM, runs in microseconds.
 
-        Returns (pipeline_type, preliminary_priority).
-        Preliminary priority is a best-effort estimate before TriageAgent runs.
+        Every event goes through the incident pipeline; this only estimates
+        priority before TriageAgent runs.
+        Preliminary priority based on source:
+          CLOUDWATCH → P1 (ECS app errors tend to be urgent)
+          DO / Cloudflare / everything else → P2 (less often code-fixable)
         """
-        error_type = event.error_type or ""
-        source = event.source
+        if event.source == EventSource.CLOUDWATCH:
+            return "P1"
+        return "P2"
 
-        # Metric regressions → PerformanceAgent (no code fix, just analysis)
-        if _METRIC_PATTERN.match(error_type):
-            return "performance", "P2"
-
-        # CI/CD failures from APPLICATION source → CICDAgent
-        if source == EventSource.APPLICATION and _CICD_PATTERN.match(error_type):
-            return "cicd", "P2"
-
-        # Application / infrastructure errors → full incident pipeline
-        # Preliminary priority based on source:
-        #   CLOUDWATCH → P1 (ECS app errors tend to be urgent)
-        #   DO / Cloudflare → P2 (infra health, less often code-fixable)
-        if source == EventSource.CLOUDWATCH:
-            return "incident", "P1"
-
-        return "incident", "P2"
-
-    def _dedup_key(self, pipeline: str, event: ErrorEvent) -> str:
+    def _dedup_key(self, event: ErrorEvent) -> str:
         """Unique key for in-flight deduplication — normalizes variable tokens so same error with different values deduplicates."""
         desc = re.sub(r'\b[a-f0-9]{8,}\b|\b\d+[a-zA-Z]*\b', 'X', (event.description or "")[:80]).strip()
-        return f"{pipeline}:{event.error_type or event.title}:{event.service}:{desc}"
+        return f"{event.error_type or event.title}:{event.service}:{desc}"
 
     # ------------------------------------------------------------------
     # Dispatch
     # ------------------------------------------------------------------
 
     async def _dispatch(self, event: ErrorEvent) -> None:
-        """Classify, dedup-check, then run pipeline under the right semaphore."""
-        pipeline, priority = self._classify(event)
-        dedup_key = self._dedup_key(pipeline, event)
+        """Classify, dedup-check, then run the incident pipeline under the right semaphore."""
+        priority = self._classify(event)
+        dedup_key = self._dedup_key(event)
 
         self._stats["total_routed"] += 1
 
         # --- Deduplication ---
         if dedup_key in self._in_flight:
             logger.info(
-                "[Orchestrator] DEDUP — %s already in-flight for %s/%s, dropping",
-                pipeline, event.service, event.error_type,
+                "[Orchestrator] DEDUP — already in-flight for %s/%s, dropping",
+                event.service, event.error_type,
             )
             self._stats["dedup_dropped"] += 1
             self.route_log.append(RouteDecision(
                 event_id=event.id, event_title=event.title, service=event.service,
-                pipeline=pipeline, priority=priority, enrichment=False, dedup_skipped=True,
+                priority=priority, dedup_skipped=True,
             ))
             return
 
-        # --- Enrichment decision (before semaphore — just a boolean flag) ---
-        enrich = pipeline == "incident" and event.source in _ENRICHMENT_SOURCES
-
         self.route_log.append(RouteDecision(
             event_id=event.id, event_title=event.title, service=event.service,
-            pipeline=pipeline, priority=priority, enrichment=enrich, dedup_skipped=False,
+            priority=priority, dedup_skipped=False,
         ))
-        logger.info(
-            "[Orchestrator] → %s lane=%s enrich=%s  '%s'",
-            pipeline.upper(), priority, enrich, event.title,
-        )
+        logger.info("[Orchestrator] → lane=%s '%s'", priority, event.title)
 
         self._in_flight.add(dedup_key)
         sem = self._semaphores[priority]
 
         try:
             async with sem:
-                await self._run(event, pipeline, enrich)
+                self._stats["incident_pipeline"] += 1
+                await self._incident_loop._process(event)
         except Exception as exc:
-            logger.error("[Orchestrator] Pipeline %s failed for %s: %s", pipeline, event.id, exc)
+            logger.error("[Orchestrator] Incident pipeline failed for %s: %s", event.id, exc)
         finally:
             self._in_flight.discard(dedup_key)
-
-    async def _run(self, event: ErrorEvent, pipeline: str, enrich: bool) -> None:
-        """Execute the chosen pipeline, with optional parallel enrichment."""
-        if pipeline == "incident":
-            self._stats["incident_pipeline"] += 1
-            # if enrich:
-            #     self._stats["enrichment_fired"] += 1
-            #     await self._run_incident_with_enrichment(event)
-            # else:
-            await self._incident_loop._process(event)
-
-        elif pipeline == "performance":
-            self._stats["performance_pipeline"] += 1
-            await self._run_performance(event)
-
-        elif pipeline == "cicd":
-            self._stats["cicd_pipeline"] += 1
-            await self._run_cicd(event)
-
-    # ------------------------------------------------------------------
-    # Incident pipeline + parallel enrichment
-    # ------------------------------------------------------------------
-
-    async def _run_incident_with_enrichment(self, event: ErrorEvent) -> None:
-        """
-        Run the full incident pipeline AND a parallel DeploymentAgent health check.
-
-        The enrichment result is logged and sent to Slack as additional context.
-        It does not block the main pipeline from proceeding.
-        """
-        main_task = asyncio.create_task(
-            self._incident_loop._process(event),
-            name=f"incident-{event.id[:8]}",
-        )
-        enrichment_task = asyncio.create_task(
-            self._run_deployment_enrichment(event),
-            name=f"enrich-{event.id[:8]}",
-        )
-
-        results = await asyncio.gather(main_task, enrichment_task, return_exceptions=True)
-
-        if isinstance(results[0], Exception):
-            logger.error("[Orchestrator] Incident pipeline raised: %s", results[0])
-        if isinstance(results[1], Exception):
-            logger.warning("[Orchestrator] Enrichment raised (non-fatal): %s", results[1])
-
-    async def _run_deployment_enrichment(self, event: ErrorEvent) -> None:
-        """
-        Parallel: run a DeploymentAgent health check while the incident pipeline runs.
-        Result is informational — posted to Slack as extra context.
-        """
-        prompt = (
-            f"Run a health check for the '{event.service}' service. "
-            f"A production incident just fired: {event.title}. "
-            f"Check ECS task counts, recent log errors, and CPU/memory. "
-            f"Return a brief health summary (3-5 bullet points max)."
-        )
-        try:
-            result = await self._deployment_agent.run(prompt)
-            logger.info(
-                "[Orchestrator] Enrichment for %s complete (%d chars)",
-                event.service, len(result.answer),
-            )
-            await alerting_service.send_alert(Alert(
-                severity=AlertSeverity.INFO,
-                title=f"[Enrichment] Deployment health for {event.service}",
-                message=result.answer[:800],
-                source="DeploymentAgent",
-                metadata={"event_id": event.id, "service": event.service},
-            ))
-        except Exception as exc:
-            logger.warning("[Orchestrator] Deployment enrichment failed: %s", exc)
-
-    # ------------------------------------------------------------------
-    # Performance pipeline
-    # ------------------------------------------------------------------
-
-    async def _run_performance(self, event: ErrorEvent) -> None:
-        """Route metric regression events to PerformanceAgent."""
-        prompt = (
-            f"Analyze a metric regression for service '{event.service}'. "
-            f"Alert: {event.title}. {event.description}. "
-            f"Check p50/p95/p99 latency and error rates, compare to 7-day baseline, "
-            f"and flag any regressions."
-        )
-        try:
-            result = await self._performance_agent.run(prompt)
-            logger.info(
-                "[Orchestrator] PerformanceAgent complete for %s: %s",
-                event.service, result.answer[:120],
-            )
-            await alerting_service.send_alert(Alert(
-                severity=AlertSeverity.WARNING,
-                title=f"[Performance] Regression analysis: {event.title}",
-                message=result.answer[:800],
-                source="PerformanceAgent",
-                metadata={"event_id": event.id, "service": event.service},
-            ))
-        except Exception as exc:
-            logger.error("[Orchestrator] PerformanceAgent failed: %s", exc)
-
-    # ------------------------------------------------------------------
-    # CI/CD pipeline
-    # ------------------------------------------------------------------
-
-    async def _run_cicd(self, event: ErrorEvent) -> None:
-        """Route CI/CD failure events to CICDAgent."""
-        from app.core.config import settings
-
-        repo = event.metadata.get("repo") or settings.fix_target_repo
-        prompt = (
-            f"A CI/CD pipeline failure was detected in '{repo}'. "
-            f"Alert: {event.title}. {event.description}. "
-            f"Check recent workflow runs, pull the failure logs, classify the failure type, "
-            f"and suggest a fix."
-        )
-        try:
-            agent = CICDAgent()
-            result = await agent.run(prompt)
-            logger.info(
-                "[Orchestrator] CICDAgent complete for %s: %s",
-                repo, result.answer[:120],
-            )
-            await alerting_service.send_alert(Alert(
-                severity=AlertSeverity.ERROR,
-                title=f"[CI/CD] Failure analysis: {event.title}",
-                message=result.answer[:800],
-                source="CICDAgent",
-                metadata={"event_id": event.id, "repo": repo},
-            ))
-        except Exception as exc:
-            logger.error("[Orchestrator] CICDAgent failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------

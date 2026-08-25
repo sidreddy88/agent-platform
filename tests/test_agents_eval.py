@@ -110,7 +110,7 @@ class TestRequirementsAgentEval:
 
     def _make_agent(self, llm_response: str):
         """Build a RequirementsAgent whose LLM always returns llm_response."""
-        from app.agents.requirements import (
+        from app.integrations.requirements import (
             RequirementsAgent,
             analyze_requirement,
             estimate_effort,
@@ -432,7 +432,7 @@ class TestCICDAgentEval:
     @pytest.mark.asyncio
     async def test_test_failure_identifies_test_name_and_reason(self):
         """pytest failure logs → analysis names the failing test and assertion error."""
-        from app.agents.cicd import analyze_failure
+        from app.integrations.cicd import analyze_failure
 
         logs = (
             "Run pytest tests/\n"
@@ -465,7 +465,7 @@ class TestCICDAgentEval:
     @pytest.mark.asyncio
     async def test_dependency_error_identifies_package(self):
         """pip install failure → analysis identifies the missing/incompatible package."""
-        from app.agents.cicd import analyze_failure
+        from app.integrations.cicd import analyze_failure
 
         logs = (
             "pip install -r requirements.txt\n"
@@ -491,7 +491,7 @@ class TestCICDAgentEval:
     @pytest.mark.asyncio
     async def test_timeout_analysis_suggests_cause(self):
         """Job timeout logs → fix recommendation names likely causes and remedies."""
-        from app.agents.cicd import suggest_fix
+        from app.integrations.cicd import suggest_fix
 
         analysis_text = (
             "FAILURE_TYPE: TIMEOUT\n"
@@ -536,7 +536,7 @@ class TestIncidentAgentEval:
     @pytest.mark.asyncio
     async def test_clear_error_spike_produces_structured_diagnosis(self):
         """Known exception dominating error logs → diagnosis names root cause with HIGH confidence."""
-        from app.agents.incident import generate_diagnosis
+        from app.integrations.incident import generate_diagnosis
 
         context = (
             "ECS running/desired: 0/3  deployment_status: degraded\n"
@@ -577,7 +577,7 @@ class TestIncidentAgentEval:
     @pytest.mark.asyncio
     async def test_multiple_causes_lists_alternatives_with_confidence(self):
         """Ambiguous evidence (multiple failing deps) → MEDIUM confidence, alternatives listed."""
-        from app.agents.incident import generate_diagnosis
+        from app.integrations.incident import generate_diagnosis
 
         context = (
             "ECS running/desired: 1/3  CPU avg=72%  Memory avg=85%\n"
@@ -624,7 +624,7 @@ class TestIncidentAgentEval:
         When the LLM decides to call request_action_approval for a rollback,
         the ApprovalService is invoked and the final answer references the pending request.
         """
-        from app.agents.incident import IncidentResponseAgent
+        from app.integrations.incident import IncidentResponseAgent
         from app.services.approvals import (
             ApprovalRequest,
             ApprovalService,
@@ -736,7 +736,7 @@ class TestPerformanceAgentEval:
     @pytest.mark.asyncio
     async def test_normal_metrics_do_not_flag_regression(self):
         """Current p95 ≈ baseline → OK or WARNING, never REGRESSION."""
-        from app.agents.performance import detect_regression
+        from app.integrations.performance import detect_regression
 
         # ~100 ms current vs ~95 ms baseline → ~5.3% increase → below 10% threshold
         aws = self._make_aws(
@@ -757,7 +757,7 @@ class TestPerformanceAgentEval:
     @pytest.mark.asyncio
     async def test_20pct_latency_increase_flagged_as_regression(self):
         """20% latency increase above 10% threshold → REGRESSION flagged."""
-        from app.agents.performance import detect_regression
+        from app.integrations.performance import detect_regression
 
         # 120 ms current vs 100 ms baseline → exactly 20% → REGRESSION
         aws = self._make_aws(
@@ -778,7 +778,7 @@ class TestPerformanceAgentEval:
     @pytest.mark.asyncio
     async def test_regression_after_deploy_correlates_correctly(self):
         """Deployment 15 min before regression time → DEPLOYMENT CORRELATION flagged."""
-        from app.agents.performance import correlate_with_deployments
+        from app.integrations.performance import correlate_with_deployments
 
         regression_time = "2024-01-15T10:30:00+00:00"
         deploy_time = "2024-01-15T10:15:00+00:00"  # 15 min before regression
@@ -808,7 +808,7 @@ class TestPerformanceAgentEval:
     @pytest.mark.asyncio
     async def test_old_deployment_not_correlated(self):
         """Deployment 10 h before regression (outside 6 h window) → NOT correlated."""
-        from app.agents.performance import correlate_with_deployments
+        from app.integrations.performance import correlate_with_deployments
 
         regression_time = "2024-01-15T10:30:00+00:00"
         old_deploy = "2024-01-15T00:00:00+00:00"  # 10.5 h before — outside window
@@ -846,87 +846,87 @@ class TestMetricHelpers:
     """Pure unit tests for _percentile, _severity, _pct_change, _average."""
 
     def test_percentile_50_returns_index_50(self):
-        from app.agents.performance import _percentile
+        from app.integrations.performance import _percentile
         # values [1..100], idx = int(100 * 50 / 100) = 50 → sorted[50] = 51
         assert _percentile(list(range(1, 101)), 50) == 51
 
     def test_percentile_95_returns_index_95(self):
-        from app.agents.performance import _percentile
+        from app.integrations.performance import _percentile
         # idx = int(100 * 95 / 100) = 95 → sorted[95] = 96
         assert _percentile(list(range(1, 101)), 95) == 96
 
     def test_percentile_99_clamps_to_last(self):
-        from app.agents.performance import _percentile
+        from app.integrations.performance import _percentile
         # idx = int(100 * 99 / 100) = 99 → sorted[99] = 100
         assert _percentile(list(range(1, 101)), 99) == 100
 
     def test_percentile_empty_returns_none(self):
-        from app.agents.performance import _percentile
+        from app.integrations.performance import _percentile
         assert _percentile([], 50) is None
 
     def test_percentile_single_value(self):
-        from app.agents.performance import _percentile
+        from app.integrations.performance import _percentile
         assert _percentile([42.0], 50) == 42.0
 
     def test_pct_change_increase(self):
-        from app.agents.performance import _pct_change
+        from app.integrations.performance import _pct_change
         assert _pct_change(120, 100) == 20.0
 
     def test_pct_change_decrease(self):
-        from app.agents.performance import _pct_change
+        from app.integrations.performance import _pct_change
         assert _pct_change(80, 100) == -20.0
 
     def test_pct_change_zero_baseline_returns_zero(self):
-        from app.agents.performance import _pct_change
+        from app.integrations.performance import _pct_change
         assert _pct_change(100, 0) == 0.0
 
     def test_pct_change_no_change(self):
-        from app.agents.performance import _pct_change
+        from app.integrations.performance import _pct_change
         assert _pct_change(100, 100) == 0.0
 
     def test_severity_ok_on_zero_change(self):
-        from app.agents.performance import _severity
+        from app.integrations.performance import _severity
         assert _severity(0, 10) == ("OK", False)
 
     def test_severity_ok_on_decrease(self):
-        from app.agents.performance import _severity
+        from app.integrations.performance import _severity
         assert _severity(-10, 10) == ("OK", False)
 
     def test_severity_ok_below_half_threshold(self):
-        from app.agents.performance import _severity
+        from app.integrations.performance import _severity
         # 4.9% < 10 * 0.5 = 5 → OK
         sev, flagged = _severity(4.9, 10)
         assert sev == "OK"
         assert flagged is False
 
     def test_severity_warning_at_half_threshold(self):
-        from app.agents.performance import _severity
+        from app.integrations.performance import _severity
         # 5.0% == 10 * 0.5 = 5 → WARNING
         sev, flagged = _severity(5.0, 10)
         assert sev == "WARNING"
         assert flagged is False
 
     def test_severity_regression_at_threshold(self):
-        from app.agents.performance import _severity
+        from app.integrations.performance import _severity
         sev, flagged = _severity(10.0, 10)
         assert sev == "REGRESSION"
         assert flagged is True
 
     def test_severity_regression_above_threshold(self):
-        from app.agents.performance import _severity
+        from app.integrations.performance import _severity
         sev, flagged = _severity(15.0, 10)
         assert sev == "REGRESSION"
         assert flagged is True
 
     def test_severity_critical_at_200x_threshold(self):
-        from app.agents.performance import _severity
+        from app.integrations.performance import _severity
         # threshold * CRITICAL_MULTIPLIER * 10 = 10 * 2 * 10 = 200
         sev, flagged = _severity(200.0, 10)
         assert sev == "CRITICAL_REGRESSION"
         assert flagged is True
 
     def test_severity_critical_above_200(self):
-        from app.agents.performance import _severity
+        from app.integrations.performance import _severity
         sev, flagged = _severity(500.0, 10)
         assert sev == "CRITICAL_REGRESSION"
         assert flagged is True
@@ -940,73 +940,73 @@ class TestIncidentRiskRating:
     """Unit tests for _rate_action_risk — the action risk classifier."""
 
     def test_rollback_is_high(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("rollback deployment to v1.2.3")
         assert risk == "HIGH"
         assert req is True
 
     def test_restart_service_is_high(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("restart service api in prod")
         assert risk == "HIGH"
         assert req is True
 
     def test_redeploy_is_high(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("redeploy the api service")
         assert risk == "HIGH"
         assert req is True
 
     def test_kill_process_is_high(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("kill process 1234")
         assert risk == "HIGH"
         assert req is True
 
     def test_flush_cache_is_high(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("flush cache for the user session store")
         assert risk == "HIGH"
         assert req is True
 
     def test_drop_database_is_critical(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("drop database prod")
         assert risk == "CRITICAL"
         assert req is True
 
     def test_purge_is_critical(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("purge all event records")
         assert risk == "CRITICAL"
         assert req is True
 
     def test_truncate_table_is_critical(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("truncate table user_sessions")
         assert risk == "CRITICAL"
         assert req is True
 
     def test_scale_up_is_medium(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("scale up to 5 ECS tasks")
         assert risk == "MEDIUM"
         assert req is False
 
     def test_enable_feature_is_medium(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("enable feature flag for new payment flow")
         assert risk == "MEDIUM"
         assert req is False
 
     def test_view_logs_is_low(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("check the application logs for errors")
         assert risk == "LOW"
         assert req is False
 
     def test_describe_service_is_low(self):
-        from app.agents.incident import _rate_action_risk
+        from app.integrations.incident import _rate_action_risk
         risk, req = _rate_action_risk("describe the ECS service health status")
         assert risk == "LOW"
         assert req is False
@@ -1020,42 +1020,42 @@ class TestSimilarIncidentSearch:
     """Unit tests for _find_similar_incidents keyword matcher."""
 
     def test_oom_symptoms_match_inc001(self):
-        from app.agents.incident import _find_similar_incidents
+        from app.integrations.incident import _find_similar_incidents
         results = _find_similar_incidents("OOMKilled exit code 137 memory tasks failing to start")
         ids = [r["id"] for r in results]
         assert "INC-001" in ids
 
     def test_500_error_after_deploy_matches_inc002(self):
-        from app.agents.incident import _find_similar_incidents
+        from app.integrations.incident import _find_similar_incidents
         results = _find_similar_incidents("500 errors spike after deployment null pointer")
         ids = [r["id"] for r in results]
         assert "INC-002" in ids
 
     def test_connection_pool_matches_inc003(self):
-        from app.agents.incident import _find_similar_incidents
+        from app.integrations.incident import _find_similar_incidents
         results = _find_similar_incidents("connection pool timeout database ECONNREFUSED")
         ids = [r["id"] for r in results]
         assert "INC-003" in ids
 
     def test_high_cpu_latency_matches_inc004(self):
-        from app.agents.incident import _find_similar_incidents
+        from app.integrations.incident import _find_similar_incidents
         results = _find_similar_incidents("high cpu slow response latency p99")
         ids = [r["id"] for r in results]
         assert "INC-004" in ids
 
     def test_upstream_outage_matches_inc005(self):
-        from app.agents.incident import _find_similar_incidents
+        from app.integrations.incident import _find_similar_incidents
         results = _find_similar_incidents("upstream dependency 503 connection refused circuit breaker")
         ids = [r["id"] for r in results]
         assert "INC-005" in ids
 
     def test_unrelated_symptoms_return_empty(self):
-        from app.agents.incident import _find_similar_incidents
+        from app.integrations.incident import _find_similar_incidents
         results = _find_similar_incidents("xyzzy frobnicate quux blargh")
         assert results == []
 
     def test_results_capped_at_three(self):
-        from app.agents.incident import _find_similar_incidents
+        from app.integrations.incident import _find_similar_incidents
         # Broad terms that match all 5 incidents
         results = _find_similar_incidents(
             "timeout latency error 500 deployment connection memory OOMKilled database"
@@ -1063,7 +1063,7 @@ class TestSimilarIncidentSearch:
         assert len(results) <= 3
 
     def test_highest_overlap_ranked_first(self):
-        from app.agents.incident import _find_similar_incidents
+        from app.integrations.incident import _find_similar_incidents
         # Keywords specific to INC-003
         results = _find_similar_incidents("connection pool ECONNREFUSED database timeout too many connections")
         assert results[0]["id"] == "INC-003"

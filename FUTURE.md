@@ -232,3 +232,30 @@ worth the extra cost.
 
 **Pre-condition:** Real rejection-rate data from `scripts/measure_diagnosis_grounding.py`
 post-deploy.
+
+---
+
+## Multi-Target Support
+
+**When to implement:** When there's an actual second target running through this
+platform simultaneously — not built now, so the design doesn't get shaped by
+guesswork about a target that doesn't exist yet.
+
+**What this is:** Right now there's exactly one target (`settings.fix_target_repo`,
+one global config value, read once at agent construction time). Real multi-tenant
+platforms handle "more than one of these" with a plugin/adapter pattern — Terraform's
+providers, Kubernetes' CSI/CNI plugins: one core engine, swappable adapters, a
+manifest per target declaring which adapters apply. Concretely here that would mean:
+- A `Target` config object (name, repo, log groups, which `app/integrations/`
+  adapters apply to it)
+- `ErrorEvent`/`IncidentState` gaining a `target` field so routing knows which
+  config to load — currently implicit, since there's only one possible target
+- `app/integrations/` agents becoming parameterized by that config instead of
+  reading global settings directly
+
+**Why deferred:** `app/integrations/` already separates target-specific tooling
+(CI/CD, deployment, performance) from the core pipeline structurally — that's the
+adapter half of the pattern. What's missing is the per-target config/manifest layer,
+which only matters once there's a second target to route between.
+
+**Pre-condition:** A real second target actually running through the platform.

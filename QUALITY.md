@@ -62,7 +62,10 @@ their own module would help understandability.
 
 ## Agent Core — Grade: A
 
-**Files:** `app/agents/base.py`, `app/agents/triage.py`, `app/agents/diagnosis.py`, `app/agents/code_review.py`, `app/agents/cicd.py`, `app/agents/deployment.py`, `app/agents/performance.py`
+**Files:** `app/agents/base.py`, `app/agents/triage.py`, `app/agents/diagnosis.py`, `app/agents/code_review.py`, `app/agents/merge_decision.py`, `app/agents/error_clarity.py`, `app/agents/monitor_generation.py`, `app/agents/fix_generation.py`
+
+Target-integration agents (`app/integrations/`) aren't graded here — they're not part
+of the core pipeline this section tracks.
 
 | Dimension | Status |
 |---|---|

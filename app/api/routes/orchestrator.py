@@ -29,9 +29,7 @@ async def get_routes() -> List[Dict[str, Any]]:
             "event_id": d.event_id,
             "event_title": d.event_title,
             "service": d.service,
-            "pipeline": d.pipeline,
             "priority": d.priority,
-            "enrichment": d.enrichment,
             "dedup_skipped": d.dedup_skipped,
             "routed_at": d.routed_at.isoformat(),
         }

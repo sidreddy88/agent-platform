@@ -19,8 +19,8 @@ Run:
 
 import asyncio
 import json
-import sys
 import os
+import sys
 
 # Ensure the project root is on the path so `app.*` imports work
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,11 +29,11 @@ import mcp.types as types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from app.agents.requirements import RequirementsAgent
 from app.agents.code_review import CodeReviewAgent
-from app.agents.cicd import CICDAgent
-from app.agents.deployment import DeploymentAgent
-from app.agents.incident import IncidentResponseAgent
+from app.integrations.cicd import CICDAgent
+from app.integrations.deployment import DeploymentAgent
+from app.integrations.incident import IncidentResponseAgent
+from app.integrations.requirements import RequirementsAgent
 
 # ---------------------------------------------------------------------------
 # Server instance
