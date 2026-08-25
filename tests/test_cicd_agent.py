@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.agents.cicd import (
+from app.integrations.cicd import (
     CICDAgent,
     _classify,
     _extract_error_snippet,
@@ -612,7 +612,7 @@ async def test_live_failed_run_analysis():
     print(f"Log size: {len(logs)} chars")
 
     # Step 5: classify failure
-    from app.agents.cicd import _classify, _extract_error_snippet
+    from app.integrations.cicd import _classify, _extract_error_snippet
     failure_type = _classify(logs)
     snippet = _extract_error_snippet(logs)
 

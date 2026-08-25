@@ -6,7 +6,7 @@ Run: python scripts/smoke_requirements_agent.py
 
 import asyncio
 
-from app.agents.requirements import RequirementsAgent
+from app.integrations.requirements import RequirementsAgent
 
 REQUIREMENT = (
     "Add a feature that lets users export their dashboard data to CSV. "

@@ -6,7 +6,8 @@ Multi-agent platform built with FastAPI and the Anthropic SDK. Most agents use a
 
 ```
 app/
-  agents/          # Agent implementations (most extend BaseAgent — see Agents table)
+  agents/          # Production incident-pipeline agents (most extend BaseAgent — see Agents table)
+  integrations/    # Target-integration agents — optional per-target tooling, not part of the core pipeline
   api/routes/      # FastAPI route handlers
   api/websocket.py # WebSocket endpoint for streaming
   core/config.py   # Settings loaded from .env via pydantic-settings
@@ -61,7 +62,7 @@ ChromaDB-backed vector store with OpenAI `text-embedding-3-small`. Call `rag.ind
 
 ## Agents
 
-12 agents live under `app/agents/`. Full detail (models, execution style, invocation points, design patterns) is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — this table is the quick-reference summary.
+12 agents total: 7 under `app/agents/` (the production incident pipeline) and 5 under `app/integrations/` (target-integration tooling). Full detail (models, execution style, invocation points, design patterns) is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — this table is the quick-reference summary.
 
 **Production incident pipeline** (`app/services/incident_loop.py`, run in this order per event):
 
@@ -75,15 +76,15 @@ ChromaDB-backed vector store with OpenAI `text-embedding-3-small`. Call `rag.ind
 | ErrorClarityAgent | `app/agents/error_clarity.py` | Adds logging/error messages when diagnosis confidence is too low to fix |
 | MonitorGenerationAgent | `app/agents/monitor_generation.py` | Generates CloudWatch alarms from a merged PR's diff |
 
-**Standalone / earlier-design agents** (not wired into the incident pipeline — kept for reference, some routes disabled):
+**Target-integration agents** (`app/integrations/` — optional tooling for a specific target's infra, not part of the core triage → diagnosis → fix pipeline; not wired into `incident_loop.py`/`orchestrator.py`):
 
 | Agent | File | Description |
 |---|---|---|
-| RequirementsAgent | `app/agents/requirements.py` | Generates tech specs from product requirements |
-| CICDAgent | `app/agents/cicd.py` | Monitors GitHub Actions, diagnoses failures |
-| DeploymentAgent | `app/agents/deployment.py` | Monitors AWS ECS/EC2/CloudWatch health |
-| IncidentResponseAgent | `app/agents/incident.py` | Earlier general-purpose incident-diagnosis design, superseded by Triage+Diagnosis above |
-| PerformanceAgent | `app/agents/performance.py` | Detects metric regressions via CloudWatch; HTTP route currently disabled |
+| RequirementsAgent | `app/integrations/requirements.py` | Generates tech specs from product requirements |
+| CICDAgent | `app/integrations/cicd.py` | Monitors GitHub Actions, diagnoses failures |
+| DeploymentAgent | `app/integrations/deployment.py` | Monitors AWS ECS/EC2/CloudWatch health |
+| IncidentResponseAgent | `app/integrations/incident.py` | Earlier general-purpose incident-diagnosis design, superseded by Triage+Diagnosis above |
+| PerformanceAgent | `app/integrations/performance.py` | Detects metric regressions via CloudWatch; HTTP route currently disabled |
 
 ## User Preferences
 
@@ -107,7 +108,7 @@ timezone: UTC                   # timezone for timestamps in outputs
 
 ## MCP Server
 
-Exposes the 5 standalone/earlier-design agents (RequirementsAgent, CodeReviewAgent, CICDAgent, DeploymentAgent, IncidentResponseAgent — see the table above) as tools for Claude Desktop. The production incident pipeline agents (TriageAgent, DiagnosisAgent, FixGenerationAgent, MergeDecisionAgent, ErrorClarityAgent, MonitorGenerationAgent) are not exposed here — they run as part of `incident_loop.py`'s pipeline, not as standalone callable tools:
+Exposes CodeReviewAgent plus 4 of the target-integration agents (RequirementsAgent, CICDAgent, DeploymentAgent, IncidentResponseAgent — see the table above; PerformanceAgent has no MCP tool) as tools for Claude Desktop. The production incident pipeline agents (TriageAgent, DiagnosisAgent, FixGenerationAgent, MergeDecisionAgent, ErrorClarityAgent, MonitorGenerationAgent) are not exposed here — they run as part of `incident_loop.py`'s pipeline, not as standalone callable tools:
 
 ```bash
 python mcp_server/server.py
