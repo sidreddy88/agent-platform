@@ -24,12 +24,17 @@ It is also a research substrate: every LLM call and tool execution is captured a
 
 | Metric | Value | Source |
 |---|---|---|
-| Time-to-first-PR | ~6 min from alarm | [`scripts/measure_mttr.py`](scripts/measure_mttr.py) |
+| Merged PRs | 11 / 11 attempted | `GET /agents/pr-stats` |
+| Agent pipeline time | ~6 min per incident | `GET /agents/pr-stats` |
+| Avg MTTD | 75.8h | `GET /agents/pr-stats` |
+| Avg MTTR | 32 min | `GET /agents/pr-stats` |
+| CI pass rate | 100% | `GET /agents/pr-stats` |
+| Avg diagnosis confidence | 56% | `GET /agents/pr-stats` |
+| Avg cost per incident | $0.76 | `GET /agents/pr-stats` |
 | Triage accuracy | 92% | 100-case eval — `app/evals/golden_dataset.jsonl` |
 | False-positive rate | < 8% | Triage decisions reviewed against ground truth |
-| Sample size | 7 incidents (current live DB row count) | Postgres `incidents` table, live deploy |
 
-Numbers refresh by re-running `scripts/measure_mttr.py --since YYYY-MM-DD`. Triage accuracy is sourced from the checked-in eval dataset (`app/evals/golden_dataset.jsonl`); sample size is a live, mutable count from the deploy's Postgres `incidents` table (verified directly against production — not reproducible from a fresh clone, and drops when incidents are cleared/deduped). There's no manual pre-agent baseline to compare against yet — these numbers stand on their own until real "before" incident data exists.
+Numbers refresh live from `GET /agents/pr-stats`, computed from every incident's actual PR outcome (Postgres `incidents` table, live deploy — not reproducible from a fresh clone). Triage accuracy/false-positive rate are separately sourced from the checked-in eval dataset (`app/evals/golden_dataset.jsonl`). Avg diagnosis confidence (56%) is below the 70% auto-fix threshold because it averages across *every* diagnosis, including the lower-confidence ones that escalated to human approval rather than auto-merging — the 11 PRs that did merge cleared that bar individually. There's no manual pre-agent baseline to compare against yet — these numbers stand on their own until real "before" incident data exists.
 
 ---
 
