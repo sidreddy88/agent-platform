@@ -31,10 +31,8 @@ It is also a research substrate: every LLM call and tool execution is captured a
 | CI pass rate | 100% | `GET /agents/pr-stats` |
 | Avg diagnosis confidence | 56% | `GET /agents/pr-stats` |
 | Avg cost per incident | $0.76 | `GET /agents/pr-stats` |
-| Triage accuracy | 92% | 100-case eval — `app/evals/golden_dataset.jsonl` |
-| False-positive rate | < 8% | Triage decisions reviewed against ground truth |
 
-Numbers refresh live from `GET /agents/pr-stats`, computed from every incident's actual PR outcome (Postgres `incidents` table, live deploy — not reproducible from a fresh clone). Triage accuracy/false-positive rate are separately sourced from the checked-in eval dataset (`app/evals/golden_dataset.jsonl`). Avg diagnosis confidence (56%) is below the 70% auto-fix threshold because it averages across *every* diagnosis, including the lower-confidence ones that escalated to human approval rather than auto-merging — the 11 PRs that did merge cleared that bar individually. There's no manual pre-agent baseline to compare against yet — these numbers stand on their own until real "before" incident data exists.
+Numbers refresh live from `GET /agents/pr-stats`, computed from every incident's actual PR outcome (Postgres `incidents` table, live deploy — not reproducible from a fresh clone). Avg diagnosis confidence (56%) is below the 70% auto-fix threshold because it averages across *every* diagnosis, including the lower-confidence ones that escalated to human approval rather than auto-merging — the 11 PRs that did merge cleared that bar individually. There's no manual pre-agent baseline to compare against yet — these numbers stand on their own until real "before" incident data exists.
 
 ---
 
