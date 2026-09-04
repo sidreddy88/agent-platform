@@ -401,17 +401,25 @@ class DiagnosisAgent(BaseAgent):
         rag: RAGService | None = None,
         github: GitHubService | None = None,
         local_repo: LocalRepoService | None = None,
+        owner: str | None = None,
+        repo: str | None = None,
     ) -> None:
         super().__init__(llm=LLMService())   # Sonnet — default model
         self._aws = aws or AWSService()
         self._rag = rag
         self._github = github or GitHubService()
-        _owner, _repo = settings.fix_target_repo.split("/", 1)
-        self._owner = _owner
-        self._repo = _repo
-        # Overridable so replay/eval tooling (scripts/eval_diagnosis_regression.py)
-        # can pin diagnosis to an isolated historical worktree instead of the
-        # live shared clone's current HEAD — see LocalRepoService(pinned_sha=...).
+        if owner and repo:
+            # Overridable so cross-repo eval tooling (scripts/eval_swebench_diagnosis.py)
+            # can point diagnosis at an arbitrary GitHub repo instead of the one
+            # fixed target app -- settings.fix_target_repo has no notion of "a
+            # different repo per benchmark instance".
+            self._owner, self._repo = owner, repo
+        else:
+            self._owner, self._repo = settings.fix_target_repo.split("/", 1)
+        # Overridable so replay/eval tooling (scripts/eval_diagnosis_regression.py,
+        # scripts/eval_swebench_diagnosis.py) can pin diagnosis to an isolated
+        # historical worktree instead of the live shared clone's current HEAD —
+        # see LocalRepoService(pinned_sha=...).
         self._local_repo = local_repo or LocalRepoService(self._owner, self._repo)
         self._register_tools()
         # A real production diagnosis once answered in a single LLM call
@@ -569,9 +577,20 @@ class DiagnosisAgent(BaseAgent):
             return wrap_untrusted(raw, source="rag-codebase-search")
 
         async def _get_file_contents(file_path: str) -> str:
-            """Fetch the full source of a file from the target repo."""
+            """Fetch the full source of a file from the target repo.
+
+            When self._local_repo is pinned to a historical SHA (replay/eval
+            tooling), reads from that pinned worktree instead of the GitHub API —
+            get_file_contents defaults to ref="main" (github.py), i.e. the live
+            default branch, which is wrong for a pinned replay by construction.
+            Same bug class as _symbol_exists_in_repo's pinned-mode fix.
+            """
             try:
-                content, _ = await github.get_file_contents(owner, repo, file_path.lstrip("/"))
+                p = file_path.lstrip("/")
+                if self._local_repo.pinned and self._local_repo.ready:
+                    content = self._local_repo.read_file(p)
+                else:
+                    content, _ = await github.get_file_contents(owner, repo, p)
                 if len(content) > 12000:
                     content = (
                         content[:12000]
