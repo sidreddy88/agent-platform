@@ -400,6 +400,7 @@ class DiagnosisAgent(BaseAgent):
         aws: AWSService | None = None,
         rag: RAGService | None = None,
         github: GitHubService | None = None,
+        local_repo: LocalRepoService | None = None,
     ) -> None:
         super().__init__(llm=LLMService())   # Sonnet — default model
         self._aws = aws or AWSService()
@@ -408,7 +409,10 @@ class DiagnosisAgent(BaseAgent):
         _owner, _repo = settings.fix_target_repo.split("/", 1)
         self._owner = _owner
         self._repo = _repo
-        self._local_repo = LocalRepoService(self._owner, self._repo)
+        # Overridable so replay/eval tooling (scripts/eval_pipeline_regression.py)
+        # can pin diagnosis to an isolated historical worktree instead of the
+        # live shared clone's current HEAD — see LocalRepoService(pinned_sha=...).
+        self._local_repo = local_repo or LocalRepoService(self._owner, self._repo)
         self._register_tools()
         # A real production diagnosis once answered in a single LLM call
         # with zero tool calls, fabricating file/schema content it never
@@ -778,6 +782,10 @@ class DiagnosisAgent(BaseAgent):
             problems = await self._validate_diagnosis_submission(kwargs)
             if problems:
                 self._rejection_count += 1
+                logger.info(
+                    "DiagnosisAgent: submit_diagnosis rejected (attempt %d): %s",
+                    self._rejection_count, "; ".join(problems),
+                )
                 return (
                     "REJECTED — fix the following and call submit_diagnosis again:\n"
                     + "\n".join(f"- {p}" for p in problems)
@@ -892,15 +900,36 @@ class DiagnosisAgent(BaseAgent):
         return skeleton in _snippet_skeleton(content)
 
     async def _symbol_exists_in_repo(self, symbol: str) -> bool:
-        """Check whether `symbol` appears in the target repo on the default branch.
+        """Check whether `symbol` appears in the target repo.
 
         Authoritative grounding check: the LLM may invent function names that look
         plausible but don't exist. We re-verify post-parse so a fabricated name can't
         leak into the Fix Generation Agent.
+
+        Live diagnosis checks GitHub Code Search against the default branch (fast,
+        no local-clone dependency). When self._local_repo is pinned to a historical
+        SHA instead — replay/eval tooling, see scripts/eval_pipeline_regression.py —
+        GitHub Code Search is the wrong check: it only ever searches the current
+        default branch, which by definition doesn't match a historical commit
+        (found live: every case in the regression-eval replay degraded to escalate
+        because a symbol that legitimately existed at the pre-fix SHA no longer
+        matched current main). Grep the pinned worktree directly in that case.
         """
         name = (symbol or "").strip()
         if not name:
             return False
+
+        if self._local_repo.pinned and self._local_repo.ready:
+            needles = (f"{name}(", f'"{name}"')
+            for rel_path in self._local_repo.list_files():
+                try:
+                    content = self._local_repo.read_file(rel_path)
+                except Exception:
+                    continue
+                if any(n in content for n in needles):
+                    return True
+            return False
+
         for q in (f'"{name}("', f'"{name}"'):
             try:
                 hits = await self._github.search_code(self._owner, self._repo, q)

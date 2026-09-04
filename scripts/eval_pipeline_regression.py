@@ -17,6 +17,16 @@ Deliberately diagnosis-only, not full fix+sandbox: FixGenerationAgent has no
 dry-run mode, so running it here would open a real PR against the live
 target repo on every regression check. See DECISIONS.md.
 
+Historical checkout, not live HEAD: every ground-truth case here is a bug
+that WAS ALREADY FIXED (outcome == "fix_merged"), so diagnosing it against
+the target repo's current HEAD is structurally guaranteed to fail --
+DiagnosisAgent's own grounding gate correctly refuses to ground a diagnosis
+against code that no longer has the bug. Each case instead resolves its
+PR's pre-merge commit (merge_commit_sha's first parent) via the GitHub API
+and diagnoses against an isolated git worktree pinned to that SHA
+(LocalRepoService(pinned_sha=...)), so the repo state actually matches what
+the bug looked like when it was real.
+
 Scoring is structural, not exact-match (LLM output isn't deterministic):
   PASS   - same affected_file, confidence within CONFIDENCE_TOLERANCE
   DRIFT  - same affected_file, confidence moved beyond tolerance (not a
@@ -33,6 +43,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -42,6 +53,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _DEFAULT_DATASET = Path(__file__).resolve().parent.parent / "app" / "evals" / "pipeline_regression.jsonl"
 
 CONFIDENCE_TOLERANCE = 0.15
+
+_PR_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
+
+
+def _parse_pr_url(pr_url: str | None) -> tuple[str, str, int]:
+    if not pr_url:
+        raise ValueError("ground_truth.pr_url is required to resolve a pre-fix commit")
+    m = _PR_URL_RE.search(pr_url)
+    if not m:
+        raise ValueError(f"cannot parse owner/repo/pr_number from pr_url: {pr_url!r}")
+    owner, repo, pr_number = m.group(1), m.group(2), int(m.group(3))
+    return owner, repo, pr_number
+
+
+async def _resolve_pre_fix_sha(github: Any, owner: str, repo: str, pr_number: int) -> str:
+    """The repo's SHA immediately before this PR's fix landed."""
+    merge_sha = await github.get_pr_merge_commit_sha(owner, repo, pr_number)
+    if not merge_sha:
+        raise RuntimeError(f"PR #{pr_number} has no merge_commit_sha — was it actually merged?")
+    return await github.get_commit_parent_sha(owner, repo, merge_sha)
 
 
 def _load_cases(path: Path) -> list[dict[str, Any]]:
@@ -56,9 +87,10 @@ def _load_cases(path: Path) -> list[dict[str, Any]]:
     return cases
 
 
-async def _replay_one(case: dict[str, Any]) -> dict[str, Any]:
+async def _replay_one(case: dict[str, Any], github: Any) -> dict[str, Any]:
     from app.agents.diagnosis import DiagnosisAgent
     from app.models.events import ErrorEvent, EventSource, IncidentState
+    from app.services.repo import LocalRepoService
 
     event_data = case["event"]
     event = ErrorEvent(
@@ -71,10 +103,17 @@ async def _replay_one(case: dict[str, Any]) -> dict[str, Any]:
     )
     incident = IncidentState(error_event=event)
 
-    agent = DiagnosisAgent()
-    result = await agent.diagnose(incident)
-
     truth = case["ground_truth"]
+    owner, repo, pr_number = _parse_pr_url(truth.get("pr_url"))
+    pre_fix_sha = await _resolve_pre_fix_sha(github, owner, repo, pr_number)
+
+    pinned_repo = LocalRepoService(owner, repo, pinned_sha=pre_fix_sha)
+    agent = DiagnosisAgent(github=github, local_repo=pinned_repo)
+    try:
+        result = await agent.diagnose(incident)
+    finally:
+        await pinned_repo.remove_worktree()
+
     verdict = _score(truth, result)
 
     return {
@@ -86,6 +125,7 @@ async def _replay_one(case: dict[str, Any]) -> dict[str, Any]:
         "current_file": result.affected_file,
         "ground_truth_confidence": truth.get("confidence"),
         "current_confidence": result.confidence,
+        "pre_fix_sha": pre_fix_sha,
     }
 
 
@@ -111,12 +151,15 @@ def _score(truth: dict[str, Any], result: Any) -> dict[str, str]:
 
 
 async def _run(cases: list[dict[str, Any]], verbose: bool = True) -> list[dict[str, Any]]:
+    from app.services.github import GitHubService
+
+    github = GitHubService()
     results = []
     for i, case in enumerate(cases, 1):
         if verbose:
             print(f"[{i}/{len(cases)}] {case.get('incident_id')} — {case.get('event', {}).get('title', '')} ...", flush=True)
         try:
-            result = await _replay_one(case)
+            result = await _replay_one(case, github)
         except Exception as exc:
             result = {
                 "incident_id": case.get("incident_id"),

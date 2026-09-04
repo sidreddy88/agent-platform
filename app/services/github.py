@@ -83,6 +83,30 @@ class GitHubService:
             head_sha=data["head"]["sha"],
         )
 
+    async def get_pr_merge_commit_sha(self, owner: str, repo: str, pr_number: int) -> str | None:
+        """Fetch a PR's merge_commit_sha (None if it was never merged)."""
+        async with self._client() as client:
+            response = await client.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+            await self._raise_for_status(response)
+            data = response.json()
+        return data.get("merge_commit_sha")
+
+    async def get_commit_parent_sha(self, owner: str, repo: str, sha: str) -> str:
+        """First-parent SHA of a commit — i.e. repo state immediately before it.
+
+        Used by scripts/eval_pipeline_regression.py to resolve the pre-fix
+        commit for a merged PR, so a regression replay can diagnose against
+        the state the bug actually existed in instead of current HEAD.
+        """
+        async with self._client() as client:
+            response = await client.get(f"/repos/{owner}/{repo}/commits/{sha}")
+            await self._raise_for_status(response)
+            data = response.json()
+        parents = data.get("parents") or []
+        if not parents:
+            raise GitHubError(422, f"commit {sha} has no parents (initial commit?)")
+        return parents[0]["sha"]
+
     async def get_pr_diff(
         self, owner: str, repo: str, pr_number: int
     ) -> list[FileDiff]:
