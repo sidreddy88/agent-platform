@@ -49,6 +49,12 @@ def _make_agent(search_code_side_effect, local_repo=None):
     agent._github = MagicMock()
     agent._github.search_code = AsyncMock(side_effect=search_code_side_effect)
     agent._local_repo = local_repo if local_repo is not None else MagicMock(ready=False)
+    # A bare MagicMock auto-creates `.pinned` as a truthy Mock on first access,
+    # which would wrongly route _symbol_exists_in_repo into pinned-worktree-grep
+    # mode instead of the GitHub search_code path these tests exercise. Every
+    # test in this file models live (unpinned) diagnosis, so force it False —
+    # whether local_repo came from the caller or the default above.
+    agent._local_repo.pinned = False
     return agent
 
 

@@ -176,3 +176,53 @@ still leaves a whole free-text answer produced before anything is checked at all
 actionable string describing exactly what failed — it feeds back into the same
 ReAct loop as the next `Observation:`, so vague rejection text just wastes the
 model's remaining iterations.
+
+---
+
+## 2026-08-26: Pipeline regression eval is diagnosis-only, not full fix+sandbox
+
+**Decision:** `scripts/eval_pipeline_regression.py` replays historical merged-fix
+incidents through `DiagnosisAgent` only, checking `affected_file`/confidence against
+ground truth. It does not call `FixGenerationAgent`.
+
+**Reason:** `FixGenerationAgent.fix_with_steps()` has no dry-run mode — it always
+ends by opening a real GitHub PR against the live target repo. Running it on every
+regression check (i.e. every time an agent prompt changes) would spam the real
+target app's PR history with test PRs.
+
+**Rejected:** Building a dry-run mode into `FixGenerationAgent` first so the full
+pipeline (including sandbox validation) could be regression-tested end to end. Real,
+valuable follow-up — just a separate, more careful piece of work than this one.
+
+**Constraint:** If `FixGenerationAgent` ever gets a dry-run mode, extending this
+script to also check sandbox-pass is the natural next step — don't add fix-generation
+replay here without one.
+
+---
+
+## 2026-08-26: `LocalRepoService` clears `GIT_ASKPASS` and refreshes the remote URL on every pull
+
+**Decision:** `_pull()` (and `_clone()`) set both `GIT_TERMINAL_PROMPT=0` and
+`GIT_ASKPASS=""` in the subprocess env, and `_pull()` runs `git remote set-url origin
+<current-token-url>` before pulling.
+
+**Reason:** Two real bugs found live while first running `eval_pipeline_regression.py`.
+(1) `GIT_TERMINAL_PROMPT=0` alone doesn't stop git from hanging on a bad credential —
+if `GIT_ASKPASS` is set in the environment (an editor's git integration exports it
+globally; this machine's shell inherited it from VS Code), git delegates to that
+helper instead of respecting `GIT_TERMINAL_PROMPT`, and the helper hangs forever
+waiting on a GUI that doesn't exist in a headless/background context. Reproduced
+directly: `GIT_TERMINAL_PROMPT=0` alone hung past a 6s timeout; adding
+`GIT_ASKPASS=""` failed fast with a clear auth error instead. (2) `_pull()` never
+refreshed the `origin` remote URL, so rotating `GITHUB_TOKEN` in `.env` had no effect
+on an already-cloned repo — it kept authenticating with the old, dead token baked into
+the URL at clone time, indefinitely.
+
+**Rejected:** Nothing — both are pure bug fixes with no real tradeoff. Considered
+also deleting `~/.agent-platform/repos/*` on token rotation as an alternative to the
+`remote set-url` fix, but that throws away the shallow clone for no reason when a URL
+update accomplishes the same thing in one command.
+
+**Constraint:** Any new subprocess call in `LocalRepoService` that touches the remote
+must set both `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS=""` — `GIT_TERMINAL_PROMPT`
+alone is not sufficient proof against a hang.
