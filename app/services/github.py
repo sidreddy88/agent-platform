@@ -94,7 +94,7 @@ class GitHubService:
     async def get_commit_parent_sha(self, owner: str, repo: str, sha: str) -> str:
         """First-parent SHA of a commit — i.e. repo state immediately before it.
 
-        Used by scripts/eval_pipeline_regression.py to resolve the pre-fix
+        Used by scripts/eval_diagnosis_regression.py to resolve the pre-fix
         commit for a merged PR, so a regression replay can diagnose against
         the state the bug actually existed in instead of current HEAD.
         """

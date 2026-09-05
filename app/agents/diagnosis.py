@@ -409,7 +409,7 @@ class DiagnosisAgent(BaseAgent):
         _owner, _repo = settings.fix_target_repo.split("/", 1)
         self._owner = _owner
         self._repo = _repo
-        # Overridable so replay/eval tooling (scripts/eval_pipeline_regression.py)
+        # Overridable so replay/eval tooling (scripts/eval_diagnosis_regression.py)
         # can pin diagnosis to an isolated historical worktree instead of the
         # live shared clone's current HEAD — see LocalRepoService(pinned_sha=...).
         self._local_repo = local_repo or LocalRepoService(self._owner, self._repo)
@@ -908,7 +908,7 @@ class DiagnosisAgent(BaseAgent):
 
         Live diagnosis checks GitHub Code Search against the default branch (fast,
         no local-clone dependency). When self._local_repo is pinned to a historical
-        SHA instead — replay/eval tooling, see scripts/eval_pipeline_regression.py —
+        SHA instead — replay/eval tooling, see scripts/eval_diagnosis_regression.py —
         GitHub Code Search is the wrong check: it only ever searches the current
         default branch, which by definition doesn't match a historical commit
         (found live: every case in the regression-eval replay degraded to escalate

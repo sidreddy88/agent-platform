@@ -14,7 +14,8 @@ frontend/dist/
 .incidents.json
 .preference_pairs.jsonl
 app/evals/golden_dataset.jsonl
-app/evals/pipeline_regression.jsonl
+app/evals/diagnosis_regression.jsonl
+app/evals/error_clarity_regression.jsonl
 
 # SQLite database
 agent_platform.db

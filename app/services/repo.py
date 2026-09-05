@@ -42,7 +42,7 @@ class LocalRepoService:
         self._base_path = Path(clone_root) / f"{owner}-{repo}"
         if pinned_sha:
             # Isolated worktree off the shared base clone, keyed by SHA. Used
-            # by replay/eval tooling (scripts/eval_pipeline_regression.py) that
+            # by replay/eval tooling (scripts/eval_diagnosis_regression.py) that
             # needs the repo as it existed *before* a specific fix landed —
             # the live shared clone (self._base_path, unpinned instances)
             # always tracks current HEAD, which by definition no longer has

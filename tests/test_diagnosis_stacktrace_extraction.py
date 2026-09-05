@@ -4,8 +4,9 @@ this app's own file paths directly out of raw error text, so DiagnosisAgent
 can skip search_codebase (an embedding search with a similarity threshold)
 for the common case where the file is already spelled out in the stack trace.
 
-Real motivation and real data: checked against all 4 cases in
-app/evals/pipeline_regression.jsonl (real merged-fix incidents) — 3 of 4
+Real motivation and real data: checked against 4 of the (now 6, after
+pulling in 2 more real DiagnosisAgent cases from production) cases in
+app/evals/diagnosis_regression.jsonl (real merged-fix incidents) — 3 of 4
 have the exact ground-truth file (and sometimes function) sitting verbatim
 in the trace; the 4th (a bare DeprecationWarning) has no trace at all and is
 the case this intentionally returns empty for, so callers fall back to
@@ -103,31 +104,41 @@ def test_multiple_distinct_app_files_both_kept_in_order():
 def test_real_pipeline_regression_dataset_cases():
     """End-to-end sanity check against real merged-fix incidents, if the
     (gitignored, locally-populated) dataset is present. Skips cleanly in a
-    fresh clone where the file doesn't exist yet."""
+    fresh clone where the file doesn't exist yet.
+
+    Keyed by incident_id, not title -- the dataset now has two different
+    APP_CRASHED incidents (different real bugs, different ground-truth
+    files) sharing the exact same title string. Keying by title alone would
+    silently check whichever one happened to come first in the file against
+    both expectations -- found this exact bug while updating this test for
+    the dataset's growth from 4 to 6 real cases.
+    """
     import json
     from pathlib import Path
 
-    path = Path(__file__).resolve().parent.parent / "app" / "evals" / "pipeline_regression.jsonl"
+    path = Path(__file__).resolve().parent.parent / "app" / "evals" / "diagnosis_regression.jsonl"
     if not path.exists():
         return
 
     expectations = {
-        "TYPEERROR in TaskAllInterviews": "constants/prankCheckerMain.js",
-        "APP_CRASHED in TaskAllInterviews": "routes/api/image.js",
-        "TOKENEXPIREDERROR in TaskAllInterviews": "config/authenticateToken.js",
-        "DEPRECATIONWARNING in TaskAllInterviews": None,  # no trace -- must stay empty
+        "b90ed493-a21c-41fb-bb19-c95b9a11f15f": "constants/prankCheckerMain.js",   # TYPEERROR
+        "c3c393e8-7187-4b21-a5f9-6b4e72f23c42": "constants/prankCheckerOpenAI.js", # SYNTAXERROR
+        "323b34f6-1374-4cb9-b161-f3c4e5ea5412": "routes/api/crInterviewUsers.js",  # APP_CRASHED (CastError)
+        "1b576622-9bb8-4be0-b9cb-8a2e7ea13edf": "config/authenticateToken.js",     # TOKENEXPIREDERROR
+        "b46ae663-c0e7-4dca-90b2-8ba781baf9c4": None,  # DEPRECATIONWARNING -- no trace, must stay empty
+        "b71aa206-2d7e-4236-bc91-980181d11773": "routes/api/image.js",            # APP_CRASHED (S3 NoSuchKey)
     }
     with path.open() as f:
         for line in f:
             case = json.loads(line)
-            title = case["event"]["title"]
-            if title not in expectations:
+            incident_id = case["incident_id"]
+            if incident_id not in expectations:
                 continue
             result = extract_stack_trace_paths(case["event"]["description"])
-            expected_file = expectations[title]
+            expected_file = expectations[incident_id]
             if expected_file is None:
-                assert result == [], f"{title}: expected no extraction, got {result}"
+                assert result == [], f"{incident_id}: expected no extraction, got {result}"
             else:
                 assert result and result[0]["file"] == expected_file, (
-                    f"{title}: expected first candidate {expected_file!r}, got {result}"
+                    f"{incident_id}: expected first candidate {expected_file!r}, got {result}"
                 )

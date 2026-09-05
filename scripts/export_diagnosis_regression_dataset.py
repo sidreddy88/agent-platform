@@ -1,6 +1,17 @@
 """
 Export ground truth for every merged-fix incident into a local regression
-dataset, for scripts/eval_pipeline_regression.py to replay against.
+dataset, for scripts/eval_diagnosis_regression.py to replay against.
+
+This is DiagnosisAgent-specific -- it only captures incidents where
+diagnosis_affected_file is set. Real production data check (2026-09-04): of
+11 total incidents with outcome=="fix_merged", only 6 have this field --
+the other 5 are ErrorClarityAgent's observability PRs (added error
+handling/logging when confidence was too low to attempt a real fix), which
+don't produce an "affected file" the way a diagnosis does. Those 5 have
+their own separate ground truth (clarity_pr_url) and their own separate
+eval -- see scripts/export_error_clarity_regression_dataset.py /
+scripts/eval_error_clarity_regression.py. Don't merge the two datasets;
+they test different agents against different notions of "correct."
 
 Real motivation: after any change to DiagnosisAgent's prompt or logic, there
 was no way to check "did this still find the right file in the incidents it
@@ -21,12 +32,12 @@ running it via `aws ecs execute-command` inside the container -- the DB
 isn't publicly reachable (see infra/agent_platform's security group
 comments).
 
-Output: app/evals/pipeline_regression.jsonl (gitignored -- real incident
+Output: app/evals/diagnosis_regression.jsonl (gitignored -- real incident
 data, same handling as app/evals/golden_dataset.jsonl).
 
 Usage:
-    python scripts/export_pipeline_regression_dataset.py
-    python scripts/export_pipeline_regression_dataset.py --out /tmp/regression.jsonl
+    python scripts/export_diagnosis_regression_dataset.py
+    python scripts/export_diagnosis_regression_dataset.py --out /tmp/regression.jsonl
 """
 from __future__ import annotations
 
@@ -38,7 +49,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-_DEFAULT_OUT = Path(__file__).resolve().parent.parent / "app" / "evals" / "pipeline_regression.jsonl"
+_DEFAULT_OUT = Path(__file__).resolve().parent.parent / "app" / "evals" / "diagnosis_regression.jsonl"
 
 
 def _load_merged_incidents() -> list[dict[str, Any]]:

@@ -1,6 +1,11 @@
 """
-Replay every case in app/evals/pipeline_regression.jsonl through the CURRENT
+Replay every case in app/evals/diagnosis_regression.jsonl through the CURRENT
 DiagnosisAgent and check it still finds what it found the first time.
+
+DiagnosisAgent-specific -- see scripts/eval_error_clarity_regression.py for
+the sibling eval covering ErrorClarityAgent's observability PRs, which use a
+different ground truth (which file the merged PR touched, not
+diagnosis_affected_file) and a different notion of "correct."
 
 Real motivation: there was no way to check "did my prompt/logic change to
 DiagnosisAgent break how it diagnoses problems" short of waiting for a new
@@ -34,9 +39,9 @@ Scoring is structural, not exact-match (LLM output isn't deterministic):
   FAIL   - different affected_file, or no file identified this time
 
 Usage:
-    python scripts/eval_pipeline_regression.py
-    python scripts/eval_pipeline_regression.py --dataset /tmp/regression.jsonl
-    python scripts/eval_pipeline_regression.py --json
+    python scripts/eval_diagnosis_regression.py
+    python scripts/eval_diagnosis_regression.py --dataset /tmp/regression.jsonl
+    python scripts/eval_diagnosis_regression.py --json
 """
 from __future__ import annotations
 
@@ -50,7 +55,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-_DEFAULT_DATASET = Path(__file__).resolve().parent.parent / "app" / "evals" / "pipeline_regression.jsonl"
+_DEFAULT_DATASET = Path(__file__).resolve().parent.parent / "app" / "evals" / "diagnosis_regression.jsonl"
 
 CONFIDENCE_TOLERANCE = 0.15
 
@@ -179,7 +184,7 @@ async def _run(cases: list[dict[str, Any]], verbose: bool = True) -> list[dict[s
 
 def _print_report(results: list[dict[str, Any]]) -> None:
     if not results:
-        print("No regression cases found. Run scripts/export_pipeline_regression_dataset.py first.")
+        print("No regression cases found. Run scripts/export_diagnosis_regression_dataset.py first.")
         return
 
     counts = {"PASS": 0, "DRIFT": 0, "FAIL": 0, "ERROR": 0}
