@@ -32,6 +32,8 @@ def _make_agent(**overrides) -> BaseAgent:
     agent._harness_docs = ""
     agent._min_tool_calls_before_answer = 0
     agent._required_tool_names_before_answer = set()
+    agent._must_call_before_answer = None
+    agent._must_call_check = None
     for k, v in overrides.items():
         setattr(agent, k, v)
     return agent

@@ -286,6 +286,8 @@ class TestBaseAgentCheckpointIntegration:
         agent._tracing_ctx = MagicMock(enabled=False)
         agent._min_tool_calls_before_answer = 0  # __new__() skips __init__()'s default
         agent._required_tool_names_before_answer = set()  # same reason
+        agent._must_call_before_answer = None  # same reason
+        agent._must_call_check = None  # same reason
         agent._tools = {
             "dummy": (AsyncMock(return_value="result"), "dummy tool")
         }
@@ -336,6 +338,8 @@ class TestBaseAgentCheckpointIntegration:
         agent._tracing_ctx = MagicMock(enabled=False)
         agent._min_tool_calls_before_answer = 0  # __new__() skips __init__()'s default
         agent._required_tool_names_before_answer = set()  # same reason
+        agent._must_call_before_answer = None  # same reason
+        agent._must_call_check = None  # same reason
         agent._tools = {}
         from app.services.llm import LLMService
         mock_llm = MagicMock(spec=LLMService)

@@ -368,6 +368,20 @@ class DiagnosisAgent(BaseAgent):
         self._required_tool_names_before_answer = {
             "get_file_contents", "search_codebase", "grep_codebase",
         }
+        # Real production bug found via a SWE-bench eval: a diagnosis correctly
+        # identified the actual right file, wrote a detailed, confident
+        # write-up ending in "Status: Diagnosis accepted" -- then never once
+        # called submit_diagnosis. The three-tool set above was satisfied (it
+        # read real code), so the loop happily accepted the free-text answer;
+        # diagnose() then saw self._diagnosis_submitted is still None and
+        # discarded a correct diagnosis as confidence=0.0/escalate=True.
+        self._must_call_before_answer = "submit_diagnosis"  # for the rejection message
+        # A second, deeper layer of the same bug: gating on "was submit_diagnosis
+        # ever called" is satisfied by a REJECTED call too. Check success, not
+        # attempt -- self._diagnosis_submitted is only ever set by
+        # _submit_diagnosis once a submission actually passes grounding. See
+        # _must_call_check's docstring in BaseAgent.__init__.
+        self._must_call_check = lambda: self._diagnosis_submitted is not None
         # Set by the submit_diagnosis tool handler once a submission passes every
         # grounding check. diagnose() reads this after self.run() returns instead
         # of parsing the free-text Answer as JSON -- grounding now gates finalizing

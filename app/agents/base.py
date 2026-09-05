@@ -227,6 +227,35 @@ class BaseAgent:
         # relevant" -- this can. Empty set (default) preserves existing
         # behavior for every agent that doesn't opt in.
         self._required_tool_names_before_answer: set[str] = set()
+        # Opt-in: a single tool that MUST have been called before an answer
+        # is accepted -- distinct from the "any one of these" semantics above.
+        # Real production bug found via a SWE-bench eval: a diagnosis called
+        # get_file_contents/search_codebase/grep_codebase (satisfying the set
+        # above), reasoned correctly, and named the actual right file -- then
+        # wrote it all as free-text prose in its Answer instead of calling
+        # submit_diagnosis, mimicking an "accepted" response ("Status:
+        # Diagnosis accepted...") without ever invoking the tool that finalizes
+        # one. The set-based check above can't catch this: "called some
+        # code-reading tool" and "called the one finalizing tool" are
+        # independent facts, not alternatives to each other. None (default)
+        # preserves existing behavior for every agent that doesn't opt in.
+        # Used for the rejection message text -- see _must_call_check below
+        # for what actually gates.
+        self._must_call_before_answer: str | None = None
+        # Second real bug found one layer deeper, same session: gating on
+        # "was this tool NAME ever in _tools_called" is satisfied by a
+        # REJECTED call too -- a diagnosis called submit_diagnosis once, got
+        # rejected, made two more grep_codebase calls, then wrote another
+        # free-text "the diagnosis has been accepted" answer, which sailed
+        # through because "submit_diagnosis" was already in _tools_called
+        # from the earlier rejected attempt. "Called" and "succeeded" are
+        # different facts; the tool-name check can only ever observe the
+        # former. When set, this predicate is checked INSTEAD of tool-name
+        # membership -- DiagnosisAgent sets it to check
+        # self._diagnosis_submitted is not None, which is only ever set by a
+        # submission that actually passed grounding. None (default) falls
+        # back to the tool-name check above, preserving existing behavior.
+        self._must_call_check: Callable[[], bool] | None = None
 
     @staticmethod
     def _load_harness_docs() -> str:
@@ -367,9 +396,34 @@ class BaseAgent:
                     required_unmet = bool(
                         self._required_tool_names_before_answer
                     ) and not (_tools_called & self._required_tool_names_before_answer)
-                    if count_unmet or required_unmet:
+                    # Independent of required_unmet above: "called some tool from
+                    # this set" and "called this ONE specific tool" are separate
+                    # facts. A model can satisfy required_unmet (real code-reading
+                    # happened) while still never calling the one tool that
+                    # actually finalizes an answer — see _must_call_before_answer's
+                    # docstring in __init__ for the real case this was found from.
+                    # Predicate check (when set) supersedes tool-name membership --
+                    # a REJECTED call still adds the name to _tools_called, so
+                    # name-membership alone can't distinguish "called" from
+                    # "succeeded." See _must_call_check's docstring in __init__.
+                    if self._must_call_check is not None:
+                        must_call_unmet = not self._must_call_check()
+                    else:
+                        must_call_unmet = bool(
+                            self._must_call_before_answer
+                        ) and self._must_call_before_answer not in _tools_called
+                    if count_unmet or required_unmet or must_call_unmet:
                         if i < MAX_ITERATIONS:
-                            if required_unmet:
+                            if must_call_unmet:
+                                step.observation = (
+                                    f"REJECTED: you must successfully call "
+                                    f"{self._must_call_before_answer or 'the required tool'} "
+                                    f"to finalize — writing your conclusion as answer text is not "
+                                    f"enough, even if it looks complete, and a call that was itself "
+                                    f"rejected doesn't count as success. Call "
+                                    f"{self._must_call_before_answer} now with your findings."
+                                )
+                            elif required_unmet:
                                 step.observation = (
                                     f"REJECTED: you must call at least one of "
                                     f"{sorted(self._required_tool_names_before_answer)} before "
