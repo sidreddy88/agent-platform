@@ -38,6 +38,9 @@ logs/
 docs/interview-prep-*.md
 docs/call-graph-data-structures.md
 
+# Blog drafts — local reference only, not published from this repo
+docs/blog-drafts/
+
 # Internal ops runbook — names the real org/repo, local reference only
 docs/GITHUB_TOKEN_SETUP.md
 
