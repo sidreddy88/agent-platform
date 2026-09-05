@@ -196,6 +196,71 @@ def _extract_prose_symbols(text: str) -> list[str]:
     return list(seen)
 
 
+# Matches a full V8 stack-frame line in one shot, rather than finding the path
+# and then regex-searching backward over an arbitrary-width window for a
+# function name -- an earlier version of this did exactly that with a fixed
+# 40-char lookback, which was fragile: whether "at fnName (" fell inside or
+# outside that window depended on how much text (e.g. a long function name,
+# or "async ") sat between "at" and the path, giving inconsistent results for
+# semantically identical frames. One regex covers every real shape seen in
+# this app's traces:
+#   "at fnName (/app/path.js:L:C)"        -> function = fnName
+#   "at async fnName (/app/path.js:L:C)"  -> function = fnName
+#   "at async /app/path.js:L:C"           -> function = None (no parens at all)
+#   "/app/path.js:L"  (bare throw-site line, no "at" prefix)  -> function = None
+# Anchored on the literal "/app/" prefix -- that's what lets us tell "this is
+# the container's own code" apart from "this happens to look like a path in
+# some unrelated log text".
+_STACK_FRAME_RE = re.compile(
+    r"(?:at\s+(?:async\s+)?(?:([A-Za-z_$][\w$.]*)\s*\(\s*)?)?"
+    r"/app/([\w./\-]+\.(?:js|mjs|cjs|ts|tsx))\b"
+)
+
+
+def extract_stack_trace_paths(text: str) -> list[dict]:
+    """Deterministically pull this app's own file paths out of raw error text.
+
+    Real motivation: 3 of 4 real incidents checked this session already had
+    the exact file (and often the function) sitting verbatim in the stack
+    trace -- e.g. "at checkPrankForInterview (/app/constants/prankCheckerMain.js:296:44)".
+    Calling search_codebase (an embedding search with a similarity threshold)
+    to "find" a file that's already spelled out in the input is a wasted
+    ReAct-loop turn at best, and a miss at worst if the vector index is stale
+    or the match scores just under min_score. This finds those cases directly,
+    with zero external dependency (no RAG, no embeddings) and no similarity
+    threshold to miss.
+
+    Filters out /app/node_modules/** -- those paths match the same "/app/"
+    prefix (the container installs dependencies under /app too) but are
+    vendored library code, not this app's own code, and diagnosing a bug
+    "in" a dependency's internals is never the right answer here.
+
+    Order is preserved (first occurrence = closest to the actual throw site
+    in a typical V8 trace dump) and paths are deduped, keeping the first
+    associated function name seen for each.
+
+    Returns: [{"file": "routes/api/image.js", "function": "someFn" | None}, ...]
+    Empty list is the normal, expected result for traceless input (e.g. a
+    bare DeprecationWarning) -- callers should fall back to search_codebase/
+    grep_codebase in that case, same as today.
+    """
+    if not text:
+        return []
+    seen: dict[str, str | None] = {}
+    for m in _STACK_FRAME_RE.finditer(text):
+        fn, path = m.group(1), m.group(2)
+        if "node_modules/" in path:
+            continue
+        # Same file can appear twice in one V8 dump -- a bare throw-site line
+        # ("/app/foo.js:296") with no function name, then again in the "at
+        # fnName (/app/foo.js:296:44)" stack frame. Keep the first occurrence
+        # for ordering, but don't let a function-name-less first sighting
+        # permanently blank out a real name a later occurrence provides.
+        if path not in seen or (seen[path] is None and fn is not None):
+            seen[path] = fn
+    return [{"file": path, "function": fn} for path, fn in seen.items()]
+
+
 # Names + evidence phrases that indicate a function has no internal callers
 # (the entry-point case where empty blast_radius is honest). Used by the
 # blast-radius coverage check in `_enforce_grounding`.
@@ -1055,6 +1120,30 @@ class DiagnosisAgent(BaseAgent):
         ]))
         incident_tokens: set[str] = set(_extract_prose_symbols(incident_text))
 
+        # Deterministic fast path: if the raw error text already names this
+        # app's own file(s) directly (the common case for uncaught Node.js
+        # exceptions), skip the embedding-search step entirely and tell the
+        # model to read them directly. See extract_stack_trace_paths's
+        # docstring for why this beats search_codebase for this subset.
+        detected_paths = extract_stack_trace_paths(event.description or "")
+        if self._local_repo.ready:
+            detected_paths = [p for p in detected_paths if self._local_repo.file_exists(p["file"])]
+        stack_trace_section = ""
+        if detected_paths:
+            lines = [
+                f"  - {p['file']}" + (f" (function: {p['function']})" if p["function"] else "")
+                for p in detected_paths
+            ]
+            stack_trace_section = (
+                "\nSTACK TRACE FILE DETECTION (deterministic, extracted from the error text "
+                "and confirmed to exist in the repo — not a search result):\n"
+                + "\n".join(lines) + "\n"
+                "These are real, confirmed paths. In step 5, call get_file_contents on these "
+                "FIRST instead of search_codebase — do not spend a step searching for a file "
+                "you already have. Only fall back to search_codebase if none of these turn out "
+                "to contain the actual bug.\n"
+            )
+
         log_group_warning = ""
         if not log_group:
             logger.warning("DiagnosisAgent: log_group missing from incident metadata — log-based steps will produce no results")
@@ -1098,7 +1187,7 @@ INCIDENT:
   occurrences_24h : {incident.occurrences_24h}
   blast_radius    : {incident.blast_radius}
   triage_reasoning: {incident.triage_reasoning}
-{log_group_warning}{prior_section}
+{log_group_warning}{prior_section}{stack_trace_section}
 STEPS — call tools in this exact order. Do not skip steps 1–3 unless log_group is missing.
 Complete each step before moving to the next.
 
@@ -1120,9 +1209,14 @@ Complete each step before moving to the next.
    Bad:  "TypeError undefined cannot read property"
 
 5. search_codebase — find candidate file paths
-   Use specific terms from the stack trace (function names, file paths) found in step 1,
-   NOT just the raw error type. If the stack trace shows `insertMany appmasterreferrals`,
-   query that. If it shows `classifyFields`, query that function name.
+   If STACK TRACE FILE DETECTION above listed any paths, skip search_codebase for
+   this step — call get_file_contents directly on each listed path instead. Only
+   fall back to the search below if none of those files turn out to be relevant.
+
+   Otherwise, use specific terms from the stack trace (function names, file paths)
+   found in step 1, NOT just the raw error type. If the stack trace shows
+   `insertMany appmasterreferrals`, query that. If it shows `classifyFields`,
+   query that function name.
 
    If there is NO stack trace (e.g. a DeprecationWarning, startup warning, or config
    warning), find the call site with an exact search:
