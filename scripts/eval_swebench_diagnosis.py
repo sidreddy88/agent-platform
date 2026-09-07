@@ -9,7 +9,7 @@ across 12 real open-source repos) is a credible, third-party, non-self-graded
 answer to "does this bug-localization approach generalize beyond one app."
 
 Deliberately localization-only, not full fix+sandbox: FixGenerationAgent has
-no dry-run mode (same constraint as scripts/eval_pipeline_regression.py) AND
+no dry-run mode (same constraint as scripts/eval_diagnosis_regression.py) AND
 is hardcoded end-to-end to one Node/npm/Jest target app (owner/repo, live
 branch tip, three literal source patches, Jest-shaped failure parsing) --
 supporting arbitrary Python repos there is a separate, much bigger piece of
@@ -17,13 +17,13 @@ work. This only asks: did DiagnosisAgent's affected_file (+ secondary
 targets) land on a file the real PR actually changed?
 
 Real Anthropic + GitHub API calls per instance (Sonnet), same "live test"
-convention as eval_rag.py / eval_pipeline_regression.py -- not part of the
+convention as eval_rag.py / eval_diagnosis_regression.py -- not part of the
 mocked pytest suite. Run manually, expect real cost/time: cloning a real
 open-source repo per instance, then a full DiagnosisAgent ReAct loop.
 
 Each instance is checked out at its own pinned base_commit via
 LocalRepoService(pinned_sha=...) -- the exact mechanism built for
-eval_pipeline_regression.py, reused here across arbitrary repos instead of
+eval_diagnosis_regression.py, reused here across arbitrary repos instead of
 one fixed target app (DiagnosisAgent now takes owner=/repo= overrides for
 this -- see diagnosis.py).
 
