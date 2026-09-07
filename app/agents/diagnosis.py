@@ -26,6 +26,11 @@ Flow:
 Confidence gate (CONFIDENCE_THRESHOLD = 0.70):
   ≥ 0.70 → status = FIXING (proceed to Fix Generation Agent — Week 3)
   < 0.70 → status = AWAITING_APPROVAL (human escalation via Slack)
+
+Any change to this file (or base.py's shared ReAct loop) is gated by
+.github/workflows/diagnosis-regression.yml — the full 62-case golden
+dataset (see scripts/eval_diagnosis_full_regression.py) must still pass
+in full before a PR touching this file can merge.
 """
 from __future__ import annotations
 
