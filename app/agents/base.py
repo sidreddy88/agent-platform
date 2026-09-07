@@ -256,6 +256,16 @@ class BaseAgent:
         # submission that actually passed grounding. None (default) falls
         # back to the tool-name check above, preserving existing behavior.
         self._must_call_check: Callable[[], bool] | None = None
+        # Opt-in: per-agent turn budget, overriding the module-level default.
+        # MAX_ITERATIONS=10 was set in the very first commit of this project and
+        # never re-justified since. A real turn-by-turn trace + a handful of
+        # SWE-bench spot checks found the correction-cycling phase (after the
+        # grounding gate first rejects a submission) regularly needs more than
+        # 10 rounds on unfamiliar code -- 3 of 4 previously-failing instances
+        # recovered when raised to 15. Scoped per-agent, not global: only
+        # DiagnosisAgent has evidence it needs more room; every other agent
+        # keeps the original default unless it opts in too.
+        self._max_iterations: int = MAX_ITERATIONS
 
     @staticmethod
     def _load_harness_docs() -> str:
@@ -359,7 +369,7 @@ class BaseAgent:
             _tool_calls_made = 0
             _tools_called: set[str] = set()
 
-            for i in range(1, MAX_ITERATIONS + 1):
+            for i in range(1, self._max_iterations + 1):
                 # Compress conversation history if the previous call's token count
                 # reached 70% of the context window (checked before every call
                 # except the very first — no usage data available yet on i==1).
@@ -413,7 +423,7 @@ class BaseAgent:
                             self._must_call_before_answer
                         ) and self._must_call_before_answer not in _tools_called
                     if count_unmet or required_unmet or must_call_unmet:
-                        if i < MAX_ITERATIONS:
+                        if i < self._max_iterations:
                             if must_call_unmet:
                                 step.observation = (
                                     f"REJECTED: you must successfully call "
@@ -456,7 +466,7 @@ class BaseAgent:
                         # trusting a claim with zero real evidence behind it.
                         step.observation = (
                             f"Never verified any claim via a real tool call after "
-                            f"{MAX_ITERATIONS} attempts."
+                            f"{self._max_iterations} attempts."
                         )
                         steps.append(step)
                         break
@@ -486,7 +496,7 @@ class BaseAgent:
             return AgentResult(
                 answer="I was unable to find an answer within the allowed number of steps.",
                 steps=steps,
-                iterations=MAX_ITERATIONS,
+                iterations=self._max_iterations,
             )
 
         except Exception as exc:

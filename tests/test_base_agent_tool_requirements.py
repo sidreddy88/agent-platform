@@ -16,7 +16,7 @@ of the count floor.
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -34,6 +34,8 @@ def _make_agent(**overrides) -> BaseAgent:
     agent._required_tool_names_before_answer = set()
     agent._must_call_before_answer = None
     agent._must_call_check = None
+    from app.agents.base import MAX_ITERATIONS
+    agent._max_iterations = MAX_ITERATIONS
     for k, v in overrides.items():
         setattr(agent, k, v)
     return agent
@@ -106,15 +108,16 @@ async def test_required_tool_names_fails_closed_after_max_iterations():
     """Never calling a required tool across every allowed iteration must fall
     through to the same fail-closed path the count floor already uses — not
     silently accept the answer on the last try."""
-    agent = _make_agent()
+    # per-agent _max_iterations override (set at construction, not read from the
+    # module constant per-iteration) — patch the instance attribute directly.
+    agent = _make_agent(_max_iterations=3)
     agent._required_tool_names_before_answer = {"get_file_contents"}
     # Always tries to answer immediately, never calls any tool.
     agent._llm.complete = AsyncMock(return_value="Thought: done\nAnswer: never verified")
     agent._llm.last_input_tokens = 10
     agent._llm.last_output_tokens = 10
 
-    with patch("app.agents.base.MAX_ITERATIONS", 3):
-        result = await agent.run("diagnose this")
+    result = await agent.run("diagnose this")
 
     assert result.answer != "never verified"
     assert "unable to find an answer" in result.answer.lower()
