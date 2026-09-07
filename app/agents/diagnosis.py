@@ -422,6 +422,15 @@ class DiagnosisAgent(BaseAgent):
         # see LocalRepoService(pinned_sha=...).
         self._local_repo = local_repo or LocalRepoService(self._owner, self._repo)
         self._register_tools()
+        # Raised from BaseAgent's default of 10 -- a turn-by-turn trace + SWE-bench
+        # spot checks found the correction-cycling phase (after the grounding gate
+        # first rejects a submission) regularly needs more than 10 rounds on
+        # unfamiliar code: 3 of 4 previously-failing instances recovered when
+        # raised to 15 (pytest-10051 needed 11, astropy-13236 and sympy-11618 used
+        # the full 15; django-10554 still failed even at 15 -- its real fix spans
+        # 2 files, a different problem more turns alone doesn't solve). Scoped to
+        # this agent only: no evidence yet that any other agent needs more room.
+        self._max_iterations = 15
         # A real production diagnosis once answered in a single LLM call
         # with zero tool calls, fabricating file/schema content it never
         # looked at (_enforce_grounding() catches some shapes of this

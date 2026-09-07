@@ -288,6 +288,8 @@ class TestBaseAgentCheckpointIntegration:
         agent._required_tool_names_before_answer = set()  # same reason
         agent._must_call_before_answer = None  # same reason
         agent._must_call_check = None  # same reason
+        from app.agents.base import MAX_ITERATIONS
+        agent._max_iterations = MAX_ITERATIONS  # same reason
         agent._tools = {
             "dummy": (AsyncMock(return_value="result"), "dummy tool")
         }
@@ -340,6 +342,8 @@ class TestBaseAgentCheckpointIntegration:
         agent._required_tool_names_before_answer = set()  # same reason
         agent._must_call_before_answer = None  # same reason
         agent._must_call_check = None  # same reason
+        from app.agents.base import MAX_ITERATIONS
+        agent._max_iterations = MAX_ITERATIONS  # same reason
         agent._tools = {}
         from app.services.llm import LLMService
         mock_llm = MagicMock(spec=LLMService)
