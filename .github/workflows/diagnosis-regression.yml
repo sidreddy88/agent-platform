@@ -1,0 +1,54 @@
+name: DiagnosisAgent Regression
+
+# Hard regression gate for DiagnosisAgent: any PR touching diagnosis.py or
+# base.py (the shared ReAct loop DiagnosisAgent inherits from) must replay
+# the full 62-case golden dataset (6 real production incidents + 56
+# SWE-bench Verified instances known to pass today) and get every single
+# one right before merging. See scripts/eval_diagnosis_full_regression.py
+# for why 56, not the full 100-instance sample, and why PASS is the only
+# acceptable verdict here.
+#
+# Unlike ci.yml, this makes real Anthropic + GitHub API calls -- real cost,
+# real runtime (expect over an hour for the full 62 cases). That's why it's
+# scoped to only the files that can actually change DiagnosisAgent's
+# behavior, not every PR.
+
+on:
+  pull_request:
+    paths:
+      - "app/agents/diagnosis.py"
+      - "app/agents/base.py"
+
+concurrency:
+  group: diagnosis-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: full golden-dataset replay (62 cases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run full DiagnosisAgent regression gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # NOT the built-in secrets.GITHUB_TOKEN -- that's scoped to this repo
+          # only, and the 6 production cases need to clone the actual target
+          # app repo. Same fine-grained PAT already used in prod; see
+          # docs/GITHUB_TOKEN_SETUP.md. (The 56 SWE-bench cases are all public
+          # repos and would work with either token, or none at all.)
+          GITHUB_TOKEN: ${{ secrets.DIAGNOSIS_REGRESSION_GITHUB_PAT }}
+          FIX_TARGET_REPO: ${{ vars.FIX_TARGET_REPO }}
+        run: python scripts/eval_diagnosis_full_regression.py
