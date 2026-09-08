@@ -103,8 +103,16 @@ class LLMService:
         # the attributes they care about -- _temperature didn't exist before
         # this change, so a direct attribute access breaks them with an
         # AttributeError instead of falling back to "unset".
+        # extra_body, not a direct kwarg: anthropic>=1.0 (the SDK's newest
+        # major version, which requirements.txt's unbounded ">=0.40.0" pin
+        # allows -- caught this in CI, not locally, since local stayed on an
+        # older cached 0.x install) removed `temperature` from
+        # messages.create()'s typed signature entirely. extra_body is the
+        # SDK's own documented escape hatch for exactly this -- passes
+        # through to the raw request body regardless of SDK version, so this
+        # works on both the old and new major version without pinning either.
         if getattr(self, "_temperature", None) is not None:
-            kwargs["temperature"] = self._temperature
+            kwargs["extra_body"] = {"temperature": self._temperature}
 
         async def _call() -> str:
             response = await self._client.messages.create(**kwargs)
