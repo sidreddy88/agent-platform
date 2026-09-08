@@ -98,7 +98,12 @@ class LLMService:
         }
         if system:
             kwargs["system"] = system
-        if self._temperature is not None:
+        # getattr, not self._temperature directly: several existing tests
+        # construct LLMService via __new__ (bypassing __init__) and only set
+        # the attributes they care about -- _temperature didn't exist before
+        # this change, so a direct attribute access breaks them with an
+        # AttributeError instead of falling back to "unset".
+        if getattr(self, "_temperature", None) is not None:
             kwargs["temperature"] = self._temperature
 
         async def _call() -> str:
