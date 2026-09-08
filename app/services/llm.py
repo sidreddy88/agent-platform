@@ -72,9 +72,14 @@ async def _retry_with_backoff(call_fn):
 
 
 class LLMService:
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, temperature: float | None = None) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._model = model or MODEL
+        # None (default) omits temperature entirely, preserving the Anthropic
+        # API's own default (1.0) -- unchanged behavior for every existing
+        # caller. Callers that need reproducible output (e.g. TriageAgent,
+        # for regression-eval stability) pass an explicit value.
+        self._temperature = temperature
         # Updated after every complete() call — read by BaseAgent for checkpointing.
         self.last_input_tokens: int = 0
         self.last_output_tokens: int = 0
@@ -93,6 +98,8 @@ class LLMService:
         }
         if system:
             kwargs["system"] = system
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
 
         async def _call() -> str:
             response = await self._client.messages.create(**kwargs)

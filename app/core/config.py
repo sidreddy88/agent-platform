@@ -158,6 +158,14 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        # Ignore env vars .env carries that aren't part of the app's own
+        # settings schema (e.g. TOGETHER_API_KEY / OPENAI_API_KEY-adjacent
+        # script-only credentials read directly by one-off scripts under
+        # scripts/, not through Settings). Without this, pydantic-settings'
+        # default strict mode fails Settings() construction on ANY unlisted
+        # .env key -- which broke the entire app (35 test-collection errors)
+        # the moment a fine-tuning script's credential was added to .env.
+        extra = "ignore"
 
 
 settings = Settings()
