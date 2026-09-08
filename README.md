@@ -176,7 +176,7 @@ infra/             # Terraform for ECS Fargate + Cloudflare + SNS
 scripts/           # measure_mttr.py, eval_rag.py, triage_replay.py
 targets/           # Fetched from S3 at container startup (scripts/fetch_target_harness.py) —
                    # empty on a fresh clone, not committed to this repo
-tests/             # pytest test suite (871 tests, mocked — no live API calls)
+tests/             # pytest test suite (881 tests, mocked — no live API calls)
 docs/              # architecture notes
 ```
 
@@ -209,6 +209,8 @@ Notes from building this — debugging stories, architecture posts, retrieval de
 - **Code Graph in Production** — [We Built a Call Graph Because Our Agent Kept Breaking Callers It Never Knew About](https://remediatelabs.io/blog/code-graph-call-graph-reverse-index) · [Five Data Structures for a Call Graph](https://remediatelabs.io/blog/code-graph-data-structures)
 - **Code RAG in Production** (10 parts) — [What Actually Gets Indexed](https://remediatelabs.io/blog/code-rag-what-gets-indexed) · [Hybrid Search — Closing the Vocabulary Gap](https://remediatelabs.io/blog/code-rag-hybrid-search) · [Cross-Encoder Re-Ranking — From Top-3 to Rank 1](https://remediatelabs.io/blog/code-rag-cross-encoder-reranking)
 - **Agent Cost Engineering** — [Token Cost Engineering in Agent Loops](https://remediatelabs.io/blog/prompt-caching-react-loops) (prompt caching + state pruning)
+- **Fine-Tuning** — [Fine-Tuning a Distillation Model on a Golden Dataset I Had to Build First](https://remediatelabs.io/blog/fine-tuning-distillation-model/) (TriageAgent distillation via LoRA)
+- **Evals** — [The Eval That Couldn't Fail — and the One I Had to Break Three Times](https://remediatelabs.io/blog/eval-couldnt-fail/) (regression-eval rigor + a real fabrication bug)
 
 ---
 
