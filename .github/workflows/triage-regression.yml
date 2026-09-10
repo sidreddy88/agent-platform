@@ -11,15 +11,21 @@ name: TriageAgent Regression
 #
 # Unlike ci.yml, this makes real Anthropic API calls -- real cost, but much
 # cheaper/faster than the sibling DiagnosisAgent gate (diagnosis-regression.yml):
-# no git checkout, no GitHub API, one Haiku call per case. Expect low
-# single-digit minutes, not the hour-plus Diagnosis's Sonnet-plus-tool-loop
-# gate needs.
+# no git checkout of a second repo, no GitHub API, one Haiku call per case.
+# Expect low single-digit minutes, not the hour-plus Diagnosis's
+# Sonnet-plus-tool-loop gate needs.
+#
+# The path check is done INSIDE the job (via the "Check whether relevant
+# files changed" step below), not as a top-level `on.pull_request.paths`
+# filter -- same reasoning as diagnosis-regression.yml: this job is a
+# required status check in main's branch protection, and a trigger-level
+# path filter would leave the check permanently pending (and merges
+# blocked) on any PR that doesn't touch these files. Running the job
+# unconditionally and skipping the expensive replay internally keeps the
+# check always reporting, so requiring it doesn't strand unrelated PRs.
 
 on:
   pull_request:
-    paths:
-      - "app/agents/triage.py"
-      - "app/agents/base.py"
 
 concurrency:
   group: triage-regression-${{ github.ref }}
@@ -33,17 +39,36 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whether relevant files changed
+        id: filter
+        run: |
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" \
+              | grep -qE '^app/agents/(triage|base)\.py$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Python
+        if: steps.filter.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: "pip"
 
       - name: Install dependencies
+        if: steps.filter.outputs.run == 'true'
         run: pip install -r requirements-dev.txt
 
       - name: Run full TriageAgent regression gate
+        if: steps.filter.outputs.run == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python scripts/eval_triage_full_regression.py
+
+      - name: Skipped -- no relevant files changed
+        if: steps.filter.outputs.run == 'false'
+        run: echo "No changes to triage.py/base.py in this PR -- skipping the 80-case replay."
