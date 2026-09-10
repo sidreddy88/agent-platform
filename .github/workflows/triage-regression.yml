@@ -2,10 +2,12 @@ name: TriageAgent Regression
 
 # Hard regression gate for TriageAgent: any PR touching triage.py or base.py
 # (the shared ReAct loop TriageAgent inherits from) must replay the 80-case
-# filtered gate set (triage_regression_gate.jsonl) and get every single one
-# right before merging. See scripts/eval_triage_full_regression.py for why
-# this is a filtered subset, not the full 114-case held-out set, and the
-# PASS-only scoring rationale.
+# filtered gate set (triage_regression_gate.jsonl) and stay within its
+# noise-floor threshold (MAX_NONPASS_RATE, currently 6%) before merging.
+# See scripts/eval_triage_full_regression.py for why this is a threshold,
+# not a literal 100%-pass bar -- repeated real runs showed a small,
+# rotating set of boundary cases flip regardless of code changes, which a
+# zero-tolerance gate can't distinguish from an actual regression.
 #
 # Unlike ci.yml, this makes real Anthropic API calls -- real cost, but much
 # cheaper/faster than the sibling DiagnosisAgent gate (diagnosis-regression.yml):
