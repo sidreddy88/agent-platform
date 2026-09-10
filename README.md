@@ -11,7 +11,7 @@
 When a production error fires a CloudWatch alarm, the platform's pipeline:
 
 1. **Detects** the alarm via SNS → HTTPS webhook (push-based; zero polling load on the production server).
-2. **Triages** the event into real / noise / duplicate at P0–P3 severity using a Haiku-class classifier validated against a 100-case golden dataset.
+2. **Triages** the event into real / noise / duplicate at P0–P3 severity using a Haiku-class classifier validated against a 575-case golden dataset (461 train / 114 held-out), CI-gated on a noise-floor threshold rather than a literal 100%-pass bar.
 3. **Diagnoses** the root cause with a Sonnet-class agent that grounds structured fields (affected file/function, secondary fixes) against the actual repo via GitHub Code Search.
 4. **Generates a fix** — writes a patch, runs it in a Docker sandbox against the real test suite, retries up to 3× on failure.
 5. **Self-critiques** the fix, opens a GitHub PR, and queues the merge for human approval if HIGH/CRITICAL.
@@ -24,7 +24,7 @@ It is also a research substrate: every LLM call and tool execution is captured a
 
 | Metric | Value | Source |
 |---|---|---|
-| Merged PRs | 11 / 11 attempted | `GET /agents/pr-stats` |
+| Merged PRs | 11 | `GET /agents/pr-stats` |
 | Agent pipeline time | ~6 min per incident | `GET /agents/pr-stats` |
 | Avg MTTD | 75.8h | `GET /agents/pr-stats` |
 | Avg MTTR | 32 min | `GET /agents/pr-stats` |
@@ -198,11 +198,13 @@ docs/              # architecture notes
 
 **Approval gate for HIGH/CRITICAL.** Configurable risk threshold; rejections are logged as RLHF preference pairs.
 
+**LLM regression gates need a noise floor, not zero tolerance.** TriageAgent's CI gate initially required every one of ~80 held-out cases to match its recorded label exactly. Real repeated runs showed a different ~2-4% of cases flip on any given run — even at `temperature=0.0` — with no fixed "bad" subset to exclude down to zero. Fixed by gating on a 6% noise-floor threshold instead of a literal 100% bar.
+
 ---
 
 ## Engineering blog
 
-Notes from building this — debugging stories, architecture posts, retrieval design. 17 posts across 5 series; a few representative ones below, full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
+Notes from building this — debugging stories, architecture posts, retrieval design. 19 posts across 7 series; a few representative ones below, full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
 
 - **Agent Debugging** — [Why My AI Agent Kept Adding Null Checks Instead of Fixing the Bug](https://remediatelabs.io/blog/symptom-fix-antipattern) (producer/consumer routing) · [Why My AI Agent Cited a File That Never Existed](https://remediatelabs.io/blog/fabricated-file-citation) (fabrication under a code-reading requirement)
 - **RAG Learnings** — [Why the Same Bug Kept Creating New Incidents](https://remediatelabs.io/blog/rag-dedup-failure) (four-failure-mode dedup bug) · [RAG Finds the Candidate. The Live Store Confirms the Truth.](https://remediatelabs.io/blog/rag-index-vs-live-store) (search index vs source of truth)
