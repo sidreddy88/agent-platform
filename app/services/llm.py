@@ -72,9 +72,14 @@ async def _retry_with_backoff(call_fn):
 
 
 class LLMService:
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, temperature: float | None = None) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._model = model or MODEL
+        # None (default) omits temperature entirely, preserving the Anthropic
+        # API's own default (1.0) -- unchanged behavior for every existing
+        # caller. Callers that need reproducible output (e.g. TriageAgent,
+        # for regression-eval stability) pass an explicit value.
+        self._temperature = temperature
         # Updated after every complete() call — read by BaseAgent for checkpointing.
         self.last_input_tokens: int = 0
         self.last_output_tokens: int = 0
@@ -93,6 +98,21 @@ class LLMService:
         }
         if system:
             kwargs["system"] = system
+        # getattr, not self._temperature directly: several existing tests
+        # construct LLMService via __new__ (bypassing __init__) and only set
+        # the attributes they care about -- _temperature didn't exist before
+        # this change, so a direct attribute access breaks them with an
+        # AttributeError instead of falling back to "unset".
+        # extra_body, not a direct kwarg: anthropic>=1.0 (the SDK's newest
+        # major version, which requirements.txt's unbounded ">=0.40.0" pin
+        # allows -- caught this in CI, not locally, since local stayed on an
+        # older cached 0.x install) removed `temperature` from
+        # messages.create()'s typed signature entirely. extra_body is the
+        # SDK's own documented escape hatch for exactly this -- passes
+        # through to the raw request body regardless of SDK version, so this
+        # works on both the old and new major version without pinning either.
+        if getattr(self, "_temperature", None) is not None:
+            kwargs["extra_body"] = {"temperature": self._temperature}
 
         async def _call() -> str:
             response = await self._client.messages.create(**kwargs)

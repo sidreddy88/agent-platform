@@ -120,7 +120,14 @@ class TriageAgent(BaseAgent):
         store=None,
         llm: LLMService | None = None,
     ) -> None:
-        super().__init__(llm=llm or LLMService(model=HAIKU_MODEL))
+        # temperature=0.0: this classification has one right answer given the
+        # facts (decision + severity, not open-ended reasoning), and running
+        # the regression eval found real sample-to-sample drift at the
+        # default temperature -- 15/108 held-out cases moved off their
+        # original label on a pure replay, zero code changes. Pinning this
+        # is the actual fix; loosening the regression gate's pass bar
+        # instead would just be tolerating noise, not removing it.
+        super().__init__(llm=llm or LLMService(model=HAIKU_MODEL, temperature=0.0))
         self._aws = aws or AWSService()
         self._store = store or _default_store
         self._register_tools()
