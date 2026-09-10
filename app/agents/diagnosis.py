@@ -588,17 +588,28 @@ class DiagnosisAgent(BaseAgent):
         async def _get_file_contents(file_path: str) -> str:
             """Fetch the full source of a file from the target repo.
 
-            When self._local_repo is pinned to a historical SHA (replay/eval
-            tooling), reads from that pinned worktree instead of the GitHub API —
-            get_file_contents defaults to ref="main" (github.py), i.e. the live
-            default branch, which is wrong for a pinned replay by construction.
-            Same bug class as _symbol_exists_in_repo's pinned-mode fix.
+            Prefers the local repo clone whenever it's ready — covers both
+            pinned replay/eval (the pre-fix historical SHA) and live diagnosis
+            (a clone of the repo's actual current state). This sidesteps
+            get_file_contents's hardcoded ref="main" (github.py), which 404s
+            against any repo whose real default branch isn't main — confirmed
+            live against the target app, whose default branch is master, where
+            every get_file_contents call 404'd for an entire run while
+            grep_codebase (which always reads the local clone, pinned or not)
+            kept working against the same file. Falls back to the GitHub API
+            only if the local read fails or no clone is ready. Same bug class
+            as _symbol_exists_in_repo's pinned-mode fix, now widened to cover
+            live mode too instead of only pinned replay.
             """
             try:
                 p = file_path.lstrip("/")
-                if self._local_repo.pinned and self._local_repo.ready:
-                    content = self._local_repo.read_file(p)
-                else:
+                content = None
+                if self._local_repo.ready:
+                    try:
+                        content = self._local_repo.read_file(p)
+                    except Exception:
+                        content = None
+                if content is None:
                     content, _ = await github.get_file_contents(owner, repo, p)
                 if len(content) > 12000:
                     content = (
