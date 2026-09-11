@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 
 from app.agents.code_review import CodeReviewAgent
@@ -35,6 +36,7 @@ from app.services.alerting import Alert, alerting_service
 from app.services.alerting import Severity as AlertSeverity
 from app.services.approvals import RiskLevel, approval_service
 from app.services.circuit_breaker import CircuitOpenError, circuit_breaker_registry
+from app.services.dedup_metrics import dedup_metrics
 from app.services.dod_checker import dod_checker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
@@ -410,15 +412,18 @@ class IncidentLoop:
         # ── Layer 1: open PR dedup gate ───────────────────────────────
         # Drop if an open PR already exists for same error_type + service + description.
         if event.error_type and event.service:
+            _t0 = time.perf_counter()
             existing_pr = incident_store.get_open_pr_for_error(
                 event.error_type, event.service, event.description
             )
+            dedup_metrics.record_latency("layer1_sql", (time.perf_counter() - _t0) * 1000)
             if existing_pr:
                 logger.info(
                     "[IncidentLoop] Dropping %s (%s / %s) — open PR already exists: %s",
                     event.id, event.error_type, event.service, existing_pr,
                 )
                 self._dedup_stats["sql_dedup"] += 1
+                dedup_metrics.record_outcome("sql_dedup")
                 return
 
         # ── Layer 2: regression check (SQL) ──────────────────────────
@@ -426,7 +431,9 @@ class IncidentLoop:
         # the past root cause and fix as context for DiagnosisAgent.
         prior_context: str | None = None
         if event.error_type and event.service:
+            _t0 = time.perf_counter()
             past = incident_store.get_resolved_for_error(event.error_type, event.service, event.description)
+            dedup_metrics.record_latency("layer2_sql", (time.perf_counter() - _t0) * 1000)
             if past:
                 prior_context = (
                     f"REGRESSION: This error was previously resolved "
@@ -436,6 +443,7 @@ class IncidentLoop:
                     f"Past PR: {past.pr_url or '(none)'}"
                 )
                 self._dedup_stats["regression"] += 1
+                dedup_metrics.record_outcome("regression")
                 logger.info(
                     "[IncidentLoop] Regression detected for %s/%s — prior: %s",
                     event.error_type, event.service, past.id,
@@ -449,13 +457,17 @@ class IncidentLoop:
         if self._rag is not None:
             try:
                 query = f"{event.title} {event.description[:200]}"
+                _t0 = time.perf_counter()
                 _rag_similar = await self._rag.rerank_incidents(query, min_score=0.80)
+                dedup_metrics.record_latency("layer3_rag_search", (time.perf_counter() - _t0) * 1000)
                 _skip = {
                     IncidentStatus.REJECTED, IncidentStatus.NOISE, IncidentStatus.DUPLICATE,
                     IncidentStatus.FIX_FAILED, IncidentStatus.VERIFICATION_FAILED,
                 }
                 for s in _rag_similar:
+                    _t1 = time.perf_counter()
                     live = incident_store.get(s["incident_id"])
+                    dedup_metrics.record_latency("layer3_live_lookup", (time.perf_counter() - _t1) * 1000)
                     if not live or live.status in _skip:
                         continue
                     if live.status == IncidentStatus.RESOLVED and live.outcome != "fix_merged":
@@ -466,15 +478,19 @@ class IncidentLoop:
                             event.id, live.id, s["score"], live.pr_url,
                         )
                         self._dedup_stats["rag_hard_block"] = self._dedup_stats.get("rag_hard_block", 0) + 1
+                        dedup_metrics.record_outcome("rag_hard_block")
                         return
             except Exception as exc:
-                logger.debug("[IncidentLoop] RAG search skipped: %s", exc)
+                # Previously logged at debug only — a broken RAG call meant this whole
+                # hard-block layer silently stopped firing with no visible signal.
+                logger.warning("[IncidentLoop] RAG dedup search failed (hard-block layer skipped): %s", exc)
+                dedup_metrics.record_outcome("rag_error")
 
         # ── Layer 3b: RAG context (soft hint to TriageAgent) ──────────
         # Only fires when Layer 2 found nothing. Surfaces semantically similar
         # past incidents across all services for the triage LLM.
         if prior_context is None and _rag_similar:
-            lines = ["Semantically similar past incidents (RAG, score ≥ 0.90):"]
+            lines = ["Semantically similar past incidents (RAG, score ≥ 0.80):"]
             for s in _rag_similar:
                 fix_line = f" | Fix: {s['fix_description']}" if s.get("fix_description") else ""
                 lines.append(
@@ -483,6 +499,7 @@ class IncidentLoop:
                 )
             prior_context = "\n".join(lines)
             self._dedup_stats["rag_hit"] += 1
+            dedup_metrics.record_outcome("rag_hit")
             logger.info(
                 "[IncidentLoop] RAG found %d similar incident(s) for %s",
                 len(_rag_similar), event.id,
@@ -490,6 +507,7 @@ class IncidentLoop:
 
         if prior_context is None:
             self._dedup_stats["cold_start"] += 1
+            dedup_metrics.record_outcome("cold_start")
 
         # ── Triage ────────────────────────────────────────────────────
         incident = incident_store.create(event)

@@ -15,6 +15,7 @@ export default defineConfig({
       "/approvals":  { target: "http://127.0.0.1:8000" },
       "/agents":     { target: "http://127.0.0.1:8000" },
       "/monitors":   { target: "http://127.0.0.1:8000" },
+      "/metrics":    { target: "http://127.0.0.1:8000" },
       "/debug":      { target: "http://127.0.0.1:8000" },
       "/performance": { target: "http://127.0.0.1:8000" },
       "/ws/dashboard": {
