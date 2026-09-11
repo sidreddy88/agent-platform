@@ -19,12 +19,13 @@ import { PRsPage } from "./components/PRsPage";
 import { StatsPage } from "./components/StatsPage";
 import { DatasetPage } from "./components/DatasetPage";
 import { DedupHealthPage } from "./components/DedupHealthPage";
+import { TriageHealthPage } from "./components/TriageHealthPage";
 
 function formatTs(d: Date) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "stats" | "dedup" | "logs" | "dataset";
+type Tab = "dashboard" | "events" | "incidents" | "table" | "prs" | "stats" | "dedup" | "triage" | "logs" | "dataset";
 
 interface CBInfo { name: string; state: string; failure_count: number; total_rejected: number }
 
@@ -89,6 +90,7 @@ export default function App() {
             <button style={tabBtn(tab === "prs")}       onClick={() => setTab("prs")}>Agent PRs</button>
             <button style={tabBtn(tab === "stats")}     onClick={() => setTab("stats")}>Stats</button>
             <button style={tabBtn(tab === "dedup")}     onClick={() => setTab("dedup")}>Dedup Gate</button>
+            <button style={tabBtn(tab === "triage")}    onClick={() => setTab("triage")}>Triage Health</button>
             <button style={tabBtn(tab === "logs")}      onClick={() => setTab("logs")}>Logs</button>
             <button style={tabBtn(tab === "dataset")}   onClick={() => setTab("dataset")}>Dataset</button>
           </div>
@@ -153,6 +155,7 @@ export default function App() {
       )}
       {tab === "stats" && <StatsPage />}
       {tab === "dedup" && <DedupHealthPage />}
+      {tab === "triage" && <TriageHealthPage />}
       {datasetVisited && <DatasetPage hidden={tab !== "dataset"} />}
       {tab === "dashboard" && <main style={main}>
         {loading && !data && (

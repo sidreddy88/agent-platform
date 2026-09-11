@@ -43,6 +43,7 @@ from app.services.incident_store import incident_store
 from app.services.llm_gateway import llm_gateway
 from app.services.schema_validator import HandoffValidationError, handoff_validator
 from app.services.session_logger import session_logger
+from app.services.triage_metrics import triage_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -278,11 +279,13 @@ class IncidentLoop:
     # ------------------------------------------------------------------ #
 
     async def _run_triage(self, event: ErrorEvent) -> TriageResult:
+        triage_metrics.record_triage()
         try:
             result = await self._triage.triage(event)
             return handoff_validator.validate_triage(result)
         except HandoffValidationError as exc:
             logger.error("[IncidentLoop] TriageResult schema invalid: %s", exc)
+            triage_metrics.record_fallback("schema_invalid")
             return TriageResult(
                 decision="real", severity="P2", blast_radius="unknown",
                 occurrences_24h=0, duplicate_pr=None,
@@ -290,6 +293,7 @@ class IncidentLoop:
             )
         except Exception as exc:
             logger.error("[IncidentLoop] TriageAgent failed: %s", exc)
+            triage_metrics.record_fallback("exception")
             return TriageResult(
                 decision="real", severity="P2", blast_radius="unknown",
                 occurrences_24h=0, duplicate_pr=None,
