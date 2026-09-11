@@ -186,8 +186,6 @@ docs/              # architecture notes
 
 **Push, not poll.** CloudWatch alarms → SNS → HTTPS webhook. Zero polling load on the production server. Detection latency drops from ~7d (human attention) to single-digit minutes.
 
-**RAG finds candidates. The live store confirms truth.** ChromaDB / pgvector hold index-time snapshots; current incident state lives in Postgres. Blocking decisions always re-read the live store. ([why](https://remediatelabs.io/blog/rag-index-vs-live-store))
-
 **Hard blocks are deterministic, soft hints are LLM-shaped.** Dedup is a hard block (drop the event); regression context is a soft hint (prompt injection). Mixing the two created a four-failure-mode bug. ([walked through here](https://remediatelabs.io/blog/rag-dedup-failure))
 
 **Ground every symbol against the repo.** DiagnosisAgent runs `verify_symbol_in_repo` via GitHub Code Search; a server-side guard re-checks every named function in the parsed output and rejects fabricated camelCase identifiers.
@@ -207,7 +205,7 @@ docs/              # architecture notes
 Notes from building this — debugging stories, architecture posts, retrieval design. 19 posts across 7 series; a few representative ones below, full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
 
 - **Agent Debugging** — [Why My AI Agent Kept Adding Null Checks Instead of Fixing the Bug](https://remediatelabs.io/blog/symptom-fix-antipattern) (producer/consumer routing) · [Why My AI Agent Cited a File That Never Existed](https://remediatelabs.io/blog/fabricated-file-citation) (fabrication under a code-reading requirement)
-- **RAG Learnings** — [Why the Same Bug Kept Creating New Incidents](https://remediatelabs.io/blog/rag-dedup-failure) (four-failure-mode dedup bug) · [RAG Finds the Candidate. The Live Store Confirms the Truth.](https://remediatelabs.io/blog/rag-index-vs-live-store) (search index vs source of truth)
+- **RAG Learnings** — [Why the Same Bug Kept Creating New Incidents](https://remediatelabs.io/blog/rag-dedup-failure) (four-failure-mode dedup bug)
 - **Code Graph in Production** — [We Built a Call Graph Because Our Agent Kept Breaking Callers It Never Knew About](https://remediatelabs.io/blog/code-graph-call-graph-reverse-index) · [Five Data Structures for a Call Graph](https://remediatelabs.io/blog/code-graph-data-structures)
 - **Code RAG in Production** (10 parts) — [What Actually Gets Indexed](https://remediatelabs.io/blog/code-rag-what-gets-indexed) · [Hybrid Search — Closing the Vocabulary Gap](https://remediatelabs.io/blog/code-rag-hybrid-search) · [Cross-Encoder Re-Ranking — From Top-3 to Rank 1](https://remediatelabs.io/blog/code-rag-cross-encoder-reranking)
 - **Agent Cost Engineering** — [Token Cost Engineering in Agent Loops](https://remediatelabs.io/blog/prompt-caching-react-loops) (prompt caching + state pruning)
