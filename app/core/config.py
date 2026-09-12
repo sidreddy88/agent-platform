@@ -115,6 +115,14 @@ class Settings(BaseSettings):
     # Monitor generation — set to true to actually provision CloudWatch alarms on PR merge
     create_monitors: bool = False
 
+    # RAG code indexing — generate an LLM description per function/method chunk
+    # and embed it alongside the code (closes the vocabulary gap between code
+    # vocabulary and incident/error vocabulary). Real Haiku cost per re-index
+    # of a changed file's functions; defaults on since the cost is small
+    # (~$2 for a ~4200-function backend) and it's a real quality improvement,
+    # not experimental. Set false to index code-only, e.g. in constrained CI.
+    rag_enable_function_descriptions: bool = True
+
     # Detection poll interval in seconds. 5 min cadence: rate-limit-safe on
     # CloudWatch Logs (0.003 TPS vs 5 TPS limit) and matches the typical
     # frequency at which a given error class repeats in the target app.

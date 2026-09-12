@@ -88,14 +88,24 @@ def parse_file(path: str) -> tuple["tree_sitter.Tree", str]:
     """
     p = Path(path)
     source_bytes = p.read_bytes()
-    parser = _PARSERS.get(p.suffix)
-    if parser is None:
-        raise ValueError(f"Unsupported extension: {p.suffix}")
-    # parser.parse() produces a Concrete Syntax Tree (CST) — every token is
-    # represented, including whitespace and punctuation. Unlike an AST, nothing
-    # is dropped, which makes error recovery and incremental re-parsing possible.
-    tree = parser.parse(source_bytes)
+    tree = parse_source(source_bytes, p.suffix)
     return tree, source_bytes.decode("utf-8", errors="ignore")
+
+
+def parse_source(source_bytes: bytes, suffix: str) -> "tree_sitter.Tree":
+    """Parse already-read source bytes for the given extension.
+
+    Same parser/grammar selection as parse_file(), but for callers that
+    already have the file's bytes in memory (e.g. the RAG indexer, which
+    reads the file itself for its own hash-check) — avoids a second disk
+    read. Slice source_bytes directly with the returned tree's byte offsets;
+    don't decode first (matches parse_file's own guidance).
+    """
+    parser = _PARSERS.get(suffix)
+    if parser is None:
+        raise ValueError(f"Unsupported extension: {suffix}")
+    # See parse_file() for why this is a CST, not an AST.
+    return parser.parse(source_bytes)
 
 
 def extract_function_definitions(tree: "tree_sitter.Tree", source: str) -> list[FunctionDef]:

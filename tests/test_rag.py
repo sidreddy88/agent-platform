@@ -23,6 +23,9 @@ from app.services.rag import (
     OVERLAP_LINES,
     RAGService,
     _chunk_file,
+    _chunk_js_by_ast,
+    _chunk_markdown_by_headers,
+    _truncate_to_tokens,
 )
 from app.services.vector_store import VectorMatch
 
@@ -114,6 +117,135 @@ class TestChunkFile:
     def test_line_numbers_are_1_indexed(self):
         chunks = _chunk_file("app/foo.py", SAMPLE_CODE, "python")
         assert chunks[0].start_line == 1
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — tree-sitter function/method chunking
+# ---------------------------------------------------------------------------
+
+JS_SAMPLE = '''\
+async function moveAndRemoveFileFromS3(bucket, imageObj) {
+  try {
+    await s3.copyObject({ Bucket: bucket }).promise();
+    await s3.deleteObject({ Bucket: bucket }).promise();
+  } catch (error) {
+    console.log("error", error);
+  }
+}
+
+const slugify = (text) => {
+  return text.toLowerCase().replace(/\\s+/g, "-");
+};
+
+class ImageProcessor {
+  async process(bucket, key) {
+    return await s3.getObject({ Bucket: bucket, Key: key }).promise();
+  }
+}
+
+const NOT_A_FUNCTION = { foo: "bar" };
+'''
+
+
+class TestChunkJsByAst:
+    def _chunks(self):
+        raw = JS_SAMPLE.encode("utf-8")
+        return _chunk_js_by_ast("app/image.js", JS_SAMPLE, raw, "javascript")
+
+    def test_finds_function_declaration(self):
+        names = {c.function_name for c in self._chunks()}
+        assert "moveAndRemoveFileFromS3" in names
+
+    def test_finds_arrow_function_a_regex_extractor_would_miss(self):
+        names = {c.function_name for c in self._chunks()}
+        assert "slugify" in names
+
+    def test_finds_class_method(self):
+        chunks = self._chunks()
+        method = next(c for c in chunks if c.function_name == "process")
+        assert method.kind == "method"
+
+    def test_records_correct_kind_per_function_type(self):
+        by_name = {c.function_name: c.kind for c in self._chunks()}
+        assert by_name["moveAndRemoveFileFromS3"] == "function"
+        assert by_name["slugify"] == "arrow"
+        assert by_name["process"] == "method"
+
+    def test_does_not_treat_plain_object_as_a_function(self):
+        names = {c.function_name for c in self._chunks()}
+        assert "NOT_A_FUNCTION" not in names
+
+    def test_chunk_content_is_exact_function_body(self):
+        chunks = self._chunks()
+        target = next(c for c in chunks if c.function_name == "moveAndRemoveFileFromS3")
+        assert target.content.startswith("async function moveAndRemoveFileFromS3")
+        assert target.content.rstrip().endswith("}")
+
+    def test_returns_empty_list_for_file_with_no_functions(self):
+        raw = b"const x = 1;\nconst y = 2;\n"
+        assert _chunk_js_by_ast("app/const.js", raw.decode(), raw, "javascript") == []
+
+    def test_returns_empty_list_on_unparseable_extension(self):
+        # .foo isn't a JS/TS extension tree-sitter's parser map knows about —
+        # the chunker should degrade to [] (caller falls back to _chunk_file),
+        # not raise.
+        raw = b"whatever"
+        assert _chunk_js_by_ast("app/thing.foo", "whatever", raw, "javascript") == []
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — markdown element (header) chunking
+# ---------------------------------------------------------------------------
+
+MD_SAMPLE = """\
+# Records: SQL for Humans
+
+Intro paragraph.
+
+## Installation
+
+pip install records
+
+## Features
+
+- Fast
+- Simple
+"""
+
+
+class TestChunkMarkdownByHeaders:
+    def test_one_chunk_per_header_section(self):
+        chunks = _chunk_markdown_by_headers("README.md", MD_SAMPLE, "markdown")
+        assert len(chunks) == 3
+
+    def test_section_content_includes_its_own_header(self):
+        chunks = _chunk_markdown_by_headers("README.md", MD_SAMPLE, "markdown")
+        installation = next(c for c in chunks if "Installation" in c.content.splitlines()[0])
+        assert "pip install records" in installation.content
+
+    def test_section_does_not_bleed_into_next_header(self):
+        chunks = _chunk_markdown_by_headers("README.md", MD_SAMPLE, "markdown")
+        installation = next(c for c in chunks if "Installation" in c.content.splitlines()[0])
+        assert "Features" not in installation.content
+
+    def test_returns_empty_list_for_headerless_prose(self):
+        assert _chunk_markdown_by_headers("LICENSE.md", "Just plain prose.\nNo headers here.", "markdown") == []
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — embedding token-limit truncation
+# ---------------------------------------------------------------------------
+
+class TestTruncateToTokens:
+    def test_short_text_is_unchanged(self):
+        assert _truncate_to_tokens("hello world", 100) == "hello world"
+
+    def test_long_text_is_truncated_to_token_budget(self):
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        long_text = "token " * 5000
+        result = _truncate_to_tokens(long_text, 100)
+        assert len(enc.encode(result)) <= 100
 
 
 # ---------------------------------------------------------------------------
