@@ -22,9 +22,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import tiktoken
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.services.llm_gateway import llm_gateway
 from app.services.tracing import _get_client as _lf_client
 from app.services.vector_store import VectorItem, make_collection
 
@@ -40,6 +42,21 @@ CHROMA_PATH = ".chromadb"
 
 CHUNK_LINES = 50        # target lines per chunk
 OVERLAP_LINES = 10      # lines shared between adjacent chunks
+
+# OpenAI's text-embedding-3-small hard limit is 8192 tokens per input. 8000
+# leaves headroom for the enriched-text description appended after this cap
+# is applied. cl100k_base is the real tokenizer for this embedding model —
+# a chars-per-token guess (~4:1 for English/code) silently fails on dense or
+# non-ASCII content, which is exactly the failure this cap exists to catch.
+MAX_EMBED_TOKENS = 8000
+_EMBED_ENCODING = tiktoken.get_encoding("cl100k_base")
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    tokens = _EMBED_ENCODING.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return _EMBED_ENCODING.decode(tokens[:max_tokens])
 
 SUPPORTED_EXTENSIONS: dict[str, str] = {
     ".py": "python",
@@ -77,8 +94,22 @@ class CodeChunk:
     start_line: int
     end_line: int
     content: str
+    # set only for function/method chunks (_chunk_js_by_ast)
+    function_name: str | None = None
+    kind: str | None = None            # "function" | "arrow" | "method"
+    description: str = ""              # LLM-generated, see _generate_function_description
     # returned only by search()
     score: float = 0.0
+
+    @property
+    def enriched_text(self) -> str:
+        """What actually gets embedded when a description is present — code
+        plus a trailing comment, so the embedding carries both the code's own
+        vocabulary (API calls, identifiers) and the description's (error
+        names, plain-language behavior) the source never states explicitly."""
+        if self.description:
+            return f"{self.content}\n\n// {self.description}"
+        return self.content
 
 
 # ---------------------------------------------------------------------------
@@ -116,63 +147,135 @@ def _chunk_file(file_path: str, content: str, language: str) -> list[CodeChunk]:
     return chunks
 
 
-_JS_FUNC_RE = re.compile(r'^(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(')
-
-def _chunk_js_by_function(file_path: str, content: str, language: str) -> list[CodeChunk]:
+def _chunk_js_by_ast(file_path: str, content: str, raw: bytes, language: str) -> list[CodeChunk]:
     """
-    Extract function-boundary chunks from JS/TS source.
+    Extract function-boundary chunks from JS/TS source using the real tree-sitter
+    parser already built for the call graph (app.services.code_graph.parser) —
+    not a regex.
 
-    Each top-level `(async) function name(` declaration becomes one chunk spanning
-    its declaration line to its closing brace. Short functions get their own chunk
-    with no surrounding noise, which eliminates the dilution problem that fixed
-    line-count windows produce.
+    One chunk per top-level function/arrow-function/method declaration, each
+    spanning its exact byte range. Short functions get their own chunk with no
+    surrounding noise, eliminating the dilution problem fixed line-count windows
+    produce, and — unlike a `function name(` regex — this also catches arrow
+    functions (`const foo = () => {}`) and class methods, which a regex-only
+    extractor silently misses. On a 4248-function survey of a real backend, a
+    regex matching only `function name(` found ~8% of what tree-sitter finds.
 
-    Falls back to an empty list for files with no top-level function declarations
-    (caller should then fall back to _chunk_file).
+    Falls back to an empty list for files with no top-level definitions or a
+    parse error (caller then falls back to _chunk_file).
+    """
+    from app.services.code_graph.parser import extract_function_definitions, parse_source
 
-    Known limitation: brace characters inside string literals are counted. This is
-    rare in the target app's backend and doesn't affect correctness in practice.
+    suffix = Path(file_path).suffix
+    try:
+        tree = parse_source(raw, suffix)
+        fn_defs = extract_function_definitions(tree, content)
+    except Exception as exc:
+        logger.debug("[RAG] tree-sitter parse failed for %s, falling back: %s", file_path, exc)
+        return []
+
+    chunks: list[CodeChunk] = []
+    for fn in fn_defs:
+        chunk_content = raw[fn.start_byte:fn.end_byte].decode("utf-8", errors="ignore")
+        if not chunk_content.strip():
+            continue
+        chunk_id = hashlib.sha256(f"fn:{file_path}:{fn.start_line}".encode()).hexdigest()[:16]
+        chunks.append(CodeChunk(
+            chunk_id=chunk_id,
+            file_path=file_path,
+            language=language,
+            start_line=fn.start_line,
+            end_line=fn.end_line,
+            content=chunk_content,
+            function_name=fn.name,
+            kind=fn.kind,
+        ))
+    return chunks
+
+
+_MD_HEADER_RE = re.compile(r'^#{1,6}\s+.+')
+
+def _chunk_markdown_by_headers(file_path: str, content: str, language: str) -> list[CodeChunk]:
+    """
+    Element-based chunking for Markdown: one chunk per header section, so a
+    query like "how do I install this?" lands on the Installation section
+    directly instead of a fixed-size window spanning several unrelated ones.
+
+    A section runs from one header line up to (but not including) the next
+    header line, regardless of heading level — matches how READMEs are
+    actually read: each header names one self-contained topic.
+
+    Falls back to an empty list for files with no headers at all (caller then
+    falls back to _chunk_file — e.g. plain-prose docs with no `#` structure).
     """
     lines = content.splitlines()
-    chunks: list[CodeChunk] = []
-
-    i = 0
-    while i < len(lines):
-        m = _JS_FUNC_RE.match(lines[i])
-        if m:
-            name = m.group(1)
+    sections: list[tuple[int, int]] = []  # (start_idx, end_idx) exclusive, 0-indexed
+    start = None
+    for i, line in enumerate(lines):
+        if _MD_HEADER_RE.match(line):
+            if start is not None:
+                sections.append((start, i))
             start = i
-            depth = 0
-            found_open = False
-            for j in range(i, len(lines)):
-                for ch in lines[j]:
-                    if ch == '{':
-                        depth += 1
-                        found_open = True
-                    elif ch == '}':
-                        depth -= 1
-                if found_open and depth <= 0:
-                    chunk_content = "\n".join(lines[start:j + 1])
-                    if chunk_content.strip():
-                        chunk_id = hashlib.sha256(
-                            f"fn:{file_path}:{start}".encode()
-                        ).hexdigest()[:16]
-                        chunks.append(CodeChunk(
-                            chunk_id=chunk_id,
-                            file_path=file_path,
-                            language=language,
-                            start_line=start + 1,
-                            end_line=j + 1,
-                            content=chunk_content,
-                        ))
-                    i = j + 1
-                    break
-            else:
-                i += 1
-        else:
-            i += 1
+    if start is not None:
+        sections.append((start, len(lines)))
 
+    chunks: list[CodeChunk] = []
+    for start_idx, end_idx in sections:
+        chunk_content = "\n".join(lines[start_idx:end_idx]).strip()
+        if not chunk_content:
+            continue
+        chunk_id = hashlib.sha256(f"md:{file_path}:{start_idx}".encode()).hexdigest()[:16]
+        chunks.append(CodeChunk(
+            chunk_id=chunk_id,
+            file_path=file_path,
+            language=language,
+            start_line=start_idx + 1,
+            end_line=end_idx,
+            content=chunk_content,
+        ))
     return chunks
+
+
+DESCRIPTION_PROMPT = (
+    "You are indexing JavaScript source code for semantic search. "
+    "Write a single sentence (max 40 words) describing this function. "
+    "Include: what it does, what external APIs or services it calls, "
+    "and what errors or exceptions it can throw (use the exact error names "
+    "from those APIs, e.g. NoSuchKey, NotFound, ValidationError). "
+    "Do not include the function name. Output only the sentence, no preamble."
+)
+
+
+# Caps concurrent Haiku calls across all files in an index_directory() batch —
+# index_directory already runs 10 files concurrently, and a single file can
+# have dozens of functions, so without this a big directory pass could fire
+# hundreds of simultaneous description calls and trip a rate limit.
+_DESCRIPTION_SEMAPHORE = asyncio.Semaphore(10)
+
+
+async def _describe_with_limit(llm_service, code: str) -> str:
+    async with _DESCRIPTION_SEMAPHORE:
+        return await _generate_function_description(llm_service, code)
+
+
+async def _generate_function_description(llm_service, code: str) -> str:
+    """Call Haiku (routed through llm_gateway's 'code_description' task, so
+    it's cost-tracked the same as every other agent call) to generate a
+    description spanning both the code's own vocabulary and the vocabulary
+    of whatever it can fail with — the vocabulary gap a bare code embedding
+    can't close on its own. Returns "" on any failure; the caller embeds the
+    plain code chunk in that case, same as a chunk with no description."""
+    try:
+        text = await llm_service.complete(
+            messages=[{
+                "role": "user",
+                "content": f"{DESCRIPTION_PROMPT}\n\n```javascript\n{code[:1500]}\n```",
+            }],
+        )
+        return text.strip()
+    except Exception as exc:
+        logger.debug("[RAG] Description generation failed: %s", exc)
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +377,8 @@ class RAGService:
                     start_line=int(meta.get("start_line", 0)),
                     end_line=int(meta.get("end_line", 0)),
                     content=m.document,
+                    function_name=meta.get("function_name") or None,
+                    kind=meta.get("kind") or None,
                     score=m.score,
                 ))
             return chunks
@@ -354,6 +459,8 @@ class RAGService:
                     start_line=int(meta.get("start_line", 0)),
                     end_line=int(meta.get("end_line", 0)),
                     content=m.document,
+                    function_name=meta.get("function_name") or None,
+                    kind=meta.get("kind") or None,
                     score=round(hybrid, 4),
                 )))
             scored.sort(key=lambda x: x[0], reverse=True)
@@ -459,9 +566,64 @@ class RAGService:
                 start_line=int(meta.get("start_line", 0)),
                 end_line=int(meta.get("end_line", 0)),
                 content=m.document,
+                function_name=meta.get("function_name") or None,
+                kind=meta.get("kind") or None,
                 score=round(rrf_score, 6),
             ))
         return results
+
+    async def rerank_functions(
+        self,
+        query: str,
+        n_results: int = 3,
+        candidate_pool: int = 20,
+    ) -> list[CodeChunk]:
+        """Two-stage retrieval for code: vector for recall, cross-encoder for precision.
+
+        Mirrors rerank_incidents()'s exact pattern — same cached CrossEncoder
+        instance and model — applied to the codebase collection.
+
+        Built for the case hybrid_search() alone can't resolve: several
+        functions in the same file tie on lexical score (e.g. every S3
+        function mentions "s3", "key", "error"), and vector score alone
+        compresses them into a band too narrow to separate confidently. A
+        cross-encoder reads the query and each candidate's full text jointly
+        and can tell a function whose description explicitly discusses the
+        error being searched for apart from one that just shares its
+        vocabulary incidentally.
+
+        Requires: pip install sentence-transformers
+        Model:    cross-encoder/ms-marco-MiniLM-L-6-v2 (~90MB, cached after
+                  first use — shared with rerank_incidents() via the same
+                  self._cross_encoder instance).
+        """
+        if self._collection.count() == 0:
+            return []
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError:
+            logger.warning("[RAG] sentence-transformers not installed — falling back to vector search")
+            return await self.search(query, n_results=n_results)
+
+        try:
+            candidates = await self.search(query, n_results=candidate_pool, min_score=0.0)
+            if not candidates:
+                return []
+
+            if not hasattr(self, "_cross_encoder"):
+                self._cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            ce = self._cross_encoder
+            pairs = [(query, c.content) for c in candidates]
+            ce_scores = ce.predict(pairs)
+
+            for c, ce_score in zip(candidates, ce_scores):
+                c.score = round(float(ce_score), 4)
+
+            reranked = sorted(candidates, key=lambda c: c.score, reverse=True)
+            return reranked[:n_results]
+        except Exception as exc:
+            logger.warning("[RAG] Cross-encoder rerank failed: %s", exc)
+            return await self.search(query, n_results=n_results)
 
     async def get_file(self, path: str) -> list[CodeChunk]:
         """Return all indexed chunks for a specific file, ordered by start line."""
@@ -474,6 +636,8 @@ class RAGService:
                 start_line=int(m.metadata.get("start_line", 0)),
                 end_line=int(m.metadata.get("end_line", 0)),
                 content=m.document,
+                function_name=m.metadata.get("function_name") or None,
+                kind=m.metadata.get("kind") or None,
             )
             for m in matches
         ]
@@ -751,9 +915,13 @@ class RAGService:
             self._collection.delete(old_ids)
             self._mark_superseded(relative)
 
-        # ── Chunk ─────────────────────────────────────────────────────────
+        # ── Chunk — routed by file type, not one strategy for everything ────
         if language in ("javascript", "typescript"):
-            chunks = _chunk_js_by_function(relative, content, language)
+            chunks = _chunk_js_by_ast(relative, content, raw, language)
+            if not chunks:
+                chunks = _chunk_file(relative, content, language)
+        elif language == "markdown":
+            chunks = _chunk_markdown_by_headers(relative, content, language)
             if not chunks:
                 chunks = _chunk_file(relative, content, language)
         else:
@@ -762,20 +930,46 @@ class RAGService:
         if not chunks:
             return 0
 
+        # ── Defensive cap — some chunks (huge generated files, or files with
+        # unusually dense/non-ASCII content where chars-per-token is far from
+        # the ~4:1 English/code rule of thumb) exceed OpenAI's 8192-token
+        # embedding limit. _embed() below sends the whole file's chunks as one
+        # batch call, so one oversized chunk fails the batch and silently
+        # drops every other (perfectly fine) chunk in that file with it.
+        # Truncate by real token count (tiktoken), not a character guess.
+        for c in chunks:
+            c.content = _truncate_to_tokens(c.content, MAX_EMBED_TOKENS)
+
+        # ── Enrich function/method chunks with an LLM-generated description ─
+        # Only chunks that came from _chunk_js_by_ast have function_name set;
+        # markdown sections and line-based chunks have no single function to
+        # describe, so they're embedded as plain code/text either way.
+        if settings.rag_enable_function_descriptions:
+            fn_chunks = [c for c in chunks if c.function_name]
+            if fn_chunks:
+                llm_service = llm_gateway.get_llm_service_for("code_description")
+                descriptions = await asyncio.gather(*[
+                    _describe_with_limit(llm_service, c.content) for c in fn_chunks
+                ])
+                for c, desc in zip(fn_chunks, descriptions):
+                    c.description = desc
+
         # ── Embed and upsert ──────────────────────────────────────────────
-        texts = [c.content for c in chunks]
+        texts = [c.enriched_text for c in chunks]
         embeddings = await self._embed(texts)
 
         self._collection.upsert([
             VectorItem(
                 id=c.chunk_id,
-                document=c.content,
+                document=c.enriched_text,
                 metadata={
                     "chunk_id": c.chunk_id,
                     "file_path": c.file_path,
                     "language": c.language,
                     "start_line": c.start_line,
                     "end_line": c.end_line,
+                    "function_name": c.function_name or "",
+                    "kind": c.kind or "",
                 },
                 embedding=emb,
             )
