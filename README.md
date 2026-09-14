@@ -202,12 +202,12 @@ docs/              # architecture notes
 
 ## Engineering blog
 
-Notes from building this — debugging stories, architecture posts, retrieval design. 19 posts across 7 series; a few representative ones below, full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
+Notes from building this — debugging stories, architecture posts, retrieval design. 16 posts across 7 series; a few representative ones below, full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
 
 - **Agent Debugging** — [Why My AI Agent Kept Adding Null Checks Instead of Fixing the Bug](https://remediatelabs.io/blog/symptom-fix-antipattern) (producer/consumer routing) · [Why My AI Agent Cited a File That Never Existed](https://remediatelabs.io/blog/fabricated-file-citation) (fabrication under a code-reading requirement)
 - **RAG Learnings** — [Why the Same Bug Kept Creating New Incidents](https://remediatelabs.io/blog/rag-dedup-failure) (four-failure-mode dedup bug)
 - **Code Graph in Production** — [We Built a Call Graph Because Our Agent Kept Breaking Callers It Never Knew About](https://remediatelabs.io/blog/code-graph-call-graph-reverse-index) · [Five Data Structures for a Call Graph](https://remediatelabs.io/blog/code-graph-data-structures)
-- **Code RAG in Production** (10 parts) — [What Actually Gets Indexed](https://remediatelabs.io/blog/code-rag-what-gets-indexed) · [Hybrid Search — Closing the Vocabulary Gap](https://remediatelabs.io/blog/code-rag-hybrid-search) · [Cross-Encoder Re-Ranking — From Top-3 to Rank 1](https://remediatelabs.io/blog/code-rag-cross-encoder-reranking)
+- **Code RAG in Production** (9 parts) — [What Actually Gets Indexed](https://remediatelabs.io/blog/code-rag-what-gets-indexed) · [Hybrid Search — Closing the Vocabulary Gap](https://remediatelabs.io/blog/code-rag-hybrid-search) · [Cross-Encoder Re-Ranking — From Top-3 to Rank 1](https://remediatelabs.io/blog/code-rag-cross-encoder-reranking)
 - **Agent Cost Engineering** — [Token Cost Engineering in Agent Loops](https://remediatelabs.io/blog/prompt-caching-react-loops) (prompt caching + state pruning)
 
 ---
