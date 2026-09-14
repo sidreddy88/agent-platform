@@ -23,6 +23,15 @@ Flow:
                               free-text JSON answer parsed and grounded only
                               after the fact — see git history for that version).
 
+After submit_diagnosis accepts: _enforce_grounding re-checks prose for
+fabricated symbol names, then _apply_output_validation (see
+app.services.output_validator) checks a different failure class — citations
+to real files/functions the agent never actually retrieved this run, and
+leaked internal context-wrapping markers (a sign the model echoed
+ipi_guard-wrapped untrusted content back into its own answer instead of
+synthesizing one). Either failure forces escalate=True for human review;
+neither retries in-loop like the grounding checks above.
+
 Confidence gate (CONFIDENCE_THRESHOLD = 0.70):
   ≥ 0.70 → status = FIXING (proceed to Fix Generation Agent — Week 3)
   < 0.70 → status = AWAITING_APPROVAL (human escalation via Slack)
@@ -43,6 +52,7 @@ from app.services.aws import AWSError, AWSService
 from app.services.github import GitHubService
 from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import LLMService
+from app.services.output_validator import validate_diagnosis_output
 from app.services.rag import RAGService
 from app.services.repo import LocalRepoService
 
@@ -486,10 +496,22 @@ class DiagnosisAgent(BaseAgent):
         # context" input to the sampled RAG faithfulness judge. Reset at the top
         # of every diagnose() call, same as the two attributes above.
         self._last_retrieved_chunks: list[str] = []
+        # Every file path this diagnose() call actually touched -- via
+        # search_codebase hits, get_file_contents fetches, grep_codebase matches,
+        # verify_symbol_in_repo hits, and find_callers results. Feeds
+        # output_validator.validate_diagnosis_output's citation-provenance check:
+        # a citation can be real (passes grounding) and still never have been
+        # looked at this run. Reset at the top of every diagnose() call, same as
+        # the attributes above.
+        self._retrieved_file_paths: set[str] = set()
 
     @property
     def last_retrieved_chunks(self) -> list[str]:
         return list(self._last_retrieved_chunks)
+
+    @property
+    def retrieved_file_paths(self) -> set[str]:
+        return set(self._retrieved_file_paths)
 
     def _register_tools(self) -> None:
         aws = self._aws
@@ -591,6 +613,7 @@ class DiagnosisAgent(BaseAgent):
                     f"{c.content[:400]}"
                 )
             self._last_retrieved_chunks.extend(parts)
+            self._retrieved_file_paths.update(c.file_path for c in chunks)
             raw = "\n\n".join(parts)
             scan_for_injection(raw, source="rag-codebase-search")
             return wrap_untrusted(raw, source="rag-codebase-search")
@@ -617,6 +640,7 @@ class DiagnosisAgent(BaseAgent):
                         f"If the function you need is not visible, call get_file_contents again "
                         f"with a more specific path or search for the function name via search_codebase.]"
                     )
+                self._retrieved_file_paths.add(p)
                 scan_for_injection(content, source=f"github-file:{file_path}")
                 return wrap_untrusted(content, source=f"github-file:{file_path}")
             except Exception as exc:
@@ -647,6 +671,7 @@ class DiagnosisAgent(BaseAgent):
                     for i, line in enumerate(content.splitlines(), 1):
                         if pattern in line:
                             matches.append(f"{rel_path}:{i}: {line.strip()[:120]}")
+                            self._retrieved_file_paths.add(rel_path)
                             if len(matches) >= 50:
                                 break
                     if len(matches) >= 50:
@@ -695,6 +720,7 @@ class DiagnosisAgent(BaseAgent):
                     for h in hits[:5]:
                         frag = (h.get("fragment") or "").replace("\n", " ").strip()[:160]
                         lines.append(f"  - {h['path']}  :: {frag}")
+                        self._retrieved_file_paths.add(h["path"])
                     return "\n".join(lines)
             return (
                 f"NOT_FOUND: '{name}' does not appear in repo {owner}/{repo} on the default branch. "
@@ -799,6 +825,7 @@ class DiagnosisAgent(BaseAgent):
             lines = [f"Callers of `{function_name}` ({len(callers)} found):"]
             for c in callers[:15]:
                 lines.append(f"  {c.file_path} → {c.function_name} (line {c.line})")
+                self._retrieved_file_paths.add(c.file_path)
             if len(callers) > 15:
                 lines.append(f"  ... and {len(callers) - 15} more")
             return "\n".join(lines)
@@ -1181,6 +1208,36 @@ class DiagnosisAgent(BaseAgent):
 
         return result
 
+    def _apply_output_validation(self, result: DiagnosisResult, incident: IncidentState) -> None:
+        """Security-oriented output check — see app.services.output_validator.
+
+        Distinct from _enforce_grounding: that asks "is this cited content
+        real?"; this asks "did the agent actually retrieve it this run, and
+        does the output leak internal context-wrapping markers?" On failure,
+        forces escalate=True so a human reviews before FixGenerationAgent
+        ever sees this diagnosis — the same routing a low-confidence
+        diagnosis already gets, just a different trigger. Never raises: a
+        validator bug must not crash a diagnosis that would otherwise have
+        shipped fine.
+        """
+        try:
+            validation = validate_diagnosis_output(result, self._retrieved_file_paths)
+        except Exception:
+            logger.exception(
+                "DiagnosisAgent: output_validator crashed for incident %s — skipping", incident.id
+            )
+            return
+        if not validation.passed:
+            logger.warning(
+                "DiagnosisAgent: output validation failed for incident %s — %s",
+                incident.id, "; ".join(validation.failures),
+            )
+            result.evidence = [
+                *result.evidence,
+                f"OUTPUT VALIDATION WARNING: {'; '.join(validation.failures)}",
+            ]
+            result.escalate = True
+
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
         await self._ensure_local_repo()
@@ -1189,6 +1246,7 @@ class DiagnosisAgent(BaseAgent):
         self._diagnosis_submitted = None
         self._rejection_count = 0
         self._last_retrieved_chunks = []
+        self._retrieved_file_paths = set()
 
         event = incident.error_event
         log_group = event.metadata.get("log_group", "")
@@ -1536,7 +1594,9 @@ Confidence guide:
         if self._diagnosis_submitted is not None:
             submitted = self._diagnosis_submitted
             self._diagnosis_submitted = None  # don't leak into a future call on this instance
-            return await self._enforce_grounding(submitted, incident_tokens)
+            grounded = await self._enforce_grounding(submitted, incident_tokens)
+            self._apply_output_validation(grounded, incident)
+            return grounded
 
         # The model never got a submission through submit_diagnosis before exhausting
         # its iteration budget — same fail-closed policy as BaseAgent.run()'s own
