@@ -10,7 +10,8 @@
     "clarity":   { "model": "claude-sonnet-4-6", "max_tokens": 8192 },
     "review":    { "model": "openai/gpt-4.1" },
     "critique":  { "model": "claude-haiku-4-5-20251001", "fallback_model": "claude-sonnet-4-6" },
-    "code_description": { "model": "claude-haiku-4-5-20251001", "max_tokens": 100 }
+    "code_description": { "model": "claude-haiku-4-5-20251001", "max_tokens": 100 },
+    "rag_judge": { "model": "claude-haiku-4-5-20251001", "max_tokens": 150 }
   },
   "cost_per_1k_tokens": {
     "claude-haiku-4-5-20251001": { "input": 0.001,   "output": 0.005  },

@@ -304,6 +304,7 @@ class RAGService:
         self._collection_name = collection_name
         self._collection = make_collection(collection_name, chroma_path=chroma_path)
         self._incident_collection = make_collection("incidents", chroma_path=chroma_path)
+        self._index_version = self._load_index_version()
 
     # ------------------------------------------------------------------
     # Public API
@@ -396,6 +397,7 @@ class RAGService:
                 output={"num_results": len(chunks), "top_score": chunks[0].score if chunks else None},
                 metadata={
                     "collection": self._collection_name,
+                    "index_version": self._index_version,
                     "duration_ms": int((time.perf_counter() - start) * 1000),
                     "results": [
                         {"rank": i, "score": c.score, "file_path": c.file_path,
@@ -480,6 +482,7 @@ class RAGService:
                 output={"num_results": len(chunks), "top_score": chunks[0].score if chunks else None},
                 metadata={
                     "collection": self._collection_name,
+                    "index_version": self._index_version,
                     "duration_ms": int((time.perf_counter() - start) * 1000),
                     "results": [
                         {"rank": i, "score": c.score, "vector_score": round(vs, 4),
@@ -869,8 +872,55 @@ class RAGService:
             return await self.search_incidents(query, n_results=n_results, min_score=min_score)
 
     def clear(self) -> None:
-        """Delete all indexed chunks (wipes the codebase collection)."""
+        """Delete all indexed chunks (wipes the codebase collection).
+
+        Also bumps index_version — clear() is the real "a full rebuild is
+        starting" signal (chunking-strategy or embedding-model change, see
+        the Code RAG series' Part 8), as opposed to the routine per-file
+        incremental updates that don't change it.
+        """
         self._collection.clear()
+        self._index_version = self._bump_index_version()
+
+    @property
+    def index_version(self) -> str:
+        return self._index_version
+
+    def _load_index_version(self) -> str:
+        """Read the current version for this collection, or mint one if this
+        collection has never been versioned before (e.g. pre-existing data
+        from before this tracking existed)."""
+        from sqlalchemy import select
+        from app.services.database import engine, tables
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    select(tables.index_metadata.c.version)
+                    .where(tables.index_metadata.c.collection == self._collection_name)
+                ).fetchone()
+            if row is not None:
+                return row.version
+        except Exception as exc:
+            logger.warning("[RAG] index_version lookup failed for %s: %s", self._collection_name, exc)
+        return self._bump_index_version()
+
+    def _bump_index_version(self) -> str:
+        """Mint a new version for this collection and persist it."""
+        from datetime import datetime, timezone
+        from app.services.database import tables, upsert
+        now = datetime.now(timezone.utc)
+        # Microsecond precision, not just seconds — two clear() calls in quick
+        # succession (a retry, a test) must never mint the same "new" version.
+        version = now.strftime("v%Y%m%dT%H%M%S%f")
+        try:
+            upsert(
+                tables.index_metadata,
+                {"collection": self._collection_name, "version": version, "updated_at": now.isoformat()},
+                conflict_cols=["collection"],
+            )
+        except Exception as exc:
+            logger.warning("[RAG] index_version update failed for %s: %s", self._collection_name, exc)
+        return version
 
     # ------------------------------------------------------------------
     # Internals

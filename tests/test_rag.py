@@ -120,6 +120,45 @@ class TestChunkFile:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests — index_version tracking
+# ---------------------------------------------------------------------------
+
+class TestIndexVersion:
+    def _make(self, collection_name: str) -> RAGService:
+        with patch("app.services.rag.AsyncOpenAI"), \
+             patch("app.services.rag.make_collection") as make_coll_mock:
+            make_coll_mock.side_effect = [_make_collection_mock(0), _make_collection_mock(0)]
+            return RAGService(openai_api_key="sk-test", collection_name=collection_name)
+
+    def test_clear_changes_the_version(self):
+        rag = self._make("test-index-version-clear")
+        v1 = rag.index_version
+        rag.clear()
+        v2 = rag.index_version
+        assert v1 != v2
+
+    def test_version_persists_across_instances(self):
+        name = "test-index-version-persist"
+        rag = self._make(name)
+        rag.clear()
+        version = rag.index_version
+
+        rag2 = self._make(name)
+        assert rag2.index_version == version
+
+    def test_two_rapid_clears_produce_different_versions(self):
+        """Regression case: an earlier version of _bump_index_version used
+        second-granularity timestamps — two clear() calls inside the same
+        wall-clock second minted an identical "new" version."""
+        rag = self._make("test-index-version-rapid")
+        rag.clear()
+        v1 = rag.index_version
+        rag.clear()
+        v2 = rag.index_version
+        assert v1 != v2
+
+
+# ---------------------------------------------------------------------------
 # Unit tests — tree-sitter function/method chunking
 # ---------------------------------------------------------------------------
 

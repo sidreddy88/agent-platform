@@ -206,6 +206,21 @@ class _Tables:
         Index("idx_dcr_chunk_vector_id", "chunk_vector_id"),
     )
 
+    # One row per vector collection, tracking which "generation" of the index
+    # it's currently serving. version bumps whenever RAGService.clear() runs —
+    # the signal that a full rebuild (chunking-strategy or embedding-model
+    # change, see the Code RAG series' Part 8) just happened, as opposed to
+    # the routine per-file incremental updates doc_chunk_registry already
+    # tracks. Threaded into every retrieval span's metadata so a Langfuse
+    # trace can be correlated to "which rebuild was live when this ran."
+    index_metadata = Table(
+        "index_metadata",
+        metadata,
+        Column("collection", String, primary_key=True),
+        Column("version", String, nullable=False),
+        Column("updated_at", String, nullable=False),
+    )
+
     # Call graph edges — one row per (caller_function → callee_name) edge found
     # by the tree-sitter parser. Persisted here for durability; loaded into the
     # in-memory CodeGraph (hash map of sets) on startup for O(1) queries.

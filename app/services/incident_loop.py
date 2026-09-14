@@ -41,8 +41,10 @@ from app.services.dod_checker import dod_checker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 from app.services.llm_gateway import llm_gateway
+from app.services.rag_judge import judge_diagnosis_faithfulness, should_sample
 from app.services.schema_validator import HandoffValidationError, handoff_validator
 from app.services.session_logger import session_logger
+from app.services.tracing import _get_client as _lf_client
 from app.services.triage_metrics import triage_metrics
 
 logger = logging.getLogger(__name__)
@@ -395,6 +397,41 @@ class IncidentLoop:
                 escalate=True,
             )
 
+    async def _maybe_judge_diagnosis(self, incident: IncidentState, diagnosis: DiagnosisResult) -> None:
+        """Sampled (~10%) faithfulness/relevance scoring of a real diagnosis
+        against the code it actually retrieved — see app.services.rag_judge.
+
+        Observability only: never raises into the pipeline, never affects
+        the incident. A diagnosis that failed/escalated with no root cause
+        has nothing meaningful to judge, so those are skipped for free.
+        """
+        if diagnosis.confidence <= 0.0 or not diagnosis.root_cause:
+            return
+        if not should_sample():
+            return
+        chunks = self._diagnosis.last_retrieved_chunks
+        if not chunks:
+            return
+        question = f"{incident.error_event.title}\n{incident.error_event.description}"
+        try:
+            lf = _lf_client()
+            if lf is None:
+                result = await judge_diagnosis_faithfulness(question, chunks, diagnosis.root_cause)
+            else:
+                with lf.start_as_current_observation(
+                    name="rag_judge", as_type="span",
+                    input={"incident_id": incident.id, "num_chunks": len(chunks)},
+                ) as obs:
+                    result = await judge_diagnosis_faithfulness(question, chunks, diagnosis.root_cause)
+                    obs.update(output=result)
+            if result:
+                logger.info(
+                    "[RAGJudge] incident=%s faithfulness=%.2f relevance=%.2f notes=%s",
+                    incident.id, result["faithfulness"], result["relevance"], result["notes"],
+                )
+        except Exception as exc:
+            logger.debug("[IncidentLoop] RAG judge sampling failed for %s: %s", incident.id, exc)
+
     # ------------------------------------------------------------------ #
     # Main pipeline
     # ------------------------------------------------------------------ #
@@ -600,6 +637,7 @@ class IncidentLoop:
             escalated=diagnosis.escalate,
             raw_llm=getattr(diagnosis, "raw_llm", "") or "",
         )
+        await self._maybe_judge_diagnosis(incident, diagnosis)
 
         incident.diagnosis = diagnosis.root_cause
         incident.confidence = diagnosis.confidence

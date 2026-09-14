@@ -481,6 +481,15 @@ class DiagnosisAgent(BaseAgent):
         # -> scripts/measure_diagnosis_grounding.py's rejection-rate metric. Reset at
         # the top of every diagnose() call, same as _diagnosis_submitted.
         self._rejection_count = 0
+        # Raw text of every chunk search_codebase actually returned during one
+        # diagnose() call -- read externally (incident_loop.py) as the "retrieved
+        # context" input to the sampled RAG faithfulness judge. Reset at the top
+        # of every diagnose() call, same as the two attributes above.
+        self._last_retrieved_chunks: list[str] = []
+
+    @property
+    def last_retrieved_chunks(self) -> list[str]:
+        return list(self._last_retrieved_chunks)
 
     def _register_tools(self) -> None:
         aws = self._aws
@@ -581,6 +590,7 @@ class DiagnosisAgent(BaseAgent):
                     f"--- {c.file_path}:{c.start_line}-{c.end_line} (score={c.score}) ---\n"
                     f"{c.content[:400]}"
                 )
+            self._last_retrieved_chunks.extend(parts)
             raw = "\n\n".join(parts)
             scan_for_injection(raw, source="rag-codebase-search")
             return wrap_untrusted(raw, source="rag-codebase-search")
@@ -1178,6 +1188,7 @@ class DiagnosisAgent(BaseAgent):
         # a stale value from a previous call must never leak into this one.
         self._diagnosis_submitted = None
         self._rejection_count = 0
+        self._last_retrieved_chunks = []
 
         event = incident.error_event
         log_group = event.metadata.get("log_group", "")
