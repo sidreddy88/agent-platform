@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from app.core.config import settings
 from app.models.events import IncidentState
 from app.services.github import GitHubError, GitHubService
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import LLMService
 
 logger = logging.getLogger(__name__)
@@ -192,10 +193,14 @@ class ErrorClarityAgent:
             .replace("_", "-")
         )
 
+        # Raw CloudWatch text — same content class DiagnosisAgent/TriageAgent scan.
+        scan_for_injection(event.description or "", source="cloudwatch-logs")
+        wrapped_description = wrap_untrusted(event.description or "", source="cloudwatch-logs")
+
         prompt = (
             f"An error occurred in production and its exact origin is unclear.\n\n"
             f"ERROR TYPE : {error_type}\n"
-            f"ERROR      : {event.description}\n"
+            f"ERROR      : {wrapped_description}\n"
             f"SERVICE    : {event.service}\n"
             f"DIAGNOSIS  : {incident.diagnosis or '(could not identify root cause)'}\n\n"
             f"STEP 0 — Is this error already self-explanatory?\n"
@@ -268,7 +273,13 @@ class ErrorClarityAgent:
                         content, _ = await self._github.get_file_contents(
                             self._owner, self._repo, inp.get("path", ""), ref=PR_BASE
                         )
-                        result = content
+                        # Same operation DiagnosisAgent's get_file_contents guards —
+                        # unwrapped here would let an injected instruction in a repo
+                        # file steer code_after into attacker-controlled content that
+                        # gets committed verbatim via _commit_additions.
+                        path = inp.get("path", "")
+                        scan_for_injection(content, source=f"github-file:{path}")
+                        result = wrap_untrusted(content, source=f"github-file:{path}")
                     except Exception as exc:
                         result = f"File not found: {exc}. Use flag_pattern to record a recommendation instead."
 

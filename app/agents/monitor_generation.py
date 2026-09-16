@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 
 from app.agents.base import BaseAgent
 from app.core.config import settings
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.github import GitHubError, GitHubService
 from app.services.llm import HAIKU_MODEL, LLMService
 
@@ -154,6 +155,11 @@ class MonitorGenerationAgent(BaseAgent):
             if not files:
                 return "No changed files found in this PR."
 
+            # pr.title and the regex-captured symbol names below both come straight
+            # out of attacker-controllable content (PR title, added diff lines) —
+            # scan before folding into the returned observation.
+            scan_for_injection(pr.title or "", source="github-pr-title")
+
             lines = [
                 f"PR #{pr.number}: {pr.title}",
                 f"Branch: {pr.head_branch} → {pr.base_branch}",
@@ -166,6 +172,7 @@ class MonitorGenerationAgent(BaseAgent):
                     added_text = "\n".join(
                         ln[1:] for ln in f.patch.splitlines() if ln.startswith("+")
                     )
+                    scan_for_injection(added_text, source=f"github-diff:{f.filename}")
                     for pat in _FN_PATTERNS:
                         new_syms.extend(pat.findall(added_text))
                     # Deduplicate, cap at 10
@@ -181,7 +188,7 @@ class MonitorGenerationAgent(BaseAgent):
                 lines.append(
                     f"  {f.filename} | +{f.additions} -{f.deletions} | status={f.status}{sym_str}"
                 )
-            return "\n".join(lines)
+            return wrap_untrusted("\n".join(lines), source="github-pr-diff-summary")
 
         async def _generate_cloudwatch_alarms(
             file: str,
@@ -338,11 +345,13 @@ class MonitorGenerationAgent(BaseAgent):
             MonitorGenerationResult with generated monitor configs and coverage metrics.
         """
         desc_snippet = (pr_description or "")[:200]
+        scan_for_injection(pr_title or "", source="github-pr-title")
+        scan_for_injection(desc_snippet, source="github-pr-description")
         prompt = f"""You are a monitoring coverage agent. A PR was just merged.
 
 Repo: {owner}/{repo}
 PR #{pr_number}: {pr_title}
-Description: {desc_snippet}
+Description: {wrap_untrusted(desc_snippet, source="github-pr-description")}
 
 STEPS:
 1. Call analyze_pr_diff with owner="{owner}", repo="{repo}", pr_number={pr_number}

@@ -30,6 +30,7 @@ from app.core.config import settings
 from app.models.events import ErrorEvent
 from app.services.aws import AWSError, AWSService
 from app.services.incident_store import incident_store as _default_store
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import HAIKU_MODEL, LLMService
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,14 @@ class TriageAgent(BaseAgent):
         from datetime import date
         today = date.today().isoformat()
 
+        # event.title/description are raw, externally-sourced text (CloudWatch log/
+        # alarm messages) — the same content class DiagnosisAgent already scans/wraps
+        # as "cloudwatch-logs". An attacker who can influence an application error
+        # message could otherwise inject text here to steer decision/severity.
+        scan_for_injection(event.title or "", source="cloudwatch-logs")
+        scan_for_injection(event.description or "", source="cloudwatch-logs")
+        wrapped_description = wrap_untrusted(event.description or "", source="cloudwatch-logs")
+
         prompt = f"""You are a triage agent. Classify this production error event.
 
 TODAY'S DATE: {today}  ← use this as the reference for "recent" / "current" / "future"
@@ -212,7 +221,7 @@ ERROR EVENT:
   source      : {event.source}
   error_type  : {error_type}
   title       : {event.title}
-  description : {event.description}
+  description : {wrapped_description}
   service     : {event.service}
   log_group   : {log_group or '(not provided)'}
   task_id     : {event.task_id or '(not provided)'}
