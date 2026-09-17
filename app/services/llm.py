@@ -135,6 +135,71 @@ class LLMService:
         )
         return await cb.call(_retry_with_backoff(_complete))
 
+    async def complete_structured(
+        self,
+        messages: list[dict],
+        tool_schema: dict,
+        system: str | list | None = None,
+        tracing_ctx: "TracingContext | None" = None,
+    ) -> dict:
+        """Single call, forced into a specific tool call via tool_choice — returns
+        the tool call's input dict directly. No regex, no json.loads, no fence-
+        stripping, no silent fallback-on-parse-failure: the API itself makes any
+        other response shape impossible (every `required` field present, every
+        `enum` field one of its declared values), rather than asking for JSON in
+        prose and hoping the model formats it the way the prompt asked. See
+        TriageAgent.triage()/MergeDecisionAgent.decide() for the two real callers
+        this replaced a regex-extract-then-fallback-default parser in.
+
+        Doesn't guarantee the *values* are stable run to run -- the model is
+        still doing real, non-deterministic reasoning about content. It
+        guarantees the *shape* always parses, which is the part application
+        code actually needs a contract for.
+        """
+        kwargs: dict = {
+            "model": self._model,
+            "max_tokens": MAX_TOKENS,
+            "messages": messages,
+            "tools": [tool_schema],
+            "tool_choice": {"type": "tool", "name": tool_schema["name"]},
+        }
+        if system:
+            kwargs["system"] = system
+        if getattr(self, "_temperature", None) is not None:
+            kwargs["extra_body"] = {"temperature": self._temperature}
+
+        async def _call() -> dict:
+            response = await self._client.messages.create(**kwargs)
+            self.last_input_tokens = (
+                response.usage.input_tokens if response.usage else 0
+            )
+            self.last_output_tokens = (
+                response.usage.output_tokens if response.usage else 0
+            )
+            tool_use = next((b for b in response.content if b.type == "tool_use"), None)
+            if tool_use is None:
+                # Only reachable via a truncated response (stop_reason ==
+                # "max_tokens" cutting off the tool call mid-generation) --
+                # tool_choice forcing a named tool otherwise guarantees this
+                # block exists. Surface clearly rather than let a caller's
+                # dict-shaped assumptions fail confusingly downstream.
+                raise ValueError(
+                    f"No tool_use block in forced tool_choice response "
+                    f"(stop_reason={response.stop_reason!r}) — likely truncated at max_tokens."
+                )
+            return tool_use.input
+
+        async def _complete() -> dict:
+            if tracing_ctx is not None and tracing_ctx.enabled:
+                from app.services.tracing import trace_llm_call
+                return await trace_llm_call(tracing_ctx, self._model, messages, system, _call())
+            return await _call()
+
+        cb = circuit_breaker_registry.get_or_create(
+            "anthropic_llm", failure_threshold=5, timeout_seconds=60.0
+        )
+        return await cb.call(_retry_with_backoff(_complete))
+
     async def stream_chat(
         self,
         messages: list[dict],
