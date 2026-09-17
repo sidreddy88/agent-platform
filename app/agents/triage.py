@@ -32,6 +32,7 @@ from app.services.aws import AWSError, AWSService
 from app.services.incident_store import incident_store as _default_store
 from app.services.ipi_guard import scan_for_injection
 from app.services.llm import HAIKU_MODEL, LLMService
+from app.services.output_validator import check_leaked_markers
 
 logger = logging.getLogger(__name__)
 
@@ -266,4 +267,18 @@ Answer with ONLY a valid JSON object, no other text:
 }}"""
 
         result = await self.run(prompt)
-        return _parse_triage_result(result.answer)
+        triage_result = _parse_triage_result(result.answer)
+
+        # Leaked-marker check only — TriageResult has no citations to check
+        # provenance on, and no safe way to force a corrected decision/severity
+        # here (unlike MergeDecisionAgent, which can fail-safe to refix_first).
+        # Log loudly so a leaked marker is at least visible, matching this
+        # check's role everywhere it's detection-only.
+        leak_failures = check_leaked_markers(triage_result.reasoning)
+        if leak_failures:
+            logger.warning(
+                "[Triage] Output validation failed for event %s — %s",
+                event.id, "; ".join(leak_failures),
+            )
+
+        return triage_result

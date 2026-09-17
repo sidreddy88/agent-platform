@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from app.agents.base import BaseAgent
 from app.core.config import settings
 from app.services.ipi_guard import scan_for_injection, wrap_untrusted
+from app.services.output_validator import check_leaked_markers
 from app.services.github import GitHubError, GitHubService
 from app.services.llm import HAIKU_MODEL, LLMService
 
@@ -384,4 +385,18 @@ MANDATORY CONSTRAINTS:
 coverage_ratio = monitors_generated / max(1, total_additions / 75)
 """
         result = await self.run(prompt)
-        return _parse_monitor_result(result.answer, pr_number, repo, self._dry_run)
+        parsed = _parse_monitor_result(result.answer, pr_number, repo, self._dry_run)
+
+        # Leaked-marker check only, log only — this is already the
+        # lowest-consequence agent in the pipeline (dry-run by default, no
+        # executable side effects unless CREATE_MONITORS=true), so a logged
+        # warning is proportionate; no output here is trusted enough on its
+        # own to need a forced fail-safe the way MergeDecisionAgent's is.
+        leak_failures = check_leaked_markers(*(m.name for m in parsed.monitors))
+        if leak_failures:
+            logger.warning(
+                "[MonitorGen] Output validation failed for PR #%d — %s",
+                pr_number, "; ".join(leak_failures),
+            )
+
+        return parsed

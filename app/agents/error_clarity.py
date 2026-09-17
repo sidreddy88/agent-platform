@@ -28,6 +28,7 @@ from app.models.events import IncidentState
 from app.services.github import GitHubError, GitHubService
 from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import LLMService
+from app.services.output_validator import validate_error_clarity_addition
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +237,12 @@ class ErrorClarityAgent:
         raw_additions: list[dict] = []
         raw_patterns: list[dict] = []
         _SKIP = ("node_modules", "dist/", "build/", ".min.js", ".test.", ".spec.")
+        # Every file path this run actually touched via read_file/search_code —
+        # feeds output_validator.validate_error_clarity_addition's citation-
+        # provenance check below. A suggest_addition targeting a file that was
+        # never read/found this run is exactly the "plausible but never
+        # investigated" gap that check exists for.
+        retrieved_paths: set[str] = set()
 
         for iteration in range(14):
             try:
@@ -280,6 +287,7 @@ class ErrorClarityAgent:
                         path = inp.get("path", "")
                         scan_for_injection(content, source=f"github-file:{path}")
                         result = wrap_untrusted(content, source=f"github-file:{path}")
+                        retrieved_paths.add(path)
                     except Exception as exc:
                         result = f"File not found: {exc}. Use flag_pattern to record a recommendation instead."
 
@@ -289,6 +297,7 @@ class ErrorClarityAgent:
                             self._owner, self._repo, inp.get("query", "")
                         )
                         paths = [r["path"] for r in matches if not any(s in r["path"] for s in _SKIP)][:10]
+                        retrieved_paths.update(paths)
                         result = "\n".join(paths) if paths else (
                             "No results found. Use flag_pattern to record what should be added "
                             "without a specific file location."
@@ -349,6 +358,24 @@ class ErrorClarityAgent:
             if s.get("code_before") and s.get("code_after")
             and s["code_before"].strip() != s["code_after"].strip()
         ]
+
+        # Output validation: drop (don't just flag) any addition that fails —
+        # ClarityResult has no escalate field to route to human review the way
+        # DiagnosisAgent does, and the actual risk here is committing an
+        # unprovenanced/injection-tainted change verbatim via
+        # _commit_additions. Silently dropping and logging is the correct
+        # fail-safe, not committing-then-hoping-a-human-notices.
+        validated_additions = []
+        for addition in additions:
+            validation = validate_error_clarity_addition(addition, retrieved_paths)
+            if validation.passed:
+                validated_additions.append(addition)
+            else:
+                logger.warning(
+                    "[ErrorClarity] Dropping addition to %s — output validation failed: %s",
+                    addition.file, "; ".join(validation.failures),
+                )
+        additions = validated_additions
 
         patterns = [
             ClarityPattern(
