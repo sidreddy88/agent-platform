@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 
 from app.models.events import IncidentState
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import HAIKU_MODEL, LLMService
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,15 @@ class MergeDecisionAgent:
         severity = str(event.severity).split(".")[-1] if event.severity else "P2"
         occurrences = incident.occurrences_24h or 0
 
+        # event.title is raw CloudWatch text (same class DiagnosisAgent/TriageAgent
+        # scan); review_text is CodeReviewAgent's own free-text output, which can
+        # itself carry an unwrapped injection forward from an unsanitized PR diff
+        # (CodeReviewAgent doesn't guard diff content — see docs/blog-drafts notes).
+        # A manipulated review_text could flip merge_now vs refix_first here.
+        scan_for_injection(event.title or "", source="cloudwatch-logs")
+        scan_for_injection(review_text, source="code-review-output")
+        wrapped_review = wrap_untrusted(review_text[:3000], source="code-review-output")
+
         prompt = f"""A code review returned REQUEST_CHANGES on an AI-generated fix PR.
 Your job: decide whether to merge the PR now (core fix is correct, remaining issues are minor)
 or wait for a re-fix (fix is wrong or introduces meaningful risk).
@@ -88,7 +98,7 @@ INCIDENT:
   Fix file    : {incident.diagnosis_affected_file or '(unknown)'}
 
 CODE REVIEW (the review that returned REQUEST_CHANGES):
-{review_text[:3000]}
+{wrapped_review}
 
 CLASSIFICATION RULES:
   BLOCKING issues (always → refix_first):

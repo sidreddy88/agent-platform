@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.agents.base import AgentResult, BaseAgent
 from app.services.github import FileDiff, GitHubError, GitHubService, PRDetails
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import LLMService
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,9 @@ def _format_rag_context(chunks) -> str:
     lines = ["Related codebase context (files semantically related to this diff):"]
     for chunk in chunks:
         lines.append(f"\n--- {chunk.file_path} (lines {chunk.start_line}–{chunk.end_line}, score={chunk.score:.2f}) ---")
-        lines.append(chunk.content[:600])  # cap per chunk to avoid prompt bloat
+        content = chunk.content[:600]  # cap per chunk to avoid prompt bloat
+        scan_for_injection(content, source=f"rag-chunk:{chunk.file_path}")
+        lines.append(wrap_untrusted(content, source=f"rag-chunk:{chunk.file_path}"))
     return "\n".join(lines)
 
 def _format_pr(pr: PRDetails, files: list[FileDiff]) -> str:
@@ -49,17 +52,22 @@ def _format_pr(pr: PRDetails, files: list[FileDiff]) -> str:
         f"  - {f.filename} [{f.status}] +{f.additions}/-{f.deletions}"
         for f in files
     )
+    description = pr.description or "(none)"
+    scan_for_injection(pr.title or "", source="github-pr-title")
+    scan_for_injection(description, source="github-pr-description")
     return (
         f"PR #{pr.number}: {pr.title}\n"
         f"Author : {pr.author}\n"
         f"Branches: {pr.base_branch} ← {pr.head_branch}\n"
-        f"Description: {pr.description or '(none)'}\n\n"
+        f"Description: {wrap_untrusted(description, source='github-pr-description')}\n\n"
         f"Changed files ({len(files)}):\n{changed}"
     )
 
 
 def _format_file_diff(f: FileDiff) -> str:
     patch = f.patch or "(binary or oversized file — no patch available)"
+    scan_for_injection(patch, source=f"github-diff:{f.filename}")
+    patch = wrap_untrusted(patch, source=f"github-diff:{f.filename}")
     return (
         f"File   : {f.filename}\n"
         f"Status : {f.status}  +{f.additions}/-{f.deletions}\n\n"
@@ -260,12 +268,16 @@ async def generate_review(
         if review_kind == "clarity" else ""
     )
 
+    review_description = pr.description or "(none)"
+    scan_for_injection(pr.title or "", source="github-pr-title")
+    scan_for_injection(review_description, source="github-pr-description")
+
     prompt = f"""You are a staff engineer writing the final code review for a pull request.
 
 PR #{pr.number}: {pr.title}
 Author : {pr.author}
 Branches: {pr.base_branch} ← {pr.head_branch}
-Description: {pr.description or '(none)'}
+Description: {wrap_untrusted(review_description, source="github-pr-description")}
 {kind_context}
 
 Changed files:
