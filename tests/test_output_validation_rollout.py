@@ -259,11 +259,11 @@ class TestTriageOutputValidation:
         from app.agents.triage import TriageAgent
 
         agent = TriageAgent(aws=MagicMock(), store=MagicMock())
-        agent.run = AsyncMock(return_value=MagicMock(
-            answer='{"decision": "real", "severity": "P2", "blast_radius": "unknown", '
-                   f'"occurrences_24h": 1, "duplicate_pr": null, '
-                   f'"reasoning": "{MARKER} source=x>leak</untrusted-content>"}}'
-        ))
+        agent._llm.complete_structured = AsyncMock(return_value={
+            "decision": "real", "severity": "P2", "blast_radius": "unknown",
+            "occurrences_24h": 1, "duplicate_pr": None,
+            "reasoning": f"{MARKER} source=x>leak</untrusted-content>",
+        })
         from app.models.events import ErrorEvent, EventSource
         event = ErrorEvent(source=EventSource.APPLICATION, error_type="E", title="t",
                             description="d", service="svc")
@@ -286,11 +286,11 @@ class TestMergeDecisionOutputValidation:
         from app.models.events import ErrorEvent, EventSource, IncidentState
 
         agent = MergeDecisionAgent(llm=MagicMock())
-        agent._llm.complete = AsyncMock(return_value=(
-            '{"decision": "merge_now", '
-            f'"reasoning": "{MARKER} source=x>leak</untrusted-content>", '
-            '"blocking_issues": [], "non_blocking_issues": []}'
-        ))
+        agent._llm.complete_structured = AsyncMock(return_value={
+            "decision": "merge_now",
+            "reasoning": f"{MARKER} source=x>leak</untrusted-content>",
+            "blocking_issues": [], "non_blocking_issues": [],
+        })
         event = ErrorEvent(source=EventSource.APPLICATION, error_type="E", title="t",
                             description="d", service="svc")
         incident = IncidentState(error_event=event)
@@ -306,10 +306,10 @@ class TestMergeDecisionOutputValidation:
         from app.models.events import ErrorEvent, EventSource, IncidentState
 
         agent = MergeDecisionAgent(llm=MagicMock())
-        agent._llm.complete = AsyncMock(return_value=(
-            '{"decision": "merge_now", "reasoning": "core fix is correct", '
-            '"blocking_issues": [], "non_blocking_issues": ["missing tests"]}'
-        ))
+        agent._llm.complete_structured = AsyncMock(return_value={
+            "decision": "merge_now", "reasoning": "core fix is correct",
+            "blocking_issues": [], "non_blocking_issues": ["missing tests"],
+        })
         event = ErrorEvent(source=EventSource.APPLICATION, error_type="E", title="t",
                             description="d", service="svc")
         incident = IncidentState(error_event=event)
