@@ -93,26 +93,29 @@ AUDIT: list[AuditEntry] = [
     # --- DiagnosisAgent — confirmed today, NOT yet fixed ---
     AuditEntry(
         agent="DiagnosisAgent", tool="get_error_samples",
-        file_line="app/agents/diagnosis.py:1334-1337",
+        file_line="app/agents/diagnosis.py:1334-1337 (pre-fix)",
         instruction='log_group="{log_group}", pattern="{pattern}", minutes=120',
-        verdict=Verdict.DETERMINISTIC, status=Status.NOT_FIXED,
-        evidence="Prompt prescribes the exact call: 'log_group=\"{log_group}\", pattern=\"{pattern}\", "
+        verdict=Verdict.DETERMINISTIC, status=Status.ALREADY_FIXED,
+        evidence="Prompt prescribed the exact call: 'log_group=\"{log_group}\", pattern=\"{pattern}\", "
                  "minutes=120' -- log_group/pattern from event.metadata (identical derivation to "
-                 "TriageAgent's original design), minutes is a fixed literal. Zero judgment.",
+                 "TriageAgent's original design), minutes a fixed literal. Zero judgment. Fixed same "
+                 "PR this audit script was introduced in (diagnose() now calls it directly).",
     ),
     AuditEntry(
         agent="DiagnosisAgent", tool="check_still_occurring",
-        file_line="app/agents/diagnosis.py:1339-1340",
+        file_line="app/agents/diagnosis.py:1339-1340 (pre-fix)",
         instruction='log_group="{log_group}", pattern="{pattern}"',
-        verdict=Verdict.DETERMINISTIC, status=Status.NOT_FIXED,
-        evidence="Same log_group/pattern, no additional parameters. Zero judgment.",
+        verdict=Verdict.DETERMINISTIC, status=Status.ALREADY_FIXED,
+        evidence="Same log_group/pattern, no additional parameters. Zero judgment. Fixed alongside "
+                 "get_error_samples above.",
     ),
     AuditEntry(
         agent="DiagnosisAgent", tool="get_occurrence_timeline",
-        file_line="app/agents/diagnosis.py:1342-1343",
+        file_line="app/agents/diagnosis.py:1342-1343 (pre-fix)",
         instruction='log_group="{log_group}", pattern="{pattern}", hours=24',
-        verdict=Verdict.DETERMINISTIC, status=Status.NOT_FIXED,
-        evidence="Same log_group/pattern, hours=24 fixed literal. Zero judgment.",
+        verdict=Verdict.DETERMINISTIC, status=Status.ALREADY_FIXED,
+        evidence="Same log_group/pattern, hours=24 fixed literal. Zero judgment. Fixed alongside the "
+                 "other two log-context tools above.",
     ),
     AuditEntry(
         agent="DiagnosisAgent", tool="search_similar_incidents",
@@ -163,36 +166,39 @@ AUDIT: list[AuditEntry] = [
         evidence="The finalizing tool -- definitionally the model's own conclusion.",
     ),
 
-    # --- MonitorGenerationAgent — confirmed today, NOT yet fixed ---
+    # --- MonitorGenerationAgent — fixed ---
     AuditEntry(
         agent="MonitorGenerationAgent", tool="analyze_pr_diff",
-        file_line="app/agents/monitor_generation.py:357",
+        file_line="app/agents/monitor_generation.py:357 (pre-fix)",
         instruction='owner="{owner}", repo="{repo}", pr_number={pr_number}',
-        verdict=Verdict.DETERMINISTIC, status=Status.NOT_FIXED,
-        evidence="All three arguments are parameters already passed into generate_monitors() itself "
-                 "-- the model is asked to copy values it was already handed. Zero judgment.",
+        verdict=Verdict.DETERMINISTIC, status=Status.ALREADY_FIXED,
+        evidence="All three arguments were parameters already passed into generate_monitors() itself "
+                 "-- the model was asked to copy values it was already handed. Zero judgment. "
+                 "generate_monitors() now calls github.get_pr_diff() directly -- no LLM call in the "
+                 "method at all anymore.",
     ),
     AuditEntry(
         agent="MonitorGenerationAgent", tool="generate_cloudwatch_alarms",
-        file_line="app/agents/monitor_generation.py:359-360",
+        file_line="app/agents/monitor_generation.py:359-360 (pre-fix)",
         instruction='file, additions, "any new_functions found", service_name="{repo}"',
-        verdict=Verdict.PARTIAL, status=Status.NOT_FIXED,
-        evidence="file/additions iterate over analyze_pr_diff's OWN structured output (itself "
-                 "deterministic); service_name is a fixed literal. 'new_functions found' looks "
-                 "like it needs model extraction, but analyze_pr_diff's tool implementation already "
-                 "regex-extracts function names into its returned string ('| new: func1, func2') -- "
-                 "likely also mechanically parseable, not confirmed with the same certainty as the "
-                 "other three arguments. Worth a closer look before converting.",
+        verdict=Verdict.DETERMINISTIC, status=Status.ALREADY_FIXED,
+        evidence="The 'closer look' this entry originally flagged confirmed there was nothing left "
+                 "to resolve: the tool's own implementation never even reads its new_functions "
+                 "argument (checked the function body directly) -- namespace/metric/threshold "
+                 "selection is 100% rule-based on file/additions alone. Zero judgment anywhere in "
+                 "this tool's real behavior. generate_monitors() now calls it directly per file.",
     ),
     AuditEntry(
         agent="MonitorGenerationAgent", tool="generate_do_health_checks",
-        file_line="app/agents/monitor_generation.py:361-362",
+        file_line="app/agents/monitor_generation.py:361-362 (pre-fix)",
         instruction='file, additions, "any new endpoint paths found" '
                     '-- conditional on filename containing route/api/handler/endpoint/controller',
-        verdict=Verdict.PARTIAL, status=Status.NOT_FIXED,
-        evidence="Same shape as generate_cloudwatch_alarms above -- the conditional trigger itself "
-                 "(filename substring match) is fully mechanical; the endpoint-path extraction is "
-                 "the same borderline case.",
+        verdict=Verdict.DETERMINISTIC, status=Status.ALREADY_FIXED,
+        evidence="Same resolution as generate_cloudwatch_alarms: the conditional trigger (filename "
+                 "substring match) was always mechanical, and the endpoint list just gets passed "
+                 "through verbatim (defaults to ['/health'] if empty) -- no judgment in the tool's "
+                 "real implementation either. Both the trigger and the argument are computed "
+                 "directly in generate_monitors() now via the shared _extract_new_symbols() helper.",
     ),
 
     # --- ErrorClarityAgent — checked, genuinely clean ---
