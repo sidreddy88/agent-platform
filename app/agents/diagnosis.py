@@ -1284,12 +1284,44 @@ class DiagnosisAgent(BaseAgent):
                 "to contain the actual bug.\n"
             )
 
-        log_group_warning = ""
-        if not log_group:
+        # Steps 1-3 (get_error_samples, check_still_occurring, get_occurrence_timeline)
+        # take arguments fully determined by the incident before the model ever sees a
+        # prompt -- log_group/pattern come from event.metadata, minutes/hours are fixed
+        # literals. No model judgment was ever involved in deciding these three calls;
+        # the model was only ever asked to copy values it was already handed, at the
+        # cost of 3 full ReAct-loop round trips (Sonnet calls) on every single
+        # diagnosis, before any real investigation even started. Same anti-pattern
+        # found and fixed in TriageAgent, confirmed here via
+        # scripts/audit_deterministic_tool_calls.py. Fetched directly here instead;
+        # their real output is embedded below as pre-loaded context (still labelled
+        # "steps 1-3" so every other "step 5"/"step 6"/"step 7" cross-reference
+        # elsewhere in this prompt stays correct without renumbering).
+        if log_group:
+            get_error_samples_fn, _ = self._tools["get_error_samples"]
+            check_still_occurring_fn, _ = self._tools["check_still_occurring"]
+            get_occurrence_timeline_fn, _ = self._tools["get_occurrence_timeline"]
+            error_samples = await get_error_samples_fn(log_group=log_group, pattern=pattern, minutes=120)
+            still_occurring = await check_still_occurring_fn(log_group=log_group, pattern=pattern)
+            occurrence_timeline = await get_occurrence_timeline_fn(log_group=log_group, pattern=pattern, hours=24)
+            log_group_warning = f"""
+STEPS 1-3 — LOG CONTEXT (already fetched, no tool call needed):
+
+1. ERROR SAMPLES (get_error_samples, minutes=120):
+{error_samples}
+   → Extract: exact error text, function names in stack trace, any file paths or line numbers.
+     These become your search terms for step 5.
+
+2. STILL OCCURRING (check_still_occurring):
+{still_occurring}
+
+3. OCCURRENCE TIMELINE (get_occurrence_timeline, hours=24):
+{occurrence_timeline}
+"""
+        else:
             logger.warning("DiagnosisAgent: log_group missing from incident metadata — log-based steps will produce no results")
             log_group_warning = (
-                "\nWARNING: log_group is not set for this incident. Steps 1–3 (log tools) will "
-                "return no data. Skip them and proceed directly to steps 4–6 (knowledge base + codebase search). "
+                "\nSTEPS 1-3 — LOG CONTEXT: log_group is not set for this incident, so log-based "
+                "steps could not be fetched (they would return no data) and were skipped. "
                 "Set reproduction_confirmed=false and cap confidence at 0.75.\n"
             )
 
@@ -1328,19 +1360,9 @@ INCIDENT:
   blast_radius    : {incident.blast_radius}
   triage_reasoning: {incident.triage_reasoning}
 {log_group_warning}{prior_section}{stack_trace_section}
-STEPS — call tools in this exact order. Do not skip steps 1–3 unless log_group is missing.
+STEPS — call tools in this exact order, starting from step 4 (steps 1-3 are the
+pre-fetched LOG CONTEXT above — already done, no tool call needed for them).
 Complete each step before moving to the next.
-
-1. get_error_samples — see the actual error messages
-   log_group="{log_group}", pattern="{pattern}", minutes=120
-   → Extract: exact error text, function names in stack trace, any file paths or line numbers.
-     These become your search terms for step 5.
-
-2. check_still_occurring — confirm if error is ongoing
-   log_group="{log_group}", pattern="{pattern}"
-
-3. get_occurrence_timeline — understand the trend
-   log_group="{log_group}", pattern="{pattern}", hours=24
 
 4. search_similar_incidents — check knowledge base
    symptoms = domain-specific keywords from the error: operation names, error codes, component names.
