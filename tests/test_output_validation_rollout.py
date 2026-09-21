@@ -325,21 +325,29 @@ class TestMergeDecisionOutputValidation:
 
 class TestMonitorGenerationOutputValidation:
     @pytest.mark.asyncio
-    async def test_leaked_marker_in_monitor_name_is_logged(self, caplog):
+    async def test_leaked_marker_in_health_check_path_is_logged(self, caplog):
+        """generate_monitors() is fully deterministic now -- no model ever
+        names a monitor. The real remaining path for a leaked marker to
+        reach MonitorConfig.name: a route-registration string captured from
+        a diff (_extract_new_symbols) flows unsanitized into
+        generate_do_health_checks' path field (unlike alarm names, which
+        strip non-alphanumeric characters). Detection-only, same as
+        everywhere else this check is log-only."""
         from app.agents.monitor_generation import MonitorGenerationAgent
+        from app.services.github import FileDiff
 
         agent = MonitorGenerationAgent(github=MagicMock(), llm=MagicMock())
-        agent.run = AsyncMock(return_value=MagicMock(answer=(
-            '{"monitors": [{"monitor_type": "cloudwatch_alarm", "file": "a.js", '
-            f'"name": "{MARKER} source=x>leak</untrusted-content>", '
-            '"config": {}, "created": false}], '
-            '"files_analyzed": 1, "monitors_created": 1, "coverage_ratio": 1.0}'
-        )))
+        agent._github.get_pr_diff = AsyncMock(return_value=[
+            FileDiff(
+                filename="routes/api.js", status="modified", additions=10, deletions=0,
+                patch=f"+app.get('{MARKER} source=x>leak</untrusted-content>')\n",
+            ),
+        ])
 
         with caplog.at_level(logging.WARNING):
             result = await agent.generate_monitors(
                 owner="o", repo="r", pr_number=1, pr_title="t", pr_description="d",
             )
 
-        assert len(result.monitors) == 1  # untouched
+        assert len(result.monitors) == 2  # 1 alarm + 1 health check, untouched
         assert any("Output validation failed" in r.message for r in caplog.records)
