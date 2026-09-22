@@ -64,48 +64,103 @@ def _load_default_models() -> dict:
 DEFAULT_MODELS = _load_default_models()
 
 
-async def validate_models_live() -> None:
-    """Startup check: confirm every configured Anthropic model ID still exists.
+def _configured_models() -> tuple[set[str], set[str]]:
+    """Every model id in config/llm_routing.json, split by provider.
 
-    Dated model snapshots get retired without warning — this is what silently
-    broke several agents in Aug 2026 (see module docstring). Runs once at
-    FastAPI startup as a background task, logs loudly on a mismatch, and
-    never raises — a validation call failing shouldn't take prod down.
+    Returns (anthropic_ids, openai_ids). Anthropic ids are bare
+    ("claude-sonnet-5"); LiteLLM provider-prefixed ids ("openai/gpt-5.5") are
+    returned with the prefix stripped, since that is what OpenAI's own model
+    list uses. Any other prefix is ignored — there is no list to check it
+    against, and guessing would produce false alarms.
     """
-    from app.core.config import settings
-
-    if settings.environment == "test" or not settings.anthropic_api_key:
-        return
-
-    configured: set[str] = set(DEFAULT_MODELS.values())
+    anthropic_ids: set[str] = set(DEFAULT_MODELS.values())
+    openai_ids: set[str] = set()
     routing_config = _load_routing_config()
     for entry in routing_config.get("routing", {}).values():
         for key in ("model", "fallback_model"):
             model = entry.get(key)
-            # Skip non-Anthropic entries (LiteLLM provider-prefixed, e.g.
-            # "openai/gpt-4.1") — only Anthropic's own model list applies.
-            if model and "/" not in model:
-                configured.add(model)
+            if not model:
+                continue
+            if "/" not in model:
+                anthropic_ids.add(model)
+            elif model.startswith("openai/"):
+                openai_ids.add(model.split("/", 1)[1])
+    return anthropic_ids, openai_ids
+
+
+async def _live_anthropic_ids() -> set[str] | None:
+    from app.core.config import settings
 
     try:
         import anthropic
 
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         page = await client.models.list(limit=100)
-        live_ids = {m.id for m in page.data}
+        return {m.id for m in page.data}
     except Exception as exc:
-        logger.warning("[model_config] could not verify live model list at startup: %s", exc)
+        logger.warning("[model_config] could not verify live Anthropic model list: %s", exc)
+        return None
+
+
+async def _live_openai_ids() -> set[str] | None:
+    from app.core.config import settings
+
+    if not settings.openai_api_key:
+        return None
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        page = await client.models.list()
+        return {m.id for m in page.data}
+    except Exception as exc:
+        logger.warning("[model_config] could not verify live OpenAI model list: %s", exc)
+        return None
+
+
+async def validate_models_live() -> None:
+    """Startup check: confirm every configured model id still exists.
+
+    Dated model snapshots get retired without warning — this is what silently
+    broke several agents in Aug 2026 (see module docstring). Runs once at
+    FastAPI startup as a background task, logs loudly on a mismatch, and
+    never raises — a validation call failing shouldn't take prod down.
+
+    Covers OpenAI as well as Anthropic. It originally skipped anything with a
+    "/" in it, which meant the review task's model was unverified: a typo'd
+    or retired OpenAI id would 404 on every code review with nothing warning
+    at startup. That is precisely the silent failure this module exists to
+    prevent, so the exemption was the bug.
+
+    Each provider is checked independently — one unreachable list must not
+    suppress the other's result.
+    """
+    from app.core.config import settings
+
+    if settings.environment == "test":
         return
 
-    dead = configured - live_ids
+    anthropic_ids, openai_ids = _configured_models()
+    checked = 0
+    dead: list[str] = []
+
+    if anthropic_ids and settings.anthropic_api_key:
+        live = await _live_anthropic_ids()
+        if live is not None:
+            checked += len(anthropic_ids)
+            dead += sorted(anthropic_ids - live)
+
+    if openai_ids:
+        live = await _live_openai_ids()
+        if live is not None:
+            checked += len(openai_ids)
+            dead += sorted(f"openai/{m}" for m in openai_ids - live)
+
     if dead:
         logger.error(
             "[model_config] %d configured model(s) no longer exist and will 404 on "
             "every call: %s. Update config/llm_routing.json.",
-            len(dead), sorted(dead),
+            len(dead), dead,
         )
-    else:
-        logger.info(
-            "[model_config] all %d configured Anthropic model(s) verified live",
-            len(configured),
-        )
+    elif checked:
+        logger.info("[model_config] all %d configured model(s) verified live", checked)
