@@ -115,7 +115,62 @@ async def _build_instance_rag(instance_id: str, worktree_path: str) -> tuple[Any
         return None, time.perf_counter() - start
 
 
-async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = False) -> dict[str, Any]:
+def _capture_steps(agent: Any, sink: list[Any]) -> None:
+    """Wrap agent.run() so the ReAct step list survives the call.
+
+    DiagnosisAgent.diagnose() does `await self.run(prompt)` and discards the
+    AgentResult (diagnosis.py:1662), so the per-turn tool sequence exists only
+    inside that call. Everything persisted elsewhere is lossy: `agent_runs`
+    keeps a tool-call *count*, logs/agent_sessions.jsonl keeps human-readable
+    status strings, and Langfuse truncates every tool output to 500 characters
+    (tracing.py:218) — which is fine for debugging and useless for trajectory
+    analysis.
+
+    Done here as an eval-only wrapper rather than an attribute on BaseAgent
+    deliberately: touching base.py triggers both regression gates (~$45 for the
+    diagnosis replay) and changes behaviour for all 7 pipeline agents, for a
+    capability only the harness needs today. Stage 2's optimizer will need
+    trajectory capture in production too — promote it to BaseAgent then, with
+    the gate cost paid once and on purpose.
+    """
+    original = agent.run
+
+    async def capturing(*args: Any, **kwargs: Any) -> Any:
+        result = await original(*args, **kwargs)
+        sink.append(result)
+        return result
+
+    agent.run = capturing
+
+
+def _steps_records(instance_id: str, results: list[Any], max_chars: int) -> list[dict]:
+    """Flatten captured AgentResults into one record per tool call.
+
+    Shape matches what scripts/analyze_tool_call_headroom.py --from-file reads,
+    so the headroom analysis runs off a real 100-instance sweep instead of
+    whatever happens to be recent in Langfuse.
+    """
+    records = []
+    for result in results:
+        for step in getattr(result, "steps", []) or []:
+            if not step.action:
+                continue        # final answer step, no tool call
+            observation = step.observation or ""
+            records.append({
+                "trace_id": instance_id,
+                "iteration": step.iteration,
+                "name": step.action,
+                "input": step.action_input,
+                "output": observation[:max_chars],
+                "output_truncated": len(observation) > max_chars,
+                "thought": (step.thought or "")[:2000],
+            })
+    return records
+
+
+async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = False,
+                      steps_sink: list[dict] | None = None,
+                      steps_max_chars: int = 20000) -> dict[str, Any]:
     from app.agents.diagnosis import DiagnosisAgent
     from app.models.events import ErrorEvent, EventSource, IncidentState
     from app.services.repo import LocalRepoService
@@ -159,9 +214,16 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
         )
 
     agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=rag)
+    captured: list[Any] = []
+    if steps_sink is not None:
+        _capture_steps(agent, captured)
     try:
         result = await agent.diagnose(incident)
     finally:
+        if steps_sink is not None:
+            steps_sink.extend(
+                _steps_records(instance["instance_id"], captured, steps_max_chars)
+            )
         await pinned_repo.remove_worktree()
         if rag is not None:
             # Throwaway collection -- one per instance would otherwise accumulate.
@@ -198,7 +260,8 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
 
 
 async def _run(instances: list[dict[str, Any]], verbose: bool = True,
-               use_rag: bool = False) -> list[dict[str, Any]]:
+               use_rag: bool = False, steps_sink: list[dict] | None = None,
+               steps_max_chars: int = 20000) -> list[dict[str, Any]]:
     from app.services.github import GitHubService
 
     github = GitHubService()
@@ -207,7 +270,10 @@ async def _run(instances: list[dict[str, Any]], verbose: bool = True,
         if verbose:
             print(f"[{i}/{len(instances)}] {instance['instance_id']} ({instance['repo']}) ...", flush=True)
         try:
-            result = await _replay_one(instance, github, use_rag=use_rag)
+            result = await _replay_one(
+                instance, github, use_rag=use_rag,
+                steps_sink=steps_sink, steps_max_chars=steps_max_chars,
+            )
         except Exception as exc:
             result = {
                 "instance_id": instance.get("instance_id"),
@@ -274,10 +340,43 @@ def main() -> int:
             "the original 56%% baseline (direct code search only)."
         ),
     )
+    parser.add_argument(
+        "--steps-out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write every ReAct tool call (action, full args, untruncated observation) "
+            "to a JSONL at PATH. Feed it to scripts/analyze_tool_call_headroom.py "
+            "--from-file, and reuse it as trajectory input for harness optimisation."
+        ),
+    )
+    parser.add_argument(
+        "--steps-max-chars", type=int, default=20000, metavar="N",
+        help=(
+            "Per-observation cap in the steps JSONL (default 20000). Langfuse caps at "
+            "500, which is too lossy for dependency analysis; full file contents would "
+            "make the file enormous. Records set output_truncated when the cap bites."
+        ),
+    )
     args = parser.parse_args()
 
     instances = _load_instances(Path(args.dataset), limit=args.limit)
-    results = asyncio.run(_run(instances, verbose=not args.json, use_rag=args.rag))
+    steps_sink: list[dict] | None = [] if args.steps_out else None
+    results = asyncio.run(_run(
+        instances, verbose=not args.json, use_rag=args.rag,
+        steps_sink=steps_sink, steps_max_chars=args.steps_max_chars,
+    ))
+
+    if steps_sink is not None:
+        out = Path(args.steps_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w") as f:
+            for rec in steps_sink:
+                f.write(json.dumps(rec) + "\n")
+        truncated = sum(1 for r in steps_sink if r["output_truncated"])
+        print(f"\nWrote {len(steps_sink)} tool-call steps to {out}"
+              f" ({truncated} outputs hit the {args.steps_max_chars}-char cap)",
+              file=sys.stderr)
 
     if args.json:
         print(json.dumps(results, indent=2))
