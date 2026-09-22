@@ -34,8 +34,20 @@ dataset does):
          entry) matches a file the real patch touched
   FAIL - no match, or no file identified at all
 
+Retrieval paths (read this before citing a pass rate):
+DiagnosisAgent has four ways to find code, and the original 56% run exercised
+one of them. `rag=None` was passed here, so hybrid_search was off; the
+stack-trace fast path required a "/app/" prefix and a JS/TS extension, so it
+fired on 0 of 100 all-Python instances; and the tree-sitter call graph behind
+find_callers had no Python grammar, so it returned "no callers found" every
+time. Only direct code search (grep_codebase / get_file_contents / GitHub
+search_code) was live. The other three have since been fixed; `--rag` is
+opt-in so the with/without comparison stays controlled. Any pass rate from a
+default run should be cited as "direct code search only".
+
 Usage:
-    python scripts/eval_swebench_diagnosis.py
+    python scripts/eval_swebench_diagnosis.py                   # baseline: no RAG
+    python scripts/eval_swebench_diagnosis.py --rag             # all four paths live
     python scripts/eval_swebench_diagnosis.py --dataset /tmp/sample.jsonl --limit 5
     python scripts/eval_swebench_diagnosis.py --json
 """
@@ -77,7 +89,33 @@ def _touched_files(patch: str) -> set[str]:
     return files
 
 
-async def _replay_one(instance: dict[str, Any], github: Any) -> dict[str, Any]:
+async def _build_instance_rag(instance_id: str, worktree_path: str) -> tuple[Any, float]:
+    """Index one pinned worktree into its own throwaway collection.
+
+    Per-instance, not per-repo: SWE-bench instances from the same repo sit at
+    different `base_commit`s, so a shared index would retrieve code that isn't
+    in the worktree the agent is reading. Collections are namespaced by
+    instance_id and cleared afterwards.
+
+    Returns (rag_service, seconds_spent). Returns (None, 0.0) on any failure —
+    a broken index must degrade to the grep-only path, not abort the instance,
+    so a partial run stays comparable to the no-RAG baseline.
+    """
+    import time
+
+    start = time.perf_counter()
+    try:
+        from app.services.rag import RAGService
+
+        rag = RAGService(collection_name=f"swebench_{instance_id}".replace("__", "_"))
+        await rag.index_directory(worktree_path, root=worktree_path)
+        return rag, time.perf_counter() - start
+    except Exception as exc:
+        print(f"    [rag] indexing failed for {instance_id}: {exc}", flush=True)
+        return None, time.perf_counter() - start
+
+
+async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = False) -> dict[str, Any]:
     from app.agents.diagnosis import DiagnosisAgent
     from app.models.events import ErrorEvent, EventSource, IncidentState
     from app.services.repo import LocalRepoService
@@ -101,13 +139,36 @@ async def _replay_one(instance: dict[str, Any], github: Any) -> dict[str, Any]:
     incident = IncidentState(error_event=event)
 
     pinned_repo = LocalRepoService(owner, repo, pinned_sha=base_commit)
-    # rag=None -- no per-repo embedding index to build; _search_codebase already
-    # degrades gracefully ("RAG not configured") when rag is None.
-    agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=None)
+
+    # rag defaults to None, which is how the original 56% baseline was measured:
+    # _search_codebase degrades to "RAG not configured" and DiagnosisAgent runs
+    # on direct code search alone. That was a deliberate shortcut (no per-repo
+    # index to build) whose consequence went unrecorded -- 1 of the agent's 4
+    # retrieval paths was active for the whole evaluation. --rag builds a real
+    # per-instance index so the two can be compared directly.
+    rag = None
+    index_seconds = 0.0
+    if use_rag:
+        # ensure_fresh() is what materialises the pinned worktree; diagnose()
+        # calls it too, but the index has to be built against real files on
+        # disk, so it has to happen first. Idempotent, so the later call is
+        # a no-op.
+        await pinned_repo.ensure_fresh()
+        rag, index_seconds = await _build_instance_rag(
+            instance["instance_id"], str(pinned_repo.local_path)
+        )
+
+    agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=rag)
     try:
         result = await agent.diagnose(incident)
     finally:
         await pinned_repo.remove_worktree()
+        if rag is not None:
+            # Throwaway collection -- one per instance would otherwise accumulate.
+            try:
+                rag.clear()
+            except Exception:
+                pass
 
     candidates = {f for f in (result.affected_file, result.additional_fix_file) if f}
     candidates |= {t.get("file") for t in (result.additional_fix_targets or []) if t.get("file")}
@@ -131,10 +192,13 @@ async def _replay_one(instance: dict[str, Any], github: Any) -> dict[str, Any]:
         "candidate_files": sorted(normalized_candidates),
         "confidence": result.confidence,
         "escalate": result.escalate,
+        "rag_enabled": rag is not None,
+        "index_seconds": round(index_seconds, 1),
     }
 
 
-async def _run(instances: list[dict[str, Any]], verbose: bool = True) -> list[dict[str, Any]]:
+async def _run(instances: list[dict[str, Any]], verbose: bool = True,
+               use_rag: bool = False) -> list[dict[str, Any]]:
     from app.services.github import GitHubService
 
     github = GitHubService()
@@ -143,7 +207,7 @@ async def _run(instances: list[dict[str, Any]], verbose: bool = True) -> list[di
         if verbose:
             print(f"[{i}/{len(instances)}] {instance['instance_id']} ({instance['repo']}) ...", flush=True)
         try:
-            result = await _replay_one(instance, github)
+            result = await _replay_one(instance, github, use_rag=use_rag)
         except Exception as exc:
             result = {
                 "instance_id": instance.get("instance_id"),
@@ -154,6 +218,8 @@ async def _run(instances: list[dict[str, Any]], verbose: bool = True) -> list[di
                 "candidate_files": [],
                 "confidence": None,
                 "escalate": None,
+                "rag_enabled": use_rag,
+                "index_seconds": 0.0,
             }
         if verbose:
             print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
@@ -199,10 +265,19 @@ def main() -> int:
     parser.add_argument("--dataset", default=str(_DEFAULT_DATASET), help="Path to the SWE-bench sample JSONL")
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N instances")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a report")
+    parser.add_argument(
+        "--rag",
+        action="store_true",
+        help=(
+            "Build a per-instance embedding index over the pinned worktree and give "
+            "DiagnosisAgent its hybrid_search path. Off by default, which reproduces "
+            "the original 56%% baseline (direct code search only)."
+        ),
+    )
     args = parser.parse_args()
 
     instances = _load_instances(Path(args.dataset), limit=args.limit)
-    results = asyncio.run(_run(instances, verbose=not args.json))
+    results = asyncio.run(_run(instances, verbose=not args.json, use_rag=args.rag))
 
     if args.json:
         print(json.dumps(results, indent=2))
