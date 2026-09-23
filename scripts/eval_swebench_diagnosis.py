@@ -214,6 +214,17 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
         )
 
     agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=rag)
+    # DiagnosisAgent.__init__ hardcodes LLMService() -- Sonnet from
+    # config/llm_routing.json's "defaults" section -- and has no llm= override,
+    # so without this line "routing.diagnosis.model" (the per-task override,
+    # e.g. claude-sonnet-5) is silently never read here. incident_loop.py is
+    # the only place that currently applies this override
+    # (self._diagnosis._llm = llm_gateway.get_llm_service_for("diagnosis"));
+    # every eval script constructing DiagnosisAgent directly needs the same
+    # line, or it measures whatever model "defaults" happens to name, not the
+    # one actually configured for the diagnosis task.
+    from app.services.llm_gateway import llm_gateway
+    agent._llm = llm_gateway.get_llm_service_for("diagnosis")
     captured: list[Any] = []
     if steps_sink is not None:
         _capture_steps(agent, captured)
