@@ -30,6 +30,11 @@ identical reruns flip cases (psf__requests-1142 went PASS -> FAIL with no
 code change), so a zero-tolerance bar can't tell noise from a regression.
 Same lesson scripts/eval_triage_full_regression.py already learned.
 
+Provider failures (auth, billing, rate limit, 5xx) are recorded as INFRA,
+not ERROR, and any INFRA case makes the whole run INVALID: it fails, but
+says "rerun", not "regression". Auth and billing failures also stop the
+shard, since every later call would fail the same way.
+
 Runtime is fixed by sharding: CI runs this with --shard K/N across a job
 matrix, each shard writes its verdicts with --results-out, and a final job
 merges them with --aggregate and applies the threshold. The aggregate step
@@ -66,6 +71,36 @@ _SWEBENCH_DATASET = Path(__file__).resolve().parent.parent / "app" / "evals" / "
 # setting this comfortably above the observed non-pass rate, the way
 # eval_triage_full_regression.py's 6% was set. At N=56, 10% allows 6 cases.
 MAX_NONPASS_RATE = 0.10
+
+
+def _provider_failure(exc: BaseException) -> str | None:
+    """Name the provider-side failure behind `exc`, or None if it's an
+    ordinary replay error.
+
+    These say nothing about DiagnosisAgent, so they must never be scored as
+    regressions. Calibration run 36070479644 is why: Anthropic credits ran
+    out mid-run, 25 of 56 cases raised "credit balance is too low", and the
+    gate reported a 30-case regression on unchanged main. Duck-types
+    `status_code` the same way AlertingService.check_llm_provider_error does,
+    since the raw SDK and the LiteLLM gateway raise different exception
+    types for the same HTTP status.
+    """
+    status = getattr(exc, "status_code", None)
+    if status == 401:
+        return "auth"
+    if status == 400 and "credit balance" in str(exc).lower():
+        return "billing"
+    if status == 429:
+        return "rate_limit"
+    if isinstance(status, int) and status >= 500:
+        return "provider_outage"
+    return None
+
+
+# Auth and billing failures fail every later call too, so a shard stops
+# replaying once it sees one instead of burning an hour on certain errors.
+# Rate limits and 5xx can clear up, so those only mark the one case.
+_FATAL_PROVIDER_FAILURES = {"auth", "billing"}
 
 
 def _select_shard(items: list[Any], shard: int, of: int, offset: int = 0) -> list[Any]:
@@ -108,14 +143,23 @@ async def _run_production_suite(cases: list[dict[str, Any]]) -> list[dict[str, A
         return []
     github = GitHubService()
     results = []
+    fatal = None
     for i, case in enumerate(cases, 1):
         label = case.get("event", {}).get("title", case.get("incident_id"))
+        base = {"incident_id": case.get("incident_id"), "title": label}
+        if fatal:
+            results.append({**base, "verdict": "INFRA", "infra_kind": fatal, "suite": "production",
+                            "detail": f"not replayed: earlier {fatal} failure"})
+            continue
         print(f"[production {i}/{len(cases)}] {label} ...", flush=True)
         try:
             result = await _replay_production_case(case, github)
         except Exception as exc:
-            result = {"incident_id": case.get("incident_id"), "title": label,
-                       "verdict": "ERROR", "detail": f"replay raised: {exc}"}
+            kind = _provider_failure(exc)
+            result = {**base, "verdict": "INFRA" if kind else "ERROR", "infra_kind": kind,
+                      "detail": f"replay raised: {exc}"}
+            if kind in _FATAL_PROVIDER_FAILURES:
+                fatal = kind
         print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
         results.append({**result, "suite": "production"})
     return results
@@ -129,20 +173,45 @@ async def _run_swebench_suite(instances: list[dict[str, Any]]) -> list[dict[str,
         return []
     github = GitHubService()
     results = []
+    fatal = None
     for i, instance in enumerate(instances, 1):
+        base = {"instance_id": instance.get("instance_id"), "repo": instance.get("repo")}
+        if fatal:
+            results.append({**base, "verdict": "INFRA", "infra_kind": fatal, "suite": "swebench",
+                            "detail": f"not replayed: earlier {fatal} failure"})
+            continue
         print(f"[swebench {i}/{len(instances)}] {instance['instance_id']} ({instance['repo']}) ...", flush=True)
         try:
             result = await _replay_swebench_instance(instance, github)
         except Exception as exc:
-            result = {"instance_id": instance.get("instance_id"), "repo": instance.get("repo"),
-                       "verdict": "ERROR", "detail": f"replay raised: {exc}"}
+            kind = _provider_failure(exc)
+            result = {**base, "verdict": "INFRA" if kind else "ERROR", "infra_kind": kind,
+                      "detail": f"replay raised: {exc}"}
+            if kind in _FATAL_PROVIDER_FAILURES:
+                fatal = kind
         print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
         results.append({**result, "suite": "swebench"})
     return results
 
 
 def _print_report(results: list[dict[str, Any]]) -> bool:
-    """Returns True if the gate should FAIL (non-pass rate exceeds the threshold)."""
+    """Returns True if the gate should FAIL (non-pass rate exceeds the
+    threshold, or the run is invalid)."""
+    infra = [r for r in results if r["verdict"] == "INFRA"]
+    if infra:
+        # Refuse to score at all, rather than scoring only the clean cases:
+        # if an LLM call inside the ReAct loop hits the same failure and the
+        # agent degrades to escalate instead of raising, that case shows up
+        # as an ordinary FAIL -- so every failure from the same run is suspect.
+        print(f"\n# DiagnosisAgent regression gate: RUN INVALID (N={len(results)})\n")
+        print(f"{len(infra)} case(s) hit a provider-side failure (auth, billing, rate "
+              f"limit, or outage) -- not a DiagnosisAgent regression. Not scored.")
+        for kind in sorted({r["infra_kind"] for r in infra}):
+            n = sum(r["infra_kind"] == kind for r in infra)
+            print(f"  - {kind}: {n} case(s)")
+        print("\nFix the provider issue (e.g. top up credits) and rerun the gate.")
+        return True
+
     total = len(results)
     non_pass = [r for r in results if r["verdict"] != "PASS"]
     rate = len(non_pass) / total if total else 0.0
