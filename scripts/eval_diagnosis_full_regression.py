@@ -97,6 +97,14 @@ def _provider_failure(exc: BaseException) -> str | None:
     return None
 
 
+# A non-PASS case is replayed this many more times before it counts. Two
+# valid calibration runs on unchanged main showed 16 of 56 known-good cases
+# failing at least once, with only 2 failing both times -- failures rotate
+# between cases, so a case that fails ~20% of the time independently fails
+# twice only ~4% of the time, while a genuinely broken case still fails
+# both. Costs roughly one extra replay per ~4 cases at today's noise.
+RETRIES = 1
+
 # Auth and billing failures fail every later call too, so a shard stops
 # replaying once it sees one instead of burning an hour on certain errors.
 # Rate limits and 5xx can clear up, so those only mark the one case.
@@ -135,63 +143,73 @@ def _load_swebench() -> list[dict[str, Any]]:
     return instances
 
 
-async def _run_production_suite(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    from app.services.github import GitHubService
-    from scripts.eval_diagnosis_regression import _replay_one as _replay_production_case
+async def _replay_attempt(replay, item, github, base: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return await replay(item, github)
+    except Exception as exc:
+        kind = _provider_failure(exc)
+        return {**base, "verdict": "INFRA" if kind else "ERROR", "infra_kind": kind,
+                "detail": f"replay raised: {exc}"}
 
-    if not cases:
+
+async def _run_suite(suite: str, items: list[dict[str, Any]], replay,
+                     base_of, label_of) -> list[dict[str, Any]]:
+    """Replay each item, retrying a non-PASS once (see RETRIES).
+
+    A case only counts as non-passing if every attempt fails. The verdict
+    kept is the last attempt's; `attempts` records all of them, and
+    `flaky` marks a case that passed only on retry.
+    """
+    from app.services.github import GitHubService
+
+    if not items:
         return []
     github = GitHubService()
     results = []
     fatal = None
-    for i, case in enumerate(cases, 1):
-        label = case.get("event", {}).get("title", case.get("incident_id"))
-        base = {"incident_id": case.get("incident_id"), "title": label}
+    for i, item in enumerate(items, 1):
+        base = base_of(item)
         if fatal:
-            results.append({**base, "verdict": "INFRA", "infra_kind": fatal, "suite": "production",
+            results.append({**base, "verdict": "INFRA", "infra_kind": fatal, "suite": suite,
+                            "attempts": [], "flaky": False,
                             "detail": f"not replayed: earlier {fatal} failure"})
             continue
-        print(f"[production {i}/{len(cases)}] {label} ...", flush=True)
-        try:
-            result = await _replay_production_case(case, github)
-        except Exception as exc:
-            kind = _provider_failure(exc)
-            result = {**base, "verdict": "INFRA" if kind else "ERROR", "infra_kind": kind,
-                      "detail": f"replay raised: {exc}"}
-            if kind in _FATAL_PROVIDER_FAILURES:
-                fatal = kind
-        print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
-        results.append({**result, "suite": "production"})
+        print(f"[{suite} {i}/{len(items)}] {label_of(item)} ...", flush=True)
+        attempts = []
+        for attempt in range(1 + RETRIES):
+            if attempt:
+                print(f"    retrying ({attempt}/{RETRIES}) ...", flush=True)
+            result = await _replay_attempt(replay, item, github, base)
+            attempts.append(result["verdict"])
+            print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
+            if result["verdict"] in ("PASS", "INFRA"):
+                break
+        if result.get("infra_kind") in _FATAL_PROVIDER_FAILURES:
+            fatal = result["infra_kind"]
+        results.append({**result, "suite": suite, "attempts": attempts,
+                        "flaky": result["verdict"] == "PASS" and len(attempts) > 1})
     return results
+
+
+async def _run_production_suite(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from scripts.eval_diagnosis_regression import _replay_one
+
+    return await _run_suite(
+        "production", cases, _replay_one,
+        base_of=lambda c: {"incident_id": c.get("incident_id"),
+                           "title": c.get("event", {}).get("title", c.get("incident_id"))},
+        label_of=lambda c: c.get("event", {}).get("title", c.get("incident_id")),
+    )
 
 
 async def _run_swebench_suite(instances: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    from app.services.github import GitHubService
-    from scripts.eval_swebench_diagnosis import _replay_one as _replay_swebench_instance
+    from scripts.eval_swebench_diagnosis import _replay_one
 
-    if not instances:
-        return []
-    github = GitHubService()
-    results = []
-    fatal = None
-    for i, instance in enumerate(instances, 1):
-        base = {"instance_id": instance.get("instance_id"), "repo": instance.get("repo")}
-        if fatal:
-            results.append({**base, "verdict": "INFRA", "infra_kind": fatal, "suite": "swebench",
-                            "detail": f"not replayed: earlier {fatal} failure"})
-            continue
-        print(f"[swebench {i}/{len(instances)}] {instance['instance_id']} ({instance['repo']}) ...", flush=True)
-        try:
-            result = await _replay_swebench_instance(instance, github)
-        except Exception as exc:
-            kind = _provider_failure(exc)
-            result = {**base, "verdict": "INFRA" if kind else "ERROR", "infra_kind": kind,
-                      "detail": f"replay raised: {exc}"}
-            if kind in _FATAL_PROVIDER_FAILURES:
-                fatal = kind
-        print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
-        results.append({**result, "suite": "swebench"})
-    return results
+    return await _run_suite(
+        "swebench", instances, _replay_one,
+        base_of=lambda x: {"instance_id": x.get("instance_id"), "repo": x.get("repo")},
+        label_of=lambda x: f"{x['instance_id']} ({x['repo']})",
+    )
 
 
 def _print_report(results: list[dict[str, Any]]) -> bool:
@@ -217,9 +235,17 @@ def _print_report(results: list[dict[str, Any]]) -> bool:
     rate = len(non_pass) / total if total else 0.0
     max_allowed = max(1, round(total * MAX_NONPASS_RATE))
 
+    flaky = [r for r in results if r.get("flaky")]
+
     print(f"\n# DiagnosisAgent regression gate (N={total})\n")
-    print(f"PASS: {total - len(non_pass)}  NOT-PASS: {len(non_pass)}  "
+    print(f"PASS: {total - len(non_pass)} (of which {len(flaky)} only on retry)  "
+          f"NOT-PASS: {len(non_pass)}  "
           f"({rate:.1%}, threshold {MAX_NONPASS_RATE:.0%} / max {max_allowed} cases)\n")
+    if flaky:
+        print("Passed only on retry (noise, not counted -- worth watching if a case recurs):")
+        for r in flaky:
+            print(f"  [{r['suite']}] {r.get('incident_id') or r.get('instance_id')}: {r['attempts']}")
+        print()
     if non_pass:
         print("Non-passing cases (informational unless the count exceeds threshold):")
         for r in non_pass:
@@ -300,12 +326,17 @@ async def _main() -> int:
             "results": results,
         }, indent=2))
 
-    has_regression = _print_report(results)
-    # A shard's own verdict is informational: the threshold only means
+    # A shard gives no verdict of its own: the threshold only means
     # something over the whole set, so --aggregate decides pass/fail.
+    # (Printing a per-shard "Gate FAILS" from a 7-case count read like a
+    # regression verdict when it wasn't one.)
     if of > 1:
+        counts = {v: sum(r["verdict"] == v for r in results) for v in sorted({r["verdict"] for r in results})}
+        flaky = sum(bool(r.get("flaky")) for r in results)
+        print(f"\nShard {shard}/{of} done: {counts}, {flaky} passed only on retry. "
+              f"No verdict here -- the aggregate job applies the threshold.")
         return 0
-    return 1 if has_regression else 0
+    return 1 if _print_report(results) else 0
 
 
 if __name__ == "__main__":

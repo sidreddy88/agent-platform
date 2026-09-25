@@ -117,3 +117,68 @@ def test_billing_failure_stops_the_shard(monkeypatch):
     assert calls == ["i0"]
     assert [r["verdict"] for r in results] == ["INFRA"] * 4
     assert {r["infra_kind"] for r in results} == {"billing"}
+
+
+def _patch_swebench_replay(monkeypatch, verdicts_by_id):
+    """Replay stub returning scripted verdicts per instance, one per call."""
+    import sys
+    import types
+
+    calls = []
+
+    async def replay(instance, github):
+        calls.append(instance["instance_id"])
+        verdict = verdicts_by_id[instance["instance_id"]].pop(0)
+        if isinstance(verdict, Exception):
+            raise verdict
+        return {"instance_id": instance["instance_id"], "verdict": verdict, "detail": ""}
+
+    monkeypatch.setitem(sys.modules, "app.services.github",
+                        types.SimpleNamespace(GitHubService=lambda: None))
+    import scripts.eval_swebench_diagnosis as swe
+    monkeypatch.setattr(swe, "_replay_one", replay)
+    return calls
+
+
+def test_non_pass_is_retried_once_and_flaky_pass_counts(monkeypatch):
+    import asyncio
+
+    calls = _patch_swebench_replay(monkeypatch, {
+        "steady": ["PASS"],
+        "flaky": ["FAIL", "PASS"],
+        "broken": ["FAIL", "FAIL"],
+    })
+    instances = [{"instance_id": i, "repo": "r"} for i in ("steady", "flaky", "broken")]
+    results = {r["instance_id"]: r for r in asyncio.run(gate._run_swebench_suite(instances))}
+
+    assert calls == ["steady", "flaky", "flaky", "broken", "broken"]
+    assert results["steady"]["verdict"] == "PASS" and not results["steady"]["flaky"]
+    assert results["flaky"]["verdict"] == "PASS" and results["flaky"]["flaky"]
+    assert results["flaky"]["attempts"] == ["FAIL", "PASS"]
+    assert results["broken"]["verdict"] == "FAIL" and not results["broken"]["flaky"]
+
+
+def test_provider_failure_is_not_retried(monkeypatch):
+    import asyncio
+
+    calls = _patch_swebench_replay(monkeypatch, {
+        "a": [_ProviderError(429, "rate_limit_error")],
+        "b": ["PASS"],
+    })
+    instances = [{"instance_id": i, "repo": "r"} for i in ("a", "b")]
+    results = asyncio.run(gate._run_swebench_suite(instances))
+    assert calls == ["a", "b"]
+    assert [r["verdict"] for r in results] == ["INFRA", "PASS"]
+
+
+def test_billing_failure_on_retry_still_stops_the_shard(monkeypatch):
+    import asyncio
+
+    calls = _patch_swebench_replay(monkeypatch, {
+        "a": ["FAIL", _ProviderError(400, "Your credit balance is too low")],
+        "b": ["PASS"],
+    })
+    instances = [{"instance_id": i, "repo": "r"} for i in ("a", "b")]
+    results = asyncio.run(gate._run_swebench_suite(instances))
+    assert calls == ["a", "a"]
+    assert [r["verdict"] for r in results] == ["INFRA", "INFRA"]
