@@ -762,3 +762,145 @@ async def test_entry_point_helper_name_hints():
     assert not _looks_like_entry_point("validateInput", [])
 
     assert _looks_like_entry_point("processOrder", ["this is the express handler — no callers"])
+
+
+# ---------------------------------------------------------------------------
+# Rejection messages that the model can actually act on
+#
+# From a real SWE-bench trajectory (psf__requests-1142), captured via
+# eval_swebench_diagnosis.py --steps-out:
+#
+#   it3  submit_diagnosis  -> REJECTED "call get_file_contents and copy a real excerpt"
+#   it4  get_file_contents requests/models.py  (12,527 chars — TRUNCATED)
+#   it7  submit_diagnosis  -> REJECTED, byte-identical message
+#   it8  get_file_contents requests/models.py  (identical content)
+#   ... x4, then the 15-iteration budget ran out and the run escalated.
+#
+# requests/models.py is 20,789 chars; get_file_contents returns the first
+# 12,000. The target function's *definition* sat past the cut — only its call
+# site was visible — so the model reconstructed the body from memory and the
+# snippet check correctly rejected it. The rejection then told it to do the one
+# thing that could not possibly work. Both fixes below come from that trace.
+# ---------------------------------------------------------------------------
+
+def _repo_with_file(content: str):
+    repo = MagicMock(ready=True)
+    repo.read_file = MagicMock(return_value=content)
+    repo.file_exists = MagicMock(return_value=True)
+    return repo
+
+
+def test_snippet_problem_routes_to_grep_when_file_exceeds_read_limit():
+    """A file bigger than one read must not be answered with a plain 're-read it':
+    the remedy is grep for the line, then a start_line/end_line read (#255)."""
+    from app.agents.diagnosis import _FILE_READ_CHAR_LIMIT
+
+    agent = _make_agent(lambda *a: [], local_repo=_repo_with_file("x" * 20789))
+    msg = agent._snippet_problem(
+        field="root_cause_snippet",
+        file_path="requests/models.py",
+        symbol="prepare_content_length",
+        snippet="def prepare_content_length(self, body):",
+    )
+    assert "grep_codebase" in msg
+    assert "prepare_content_length" in msg
+    assert str(_FILE_READ_CHAR_LIMIT) in msg
+    assert "20789" in msg
+    # A plain re-read is what caused the loop; the remedy must be a ranged read.
+    assert "start_line" in msg and "end_line" in msg
+    assert "returns the same partial content" in msg
+
+
+def test_snippet_problem_keeps_reread_advice_for_a_small_file():
+    agent = _make_agent(lambda *a: [], local_repo=_repo_with_file("def tiny(): pass\n"))
+    msg = agent._snippet_problem(
+        field="root_cause_snippet", file_path="app/tiny.py",
+        symbol="tiny", snippet="def other(): ...",
+    )
+    assert "get_file_contents" in msg
+    assert "grep_codebase" not in msg
+
+
+def test_snippet_problem_distinguishes_missing_from_mismatched():
+    agent = _make_agent(lambda *a: [], local_repo=_repo_with_file("short"))
+    missing = agent._snippet_problem("root_cause_snippet", "a.py", "fn", None)
+    wrong = agent._snippet_problem("root_cause_snippet", "a.py", "fn", "not in file")
+    assert "is missing" in missing
+    assert "does not match" in wrong
+
+
+def test_snippet_problem_offers_null_as_an_honest_out():
+    """Fabricating a snippet is worse than admitting the code wasn't found."""
+    agent = _make_agent(lambda *a: [], local_repo=_repo_with_file("x" * 30000))
+    msg = agent._snippet_problem("root_cause_snippet", "big.py", "fn", "invented")
+    assert "null" in msg
+    assert "memory" in msg.lower()
+
+
+def test_submission_fingerprint_ignores_confidence_but_not_substance():
+    from app.agents.diagnosis import _submission_fingerprint
+
+    base = {"affected_file": "a.py", "affected_function": "f",
+            "root_cause_snippet": "x", "root_cause": "because"}
+    assert _submission_fingerprint(base) == _submission_fingerprint({**base, "confidence": 0.9})
+    assert _submission_fingerprint(base) != _submission_fingerprint({**base, "root_cause_snippet": "y"})
+
+
+@pytest.mark.asyncio
+async def test_identical_resubmission_is_called_out_not_repeated_verbatim():
+    """Second identical rejection must say 'this already failed', not 'try again'.
+
+    The agent repeated a verbatim submission four times because the rejection
+    read as an invitation to retry. Same text, same reasons -> different message.
+    """
+    agent = _make_agent(lambda *a: [], local_repo=_repo_with_file("x" * 20789))
+    # _make_agent uses __new__, so __init__-time attributes don't exist.
+    agent._tools = {}
+    agent._rejection_count = 0
+    agent._last_rejection_signature = None
+    agent._diagnosis_submitted = None
+    agent._retrieved_file_paths = set()
+    agent._last_retrieved_chunks = []
+    agent._register_tools()
+    submit = agent._tools["submit_diagnosis"][0]
+
+    data = {
+        "root_cause": "boom", "confidence": 0.8, "evidence": ["e"],
+        "fix_approach": "fix", "affected_file": "requests/models.py",
+        "affected_function": None,
+        "root_cause_snippet": "def prepare_content_length(self, body):",
+    }
+
+    first = await submit(**data)
+    second = await submit(**data)
+
+    assert first.startswith("REJECTED —")
+    assert "REJECTED AGAIN" in second
+    assert "SAME submission" in second
+    assert agent._rejection_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_changed_resubmission_gets_the_normal_message():
+    """Only verbatim repeats are escalated — real correction attempts aren't scolded."""
+    agent = _make_agent(lambda *a: [], local_repo=_repo_with_file("x" * 20789))
+    # _make_agent uses __new__, so __init__-time attributes don't exist.
+    agent._tools = {}
+    agent._rejection_count = 0
+    agent._last_rejection_signature = None
+    agent._diagnosis_submitted = None
+    agent._retrieved_file_paths = set()
+    agent._last_retrieved_chunks = []
+    agent._register_tools()
+    submit = agent._tools["submit_diagnosis"][0]
+
+    base = {
+        "root_cause": "boom", "confidence": 0.8, "evidence": ["e"],
+        "fix_approach": "fix", "affected_file": "requests/models.py",
+        "affected_function": None,
+    }
+    first = await submit(**base, root_cause_snippet="attempt one")
+    second = await submit(**base, root_cause_snippet="a genuinely different attempt")
+
+    assert "REJECTED AGAIN" not in second
+    assert second.startswith("REJECTED —")
