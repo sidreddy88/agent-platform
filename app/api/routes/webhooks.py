@@ -36,7 +36,16 @@ async def _run_code_review(pr_number: int, repo: str) -> None:
     logger.info("Code Review Agent: %s#%d", repo, pr_number)
     try:
         from app.agents.code_review import CodeReviewAgent
+        from app.services.llm_gateway import llm_gateway
         agent = CodeReviewAgent()
+        # CodeReviewAgent() defaults to LLMService() (Anthropic Sonnet) via
+        # BaseAgent.__init__ -- config/llm_routing.json's "routing.review.model"
+        # (e.g. openai/gpt-5.5) is only ever read where something explicitly
+        # applies this override; incident_loop.py does it for its own internal
+        # review agent, but this is the actual GitHub-webhook-triggered review
+        # path and had no override at all. Without this line, review silently
+        # never used the configured cross-provider model.
+        agent._llm = llm_gateway.get_llm_service_for("review")
         result = await agent.run(
             f"Review PR #{pr_number} in repo {repo}. Post the review as a GitHub comment."
         )
