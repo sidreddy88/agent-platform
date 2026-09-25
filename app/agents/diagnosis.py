@@ -524,6 +524,7 @@ class DiagnosisAgent(BaseAgent):
         owner: str | None = None,
         repo: str | None = None,
         harness_dir: str | Path | None = None,
+        code_graph: CodeGraph | None = None,
     ) -> None:
         super().__init__(llm=LLMService())   # Sonnet — default model
         # Prompt text, tool descriptions and settings live in a harness
@@ -547,6 +548,13 @@ class DiagnosisAgent(BaseAgent):
         # historical worktree instead of the live shared clone's current HEAD —
         # see LocalRepoService(pinned_sha=...).
         self._local_repo = local_repo or LocalRepoService(self._owner, self._repo)
+        # The call graph find_callers answers from. The module-level
+        # _code_graph is the TARGET APP's graph (loaded from the store at
+        # import); it is only right when diagnosing the target app. Every
+        # SWE-bench replay used to query it anyway, so find_callers searched
+        # a JS app's graph while diagnosing Python repos. None here means
+        # "resolve per repo in diagnose()" (_ensure_code_graph).
+        self._code_graph = code_graph
         self._register_tools()
         # Raised from BaseAgent's default of 10 -- a turn-by-turn trace + SWE-bench
         # spot checks found the correction-cycling phase (after the grounding gate
@@ -921,7 +929,8 @@ class DiagnosisAgent(BaseAgent):
 
         async def _find_callers(function_name: str) -> str:
             """Look up every caller of a function in the call graph index."""
-            callers = _code_graph.find_callers(function_name)
+            graph = getattr(self, "_code_graph", None) or _code_graph
+            callers = graph.find_callers(function_name)
             if not callers:
                 return (
                     f"No callers found for '{function_name}' in the call graph index. "
@@ -1393,9 +1402,40 @@ class DiagnosisAgent(BaseAgent):
             ]
             result.escalate = True
 
+    def _is_target_repo(self) -> bool:
+        target = (settings.fix_target_repo or "").split("/", 1)
+        return len(target) == 2 and (self._owner, self._repo) == (target[0], target[1])
+
+    async def _ensure_code_graph(self) -> None:
+        """Make sure find_callers answers from THIS repo's call graph.
+
+        Target app: the stored graph (built by scripts/index_code_graph.py).
+        Any other repo (eval replays of SWE-bench, cross-repo tooling): build
+        from the local checkout, which for a pinned replay is the worktree at
+        the instance's base commit. Built once per agent, in a thread (parsing
+        a large repo takes seconds of CPU). With no checkout, an empty graph
+        rather than another repo's: "no callers" beats wrong callers.
+        """
+        if getattr(self, "_code_graph", None) is not None:
+            return
+        if self._is_target_repo():
+            self._code_graph = _code_graph
+            return
+        if self._local_repo.ready:
+            self._code_graph = await asyncio.to_thread(
+                CodeGraph.build_from_directory, str(self._local_repo.local_path))
+            logger.info("DiagnosisAgent: built call graph for %s/%s: %s",
+                        self._owner, self._repo, self._code_graph.stats())
+            return
+        logger.warning("DiagnosisAgent: no local checkout of %s/%s — find_callers has no "
+                       "call graph for it (not falling back to the target app's)",
+                       self._owner, self._repo)
+        self._code_graph = CodeGraph()
+
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
         await self._ensure_local_repo()
+        await self._ensure_code_graph()
         # Reset in case this agent instance is reused across diagnose() calls —
         # a stale value from a previous call must never leak into this one.
         self._diagnosis_submitted = None
