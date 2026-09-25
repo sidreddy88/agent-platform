@@ -460,3 +460,24 @@ def test_proposer_is_steered_to_cost_by_source_without_asking_for_brevity():
 
     assert "Cost by prompt source" in SYSTEM
     assert "Never instruct the agent to be brief" in SYSTEM
+
+
+def test_lanes_wait_for_budget_instead_of_stopping_the_run(tmp_path):
+    """The r3 failure: every lane reserved an estimate at once, the last lane
+    couldn't, and the whole run stopped at $0 spent. Now it waits for a lane to
+    release its hold. Each case costs 2.0 (1.0 x 2 trials); reservations are
+    2.5 with margin, so 3 lanes at once need 7.5 > 6.0, but run in turn they
+    fit: total spend is 8.0 under a 9.0 cap."""
+    ev_ = SlowEvaluator(LANES)
+    state = asyncio.run(_opt(tmp_path, ev_, budget=9.0, max_rounds=0, parallel_lanes=3,
+                             case_lanes=LANES, default_case_cost_usd=1.0).run_until_stopped())
+    assert state.phase == "done" and state.stop_reason.startswith("round 0 only")
+    assert state.spent_usd == pytest.approx(8.0) and len(ev_.calls) == 4
+
+
+def test_true_budget_exhaustion_still_stops(tmp_path):
+    ev_ = SlowEvaluator(LANES)
+    state = asyncio.run(_opt(tmp_path, ev_, budget=5.0, max_rounds=0, parallel_lanes=3,
+                             case_lanes=LANES, default_case_cost_usd=1.0).run_until_stopped())
+    assert state.phase == "done" and state.stop_reason.startswith("budget:")
+    assert state.spent_usd <= 5.0

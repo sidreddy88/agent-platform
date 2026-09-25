@@ -73,8 +73,10 @@ def build_config(split: dict, budget: float, rounds: int, trials: int, parallel:
         guard_cases=split["evolve"]["guards"],
         budget_usd=budget, trials=trials, max_rounds=rounds,
         parallel_lanes=parallel, case_lanes=case_lanes(split),
-        default_case_cost_usd=split["estimated_cost_usd_uncached"]["evolve_eval_k1"]
-        / max(1, len(split["evolve"]["failing"]) + len(split["evolve"]["guards"])),
+        # Not the split's estimated_cost_usd_uncached: that's the uncached
+        # Sonnet 4.6 gate era (~$2/case, 17x the measured $0.121/trial), and
+        # reserving it per lane stopped a run at $0 spent. The loop's default
+        # is used until the run measures its own cases.
     )
 
 

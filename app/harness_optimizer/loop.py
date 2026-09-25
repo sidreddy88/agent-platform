@@ -69,7 +69,10 @@ class OptimizerConfig:
     max_rounds: int = 5
     max_stall: int = 3                 # consecutive rounds without an acceptance
     repair_attempts: int = 2           # proposer retries after invalid/critic-rejected
-    default_case_cost_usd: float = 2.0  # budget estimate until a case is measured
+    # Budget estimate per case per trial until one is measured. Round 0 on
+    # Sonnet 5 with caching measured $0.121; 0.25 leaves room for failing
+    # cases, which run all 15 turns.
+    default_case_cost_usd: float = 0.25
     default_delta: float = 0.25        # used if calibration isn't possible
     acceptance: dict = field(default_factory=dict)   # AcceptanceConfig overrides
     # Parallelism. Cases in the same lane run one after another; lanes run
@@ -252,20 +255,57 @@ class Optimizer:
             trajectories.extend(cached["trajectories"])
         return EvalResult(per_case), trajectories
 
+    async def _reserve(self, budget: Budget, estimate: float, what: str) -> float:
+        """Reserve budget for one case, waiting for lanes in flight rather than
+        stopping the run. A reservation that fails only because other lanes are
+        holding theirs is backpressure; once nothing is in flight, a failure
+        means the cap really can't cover the next case, and BudgetExceeded stops
+        the run. (The first version raised immediately: with 8 lanes each
+        holding an estimate, the 8th lane stopped the whole run at $0 spent.)"""
+        import asyncio
+
+        if getattr(self, "_released", None) is None:
+            self._released = asyncio.Condition()
+        async with self._released:
+            while True:
+                try:
+                    return budget.reserve(estimate, what)
+                except BudgetExceeded:
+                    if budget.reserved_usd <= 0:
+                        raise
+                    await self._released.wait()
+
+    def _notify_released(self) -> None:
+        import asyncio
+
+        cond = getattr(self, "_released", None)
+        if cond is None:
+            return
+
+        async def notify():
+            async with cond:
+                cond.notify_all()
+
+        asyncio.get_running_loop().create_task(notify())
+
     async def _evaluate_case(self, state: RunState, budget: Budget, harness_dir: Path,
                              case: str, trials: int) -> None:
         key = self._case_key(harness_dir, trials, case)
-        held = budget.reserve(self._per_case_estimate() * trials, f"round {state.round}: {case} x{trials}")
+        held = await self._reserve(budget, self._per_case_estimate() * trials,
+                                   f"round {state.round}: {case} x{trials}")
         try:
             outcome = await self.evaluator.evaluate(harness_dir, [case], trials)
         except ProviderFailure as exc:
             budget.release(held, exc.cost_usd)
+            self._notify_released()
             state.spent_usd = budget.spent_usd
             raise
         except BaseException:
             budget.release(held, 0.0)
+            self._notify_released()
             raise
         budget.release(held, outcome.cost_usd)
+        self._notify_released()
         state.spent_usd = budget.spent_usd
         self.run.save_eval(key, {"case": asdict(outcome.result.per_case[case]),
                                  "trajectories": outcome.trajectories})
