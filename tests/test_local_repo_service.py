@@ -197,3 +197,4 @@ def test_remove_worktree_deletes_dir_and_prunes(tmp_path):
         asyncio.run(svc.remove_worktree())
     assert not wt.exists()
     assert run.await_args.args[0][-2:] == ["worktree", "prune"]
+
