@@ -127,3 +127,37 @@ def test_plain_string_input_still_passes_through():
 
     agent._tools["echo"] = (echo, "")
     assert asyncio.run(agent._execute_tool("echo", "hello")) == "got hello"
+
+
+def test_live_mode_reads_the_local_clone_not_github():
+    """#232: github.get_file_contents hardcodes ref="main" and 404s on repos
+    whose default branch is master (the target app), so a ready clone wins
+    in live mode too, not only in pinned replay."""
+    from unittest.mock import AsyncMock
+
+    agent = _agent_with_files({"app.js": "const live = 1;\n"})
+    agent._local_repo.pinned = False
+    agent._github.get_file_contents = AsyncMock(side_effect=AssertionError("GitHub should not be called"))
+    out = asyncio.run(_tool(agent, "get_file_contents")(file_path="app.js"))
+    assert "const live = 1;" in out
+
+
+def test_falls_back_to_github_when_local_read_fails():
+    from unittest.mock import AsyncMock
+
+    agent = _agent_with_files({})
+    agent._local_repo.pinned = False
+    agent._local_repo.read_file.side_effect = FileNotFoundError("not in clone")
+    agent._github.get_file_contents = AsyncMock(return_value=("from github\n", "sha"))
+    out = asyncio.run(_tool(agent, "get_file_contents")(file_path="x.js"))
+    assert "from github" in out
+
+
+def test_uses_github_when_no_clone_is_ready():
+    from unittest.mock import AsyncMock
+
+    agent = _agent_with_files({})
+    agent._local_repo.ready = False
+    agent._github.get_file_contents = AsyncMock(return_value=("remote\n", "sha"))
+    out = asyncio.run(_tool(agent, "get_file_contents")(file_path="x.js"))
+    assert "remote" in out and not agent._local_repo.read_file.called
