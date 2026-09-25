@@ -128,3 +128,25 @@ class TestPullTerminalPromptProtection:
 
         _, kwargs = mock_run.call_args
         _assert_protected(kwargs.get("env"), mock_run.call_args.args)
+
+
+def test_git_subprocess_timeout_kills_and_reports():
+    import asyncio
+
+    from app.services.repo import _run
+
+    rc, out, err = asyncio.run(_run(["sleep", "5"], timeout=0.2))
+    assert rc == -1 and "timed out after" in err
+
+
+def test_remove_worktree_does_not_raise_on_failure(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.repo import LocalRepoService
+
+    svc = LocalRepoService("o", "r", pinned_sha="abc")
+    svc._path = tmp_path  # exists
+    with patch("app.services.repo._run", new=AsyncMock(return_value=(-1, "", "timed out"))):
+        asyncio.run(svc.remove_worktree())  # must not raise
+    assert svc._ready is False

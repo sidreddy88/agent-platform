@@ -54,7 +54,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import faulthandler
 import json
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -145,9 +147,48 @@ def _load_swebench() -> list[dict[str, Any]]:
     return instances
 
 
+# A single replay normally takes 5-15 min. Run 36081331749's shard 4 hit a
+# billing error mid-case and then waited silently for 93 min until the job's
+# 150-min timeout killed it, taking the whole shard's results with it and
+# leaving no trace of where it was stuck. Bounding each attempt keeps one
+# hang from costing a shard, and the stack dump says where to look.
+CASE_TIMEOUT_SECONDS = 30 * 60
+# Backstop for a hang outside any one case (setup, result writing): dump
+# every thread's stack shortly before replay jobs' 150-min timeout.
+SHARD_STACK_DUMP_SECONDS = 140 * 60
+
+
+def _await_chain(task: asyncio.Task) -> list[str]:
+    """file:line of each coroutine the task is suspended in, outermost first.
+
+    Task.print_stack() shows only the top frame of a suspended coroutine;
+    walking cr_await reaches the call that is actually blocked (e.g. a
+    subprocess wait or an HTTP read)."""
+    frames, coro = [], task.get_coro()
+    while coro is not None:
+        f = getattr(coro, "cr_frame", None) or getattr(coro, "gi_frame", None)
+        if f is not None:
+            frames.append(f"{f.f_code.co_filename}:{f.f_lineno} in {f.f_code.co_name}")
+        coro = getattr(coro, "cr_await", None) or getattr(coro, "gi_yieldfrom", None)
+    return frames
+
+
 async def _replay_attempt(replay, item, github, base: dict[str, Any]) -> dict[str, Any]:
+    task = asyncio.ensure_future(replay(item, github))
+    done, _ = await asyncio.wait({task}, timeout=CASE_TIMEOUT_SECONDS)
+    if not done:
+        print(f"    TIMEOUT after {CASE_TIMEOUT_SECONDS / 60:.0f} min -- the replay is "
+              f"suspended at:", flush=True)
+        for frame in _await_chain(task) or ["<no coroutine frames>"]:
+            print(f"      {frame}", flush=True)
+        task.cancel()
+        # Bounded: if cancellation itself blocks (a cleanup `finally` awaiting
+        # the same stuck call), abandon the task rather than hang here too.
+        await asyncio.wait({task}, timeout=60)
+        return {**base, "verdict": "TIMEOUT", "infra_kind": None,
+                "detail": f"replay did not finish within {CASE_TIMEOUT_SECONDS / 60:.0f} min"}
     try:
-        return await replay(item, github)
+        return task.result()
     except Exception as exc:
         kind = _provider_failure(exc)
         return {**base, "verdict": "INFRA" if kind else "ERROR", "infra_kind": kind,
@@ -187,7 +228,9 @@ async def _run_suite(suite: str, items: list[dict[str, Any]], replay,
                 result = await _replay_attempt(replay, item, github, base)
                 attempts.append(result["verdict"])
                 print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
-                if result["verdict"] in ("PASS", "INFRA"):
+                # TIMEOUT isn't retried: a hang tends to repeat, and a second
+                # 30-min wait would push the shard toward its job timeout.
+                if result["verdict"] in ("PASS", "INFRA", "TIMEOUT"):
                     break
         cost = meter.summary()
         print(f"    cost: ${cost['cost_usd']} over {cost['calls']} LLM calls", flush=True)
@@ -342,6 +385,10 @@ async def _main() -> int:
         shard, of = (int(x) for x in args.shard.split("/"))
         if not 1 <= shard <= of:
             parser.error(f"--shard {args.shard}: K must be between 1 and N")
+
+    if of > 1:
+        faulthandler.dump_traceback_later(SHARD_STACK_DUMP_SECONDS, exit=False)
+        faulthandler.register(signal.SIGTERM, all_threads=True)
 
     all_production = _load_production()
     production = _select_shard(all_production, shard, of)
