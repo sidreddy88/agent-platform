@@ -167,8 +167,9 @@ def test_history_summary_keeps_newest_in_full_and_compacts_older(tmp_path):
 
 def test_budget_refuses_before_overspending():
     b = Budget(cap_usd=10.0, spent_usd=7.0)
-    b.reserve(2.0, "small")                              # 2.5 with margin fits
-    with pytest.raises(BudgetExceeded, match="only \\$3.00"):
+    held = b.reserve(2.0, "small")                       # 2.5 with margin fits
+    b.release(held, actual_usd=2.0)                      # it cost 2.0: 9.0 spent
+    with pytest.raises(BudgetExceeded, match="only \\$1.00"):
         b.reserve(3.0, "too big")
 
 
@@ -345,3 +346,54 @@ def test_the_routed_diagnosis_model_is_priced():
 
     _, model, _ = llm_gateway._get_routing("diagnosis")
     assert _price_key(model) in PRICES_PER_MTOK, f"routing.diagnosis.model {model} has no price"
+
+
+class SlowEvaluator(FakeEvaluator):
+    """Awaits, so lanes genuinely overlap; records concurrency per lane."""
+
+    def __init__(self, lanes, **kw):
+        super().__init__(**kw)
+        self.lanes, self.active, self.max_active, self.max_per_lane = lanes, {}, 0, 0
+
+    async def evaluate(self, harness_dir, case_ids, trials):
+        lane = self.lanes[case_ids[0]]
+        self.active[lane] = self.active.get(lane, 0) + 1
+        self.max_active = max(self.max_active, sum(self.active.values()))
+        self.max_per_lane = max(self.max_per_lane, self.active[lane])
+        try:
+            await asyncio.sleep(0.05)
+            return await super().evaluate(harness_dir, case_ids, trials)
+        finally:
+            self.active[lane] -= 1
+
+
+LANES = {"c1": "repoA", "c2": "repoA", "c3": "repoB", "g1": "repoC"}
+
+
+def test_parallel_lanes_overlap_repos_but_never_cases_of_one_repo(tmp_path):
+    ev_ = SlowEvaluator(LANES)
+    state = asyncio.run(_opt(tmp_path, ev_, max_rounds=0, parallel_lanes=3, case_lanes=LANES)
+                        .run_until_stopped())
+    assert state.phase == "done"
+    assert ev_.max_per_lane == 1 and ev_.max_active > 1
+    assert state.spent_usd == pytest.approx(4 * 2 * 1.0)
+
+
+def test_a_failure_in_one_lane_stops_the_run_and_settles_the_budget(tmp_path):
+    ev_ = SlowEvaluator(LANES, provider_fail_at=2)
+    opt = _opt(tmp_path, ev_, max_rounds=0, parallel_lanes=3, case_lanes=LANES)
+    state = asyncio.run(opt.run_until_stopped())
+    assert state.phase != "done" and "provider failure" in state.stop_reason
+    resumed = asyncio.run(_opt(tmp_path, SlowEvaluator(LANES), max_rounds=0, parallel_lanes=3,
+                               case_lanes=LANES).run_until_stopped())
+    assert resumed.phase == "done"
+
+
+def test_in_flight_reservations_count_against_the_cap():
+    b = Budget(cap_usd=10.0)
+    held = b.reserve(3.0, "lane 1")                 # 3.75 held
+    b.reserve(3.0, "lane 2")                        # 7.5 held
+    with pytest.raises(BudgetExceeded, match="held by evaluations in flight"):
+        b.reserve(3.0, "lane 3")
+    b.release(held, actual_usd=1.0)
+    assert b.spent_usd == 1.0 and b.reserved_usd == pytest.approx(3.75)

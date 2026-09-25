@@ -52,12 +52,18 @@ def critic_patterns(split: dict, cases_path: Path = CASES) -> list[tuple[str, st
     return domain_patterns(ids, repos, sorted(paths))
 
 
-def build_config(split: dict, budget: float, rounds: int, trials: int):
+def case_lanes(split: dict) -> dict[str, str]:
+    """One lane per repo: replays of the same repo share a base clone."""
+    return {cid: s["repo"] for cid, s in split["case_stats"].items()}
+
+
+def build_config(split: dict, budget: float, rounds: int, trials: int, parallel: int = 1):
     from app.harness_optimizer.loop import OptimizerConfig
 
     return OptimizerConfig(
         evolve_cases=split["evolve"]["failing"], guard_cases=split["evolve"]["guards"],
         budget_usd=budget, trials=trials, max_rounds=rounds,
+        parallel_lanes=parallel, case_lanes=case_lanes(split),
         default_case_cost_usd=split["estimated_cost_usd_uncached"]["evolve_eval_k1"]
         / max(1, len(split["evolve"]["failing"]) + len(split["evolve"]["guards"])),
     )
@@ -100,6 +106,9 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--trials", type=int, default=1, help="trials per case per candidate")
     parser.add_argument("--model", default=DEFAULT_LLM, help="proposer and critic model")
+    parser.add_argument("--parallel", type=int, default=None,
+                        help="repos evaluated concurrently (cases of one repo always run in "
+                             "sequence). Operational, so it can be changed on resume. Default 1.")
     parser.add_argument("--status", action="store_true")
     args = parser.parse_args()
 
@@ -115,16 +124,21 @@ def main() -> int:
 
     load_dotenv()
     run = RunDir(args.run_dir)
+    split = json.loads(SPLIT.read_text())
     if run.exists():
-        cfg_json = run.load().config
         from app.harness_optimizer.loop import OptimizerConfig
-        cfg = OptimizerConfig(**cfg_json)
-        print(f"resuming {args.run_dir} (config from the run's state; flags ignored)")
+        cfg = OptimizerConfig(**run.load().config)
+        # Method settings (budget, rounds, trials, cases) come from the run and
+        # can't change mid-run; parallelism is operational and can.
+        if args.parallel is not None:
+            cfg.parallel_lanes = args.parallel
+        cfg.case_lanes = cfg.case_lanes or case_lanes(split)
+        print(f"resuming {args.run_dir} (method config from the run's state; "
+              f"parallel lanes = {cfg.parallel_lanes})")
     else:
         if args.budget is None:
             parser.error("--budget is required to start a new run")
-        cfg = build_config(json.loads(SPLIT.read_text()), args.budget, args.rounds, args.trials)
-    split = json.loads(SPLIT.read_text())
+        cfg = build_config(split, args.budget, args.rounds, args.trials, args.parallel or 1)
     opt = Optimizer(args.run_dir, DEFAULT_ROOT / "diagnosis", cfg, ReplayEvaluator(),
                     make_llm(args.model), make_llm(args.model), critic_patterns(split))
     state = asyncio.run(opt.run_until_stopped())

@@ -72,6 +72,13 @@ class OptimizerConfig:
     default_case_cost_usd: float = 2.0  # budget estimate until a case is measured
     default_delta: float = 0.25        # used if calibration isn't possible
     acceptance: dict = field(default_factory=dict)   # AcceptanceConfig overrides
+    # Parallelism. Cases in the same lane run one after another; lanes run
+    # concurrently, at most `parallel_lanes` at a time. Lanes are per repo:
+    # replays of the same repo share one base git clone, and running two at
+    # once corrupted a replay ("Local repo not available" mid-diagnosis), which
+    # would change agent behaviour, not just slow it down.
+    parallel_lanes: int = 1
+    case_lanes: dict = field(default_factory=dict)   # case id -> lane (repo)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -204,29 +211,65 @@ class Optimizer:
 
     async def _evaluate(self, state: RunState, budget: Budget, harness_dir: Path,
                         cases: list[str], trials: int) -> tuple[EvalResult, list[dict]]:
+        import asyncio
+
+        todo = [c for c in cases if self.run.load_eval(self._case_key(harness_dir, trials, c)) is None]
+        lanes: dict[str, list[str]] = {}
+        for case in todo:
+            lanes.setdefault(self.cfg.case_lanes.get(case, "_default"), []).append(case)
+        gate = asyncio.Semaphore(max(1, self.cfg.parallel_lanes))
+
+        async def run_lane(lane_cases: list[str]) -> None:
+            async with gate:
+                for case in lane_cases:
+                    await self._evaluate_case(state, budget, harness_dir, case, trials)
+
+        if len(lanes) <= 1 or self.cfg.parallel_lanes <= 1:
+            for lane_cases in lanes.values():
+                await run_lane(lane_cases)
+        else:
+            # TaskGroup: the first lane to fail (budget, provider failure, crash)
+            # cancels the others, so nothing keeps spending after a stop.
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    for lane_cases in lanes.values():
+                        tg.create_task(run_lane(lane_cases))
+            except BaseExceptionGroup as group:
+                # Surface one real cause, so run_until_stopped's budget and
+                # provider-failure handling sees it; prefer those over others.
+                excs = list(group.exceptions)
+                for kind in (BudgetExceeded, ProviderFailure):
+                    for exc in excs:
+                        if isinstance(exc, kind):
+                            raise exc from None
+                raise excs[0] from None
+
         per_case: dict[str, CaseResult] = {}
         trajectories: list[dict] = []
         for case in cases:
-            key = self._case_key(harness_dir, trials, case)
-            cached = self.run.load_eval(key)
-            if cached is None:
-                budget.reserve(self._per_case_estimate() * trials,
-                               f"round {state.round}: {case} x{trials}")
-                try:
-                    outcome = await self.evaluator.evaluate(harness_dir, [case], trials)
-                except ProviderFailure as exc:
-                    budget.record(exc.cost_usd)
-                    state.spent_usd = budget.spent_usd
-                    raise
-                budget.record(outcome.cost_usd)
-                state.spent_usd = budget.spent_usd
-                cached = {"case": asdict(outcome.result.per_case[case]),
-                          "trajectories": outcome.trajectories}
-                self.run.save_eval(key, cached)
-                self.run.save(state)
+            cached = self.run.load_eval(self._case_key(harness_dir, trials, case))
             per_case[case] = CaseResult(**cached["case"])
             trajectories.extend(cached["trajectories"])
         return EvalResult(per_case), trajectories
+
+    async def _evaluate_case(self, state: RunState, budget: Budget, harness_dir: Path,
+                             case: str, trials: int) -> None:
+        key = self._case_key(harness_dir, trials, case)
+        held = budget.reserve(self._per_case_estimate() * trials, f"round {state.round}: {case} x{trials}")
+        try:
+            outcome = await self.evaluator.evaluate(harness_dir, [case], trials)
+        except ProviderFailure as exc:
+            budget.release(held, exc.cost_usd)
+            state.spent_usd = budget.spent_usd
+            raise
+        except BaseException:
+            budget.release(held, 0.0)
+            raise
+        budget.release(held, outcome.cost_usd)
+        state.spent_usd = budget.spent_usd
+        self.run.save_eval(key, {"case": asdict(outcome.result.per_case[case]),
+                                 "trajectories": outcome.trajectories})
+        self.run.save(state)
 
     def _eval_ref(self, harness_dir: Path, trials: int) -> dict:
         return {"hash": candidates.content_hash(harness_dir), "trials": trials,
