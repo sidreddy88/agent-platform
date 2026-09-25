@@ -1,0 +1,1010 @@
+{
+ "_doc": "Per-case outcomes of the DiagnosisAgent regression gate across four CI runs, parsed from the Actions logs. Input to scripts/build_harness_split.py. Verdicts are per attempt; FAIL:escalated = never got an accepted submit_diagnosis, FAIL:wrong_file = named a file the real fix didn't touch. BILLING/INFRA = the attempt hit a provider billing error (credits ran out) and says nothing about the agent; TIMEOUT = a harness hang (fixed in #258). cost_usd_run4 is the measured, uncached cost of the case in run4, across its attempts.",
+ "runs": {
+  "run1": {
+   "actions_run": 36070479644,
+   "main": "306a800",
+   "note": "credits ran out mid-run; 25 cases BILLING"
+  },
+  "run2": {
+   "actions_run": 36074293976,
+   "main": "b6dd9ff",
+   "note": "valid, no retries"
+  },
+  "run3": {
+   "actions_run": 36081331749,
+   "main": "1a669cc",
+   "note": "retries on; credits ran out mid-run"
+  },
+  "run4": {
+   "actions_run": 36158424400,
+   "main": "#255 on 91d7e72",
+   "note": "retries on; the #255 PR gate run"
+  }
+ },
+ "cases": {
+  "astropy__astropy-12907": {
+   "repo": "astropy/astropy",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "FAIL:escalated",
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.120587
+  },
+  "astropy__astropy-13033": {
+   "repo": "astropy/astropy",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.934982
+  },
+  "astropy__astropy-13579": {
+   "repo": "astropy/astropy",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 2.495856
+  },
+  "astropy__astropy-14182": {
+   "repo": "astropy/astropy",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.573762
+  },
+  "astropy__astropy-14309": {
+   "repo": "astropy/astropy",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.296142
+  },
+  "django__django-10097": {
+   "repo": "django/django",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.240857
+  },
+  "django__django-10880": {
+   "repo": "django/django",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "FAIL:escalated",
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 2.702256
+  },
+  "django__django-10914": {
+   "repo": "django/django",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.405051
+  },
+  "django__django-10973": {
+   "repo": "django/django",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.520437
+  },
+  "django__django-11066": {
+   "repo": "django/django",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.26691
+  },
+  "django__django-11087": {
+   "repo": "django/django",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.920412
+  },
+  "django__django-11095": {
+   "repo": "django/django",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.338204
+  },
+  "django__django-11099": {
+   "repo": "django/django",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.112124
+  },
+  "matplotlib__matplotlib-14623": {
+   "repo": "matplotlib/matplotlib",
+   "attempts": {
+    "run1": [
+     "FAIL:escalated"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "FAIL:escalated",
+     "FAIL:escalated"
+    ],
+    "run4": [
+     "FAIL:escalated",
+     "FAIL:escalated"
+    ]
+   },
+   "cost_usd_run4": 6.434802
+  },
+  "matplotlib__matplotlib-22719": {
+   "repo": "matplotlib/matplotlib",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.667746
+  },
+  "matplotlib__matplotlib-22865": {
+   "repo": "matplotlib/matplotlib",
+   "attempts": {
+    "run1": [
+     "FAIL:escalated"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "FAIL:escalated",
+     "FAIL:escalated"
+    ],
+    "run4": [
+     "TIMEOUT"
+    ]
+   },
+   "cost_usd_run4": 4.370226
+  },
+  "pallets__flask-5014": {
+   "repo": "pallets/flask",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.461619
+  },
+  "psf__requests-1766": {
+   "repo": "psf/requests",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.367437
+  },
+  "psf__requests-1921": {
+   "repo": "psf/requests",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.426537
+  },
+  "psf__requests-2931": {
+   "repo": "psf/requests",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 2.258631
+  },
+  "pydata__xarray-2905": {
+   "repo": "pydata/xarray",
+   "attempts": {
+    "run1": [
+     "FAIL:escalated"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "FAIL:escalated",
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 4.026603
+  },
+  "pydata__xarray-4075": {
+   "repo": "pydata/xarray",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.47757
+  },
+  "pydata__xarray-4356": {
+   "repo": "pydata/xarray",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.375171
+  },
+  "pydata__xarray-4629": {
+   "repo": "pydata/xarray",
+   "attempts": {
+    "run1": [
+     "FAIL:escalated"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "FAIL:escalated",
+     "FAIL:escalated"
+    ]
+   },
+   "cost_usd_run4": 2.781246
+  },
+  "pylint-dev__pylint-4551": {
+   "repo": "pylint-dev/pylint",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "BILLING"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.094421
+  },
+  "pylint-dev__pylint-6528": {
+   "repo": "pylint-dev/pylint",
+   "attempts": {
+    "run1": [
+     "FAIL:escalated"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "FAIL:escalated",
+     "FAIL:escalated"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.53033
+  },
+  "pylint-dev__pylint-6903": {
+   "repo": "pylint-dev/pylint",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.983175
+  },
+  "pylint-dev__pylint-7277": {
+   "repo": "pylint-dev/pylint",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.709494
+  },
+  "pylint-dev__pylint-8898": {
+   "repo": "pylint-dev/pylint",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.469875
+  },
+  "pytest-dev__pytest-10081": {
+   "repo": "pytest-dev/pytest",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "BILLING"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 2.623899
+  },
+  "pytest-dev__pytest-5631": {
+   "repo": "pytest-dev/pytest",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.677616
+  },
+  "pytest-dev__pytest-5787": {
+   "repo": "pytest-dev/pytest",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "BILLING"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 2.870586
+  },
+  "pytest-dev__pytest-5809": {
+   "repo": "pytest-dev/pytest",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.283908
+  },
+  "pytest-dev__pytest-6197": {
+   "repo": "pytest-dev/pytest",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "BILLING"
+    ],
+    "run4": [
+     "FAIL:escalated",
+     "FAIL:wrong_file"
+    ]
+   },
+   "cost_usd_run4": 6.711084
+  },
+  "pytest-dev__pytest-6202": {
+   "repo": "pytest-dev/pytest",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.406107
+  },
+  "scikit-learn__scikit-learn-10297": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.600552
+  },
+  "scikit-learn__scikit-learn-10844": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "PASS"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.523044
+  },
+  "scikit-learn__scikit-learn-10908": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "FAIL:escalated",
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 2.954844
+  },
+  "scikit-learn__scikit-learn-11310": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.476484
+  },
+  "scikit-learn__scikit-learn-11578": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.988548
+  },
+  "scikit-learn__scikit-learn-12585": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.370089
+  },
+  "scikit-learn__scikit-learn-12682": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.129899
+  },
+  "scikit-learn__scikit-learn-12973": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.433796
+  },
+  "scikit-learn__scikit-learn-13135": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.298373
+  },
+  "sphinx-doc__sphinx-10323": {
+   "repo": "sphinx-doc/sphinx",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.512897
+  },
+  "sphinx-doc__sphinx-10449": {
+   "repo": "sphinx-doc/sphinx",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.709883
+  },
+  "sphinx-doc__sphinx-10466": {
+   "repo": "sphinx-doc/sphinx",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "BILLING"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 0.749463
+  },
+  "sphinx-doc__sphinx-10673": {
+   "repo": "sphinx-doc/sphinx",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run4": [
+     "FAIL:escalated",
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 4.004883
+  },
+  "sphinx-doc__sphinx-11445": {
+   "repo": "sphinx-doc/sphinx",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run4": [
+     "FAIL:escalated",
+     "FAIL:escalated"
+    ]
+   },
+   "cost_usd_run4": 5.414841
+  },
+  "sphinx-doc__sphinx-7454": {
+   "repo": "sphinx-doc/sphinx",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 2.223888
+  },
+  "sympy__sympy-12096": {
+   "repo": "sympy/sympy",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run3": [
+     "FAIL:escalated",
+     "BILLING"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.43223
+  },
+  "sympy__sympy-13091": {
+   "repo": "sympy/sympy",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [],
+    "run4": [
+     "TIMEOUT"
+    ]
+   },
+   "cost_usd_run4": 1.389081
+  },
+  "sympy__sympy-13551": {
+   "repo": "sympy/sympy",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run3": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.577241
+  },
+  "pydata__xarray-4687": {
+   "repo": "pydata/xarray",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "FAIL:escalated"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 2.652492
+  },
+  "scikit-learn__scikit-learn-13142": {
+   "repo": "scikit-learn/scikit-learn",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.40115
+  },
+  "sympy__sympy-13647": {
+   "repo": "sympy/sympy",
+   "attempts": {
+    "run1": [
+     "BILLING"
+    ],
+    "run2": [
+     "PASS"
+    ],
+    "run4": [
+     "PASS"
+    ]
+   },
+   "cost_usd_run4": 1.850301
+  }
+ }
+}
