@@ -250,6 +250,8 @@ class Optimizer:
         state.incumbent_eval = json.dumps(self._eval_ref(self.run.incumbent_dir, k))
         logger.info("round 0: S=%.3f C=$%.3f delta=%.3f", result.S, result.C, state.delta)
         state.round, state.phase = 1, "propose"
+        if self.cfg.max_rounds < 1:          # baseline only: measure, propose nothing
+            state.phase, state.stop_reason = "done", "round 0 only (baseline and calibration)"
 
     async def _propose(self, state: RunState, budget: Budget) -> None:
         inc_result, inc_traj = self._load_ref(json.loads(state.incumbent_eval))

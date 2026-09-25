@@ -304,3 +304,13 @@ def test_cli_config_and_critic_patterns_come_from_the_committed_split():
     assert any("pydata/xarray" in h for h in hits)
     assert any("sphinx-doc__sphinx-11445" in h for h in hits)
     assert any("colorbar.py" in h for h in hits)
+
+
+def test_rounds_zero_measures_the_baseline_and_proposes_nothing(tmp_path):
+    async def must_not_be_called(system, prompt):
+        raise AssertionError("proposer called in a round-0-only run")
+
+    ev_ = FakeEvaluator()
+    state = asyncio.run(_opt(tmp_path, ev_, proposer_llm=must_not_be_called, max_rounds=0).run_until_stopped())
+    assert state.phase == "done" and state.stop_reason.startswith("round 0 only")
+    assert state.delta is not None and state.S_star is not None and len(ev_.calls) == 4
