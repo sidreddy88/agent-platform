@@ -23,7 +23,7 @@ from app.services.rag import (
     OVERLAP_LINES,
     RAGService,
     _chunk_file,
-    _chunk_js_by_ast,
+    _chunk_by_ast,
     _chunk_markdown_by_headers,
     _truncate_to_tokens,
 )
@@ -189,7 +189,7 @@ const NOT_A_FUNCTION = { foo: "bar" };
 class TestChunkJsByAst:
     def _chunks(self):
         raw = JS_SAMPLE.encode("utf-8")
-        return _chunk_js_by_ast("app/image.js", JS_SAMPLE, raw, "javascript")
+        return _chunk_by_ast("app/image.js", JS_SAMPLE, raw, "javascript")
 
     def test_finds_function_declaration(self):
         names = {c.function_name for c in self._chunks()}
@@ -222,14 +222,14 @@ class TestChunkJsByAst:
 
     def test_returns_empty_list_for_file_with_no_functions(self):
         raw = b"const x = 1;\nconst y = 2;\n"
-        assert _chunk_js_by_ast("app/const.js", raw.decode(), raw, "javascript") == []
+        assert _chunk_by_ast("app/const.js", raw.decode(), raw, "javascript") == []
 
     def test_returns_empty_list_on_unparseable_extension(self):
         # .foo isn't a JS/TS extension tree-sitter's parser map knows about —
         # the chunker should degrade to [] (caller falls back to _chunk_file),
         # not raise.
         raw = b"whatever"
-        assert _chunk_js_by_ast("app/thing.foo", "whatever", raw, "javascript") == []
+        assert _chunk_by_ast("app/thing.foo", "whatever", raw, "javascript") == []
 
 
 # ---------------------------------------------------------------------------

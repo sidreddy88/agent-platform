@@ -20,13 +20,22 @@ Incremental updates (file change → re-parse → patch graph) are not yet imple
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # File extensions the tree-sitter parser supports
-_JS_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx"}
+_SUPPORTED_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".py"}
+
+# Source extensions we recognise as code but have no grammar for. Used only to
+# decide whether a silent skip is worth warning about — a repo full of .go we
+# can't parse is a real coverage gap; a repo full of .md and .json is not.
+_UNPARSED_CODE_EXTENSIONS = {
+    ".go", ".rb", ".java", ".rs", ".php", ".c", ".h", ".cc", ".cpp", ".hpp",
+    ".cs", ".kt", ".swift", ".scala", ".m", ".mm", ".ex", ".exs", ".pl", ".lua",
+}
 
 # Directories to skip when walking the codebase
 _SKIP_DIRS = {
@@ -68,10 +77,17 @@ class CodeGraph:
 
     @classmethod
     def build_from_directory(cls, root: str) -> "CodeGraph":
-        """Parse all JS/TS files under `root` and build the call graph.
+        """Parse all JS/TS/Python files under `root` and build the call graph.
 
         Skips node_modules and other non-source directories.
         Returns an empty graph (with a warning) if tree-sitter is unavailable.
+
+        Warns loudly when the walk parses nothing but did skip real source
+        files. That exact situation went undetected through a full 100-instance
+        SWE-bench run: the sample is entirely Python, this module only had JS/TS
+        grammars, and every file was skipped in silence — so `find_callers`
+        answered "no callers found" for all 100 instances, which reads like a
+        fact about the code rather than a missing grammar.
         """
         try:
             from app.services.code_graph.parser import (
@@ -87,15 +103,18 @@ class CodeGraph:
         root_path = Path(root)
         files_parsed = 0
         parse_errors = 0
+        skipped_code: Counter[str] = Counter()
 
         for file_path in root_path.rglob("*"):
-            # Skip directories and non-JS/TS files
+            # Skip directories and unsupported file types
             if not file_path.is_file():
-                continue
-            if file_path.suffix not in _JS_EXTENSIONS:
                 continue
             # Skip any path that contains a blacklisted directory segment
             if any(part in _SKIP_DIRS for part in file_path.parts):
+                continue
+            if file_path.suffix not in _SUPPORTED_EXTENSIONS:
+                if file_path.suffix in _UNPARSED_CODE_EXTENSIONS:
+                    skipped_code[file_path.suffix] += 1
                 continue
 
             try:
@@ -126,6 +145,37 @@ class CodeGraph:
             "[CodeGraph] built from %d files — %d edges, %d parse errors",
             files_parsed, len(graph._edges), parse_errors,
         )
+
+        # A graph that parsed nothing is indistinguishable, downstream, from a
+        # codebase whose functions genuinely have no callers. Say so out loud.
+        if files_parsed == 0:
+            if skipped_code:
+                top = ", ".join(f"{ext} ({n})" for ext, n in skipped_code.most_common(3))
+                logger.warning(
+                    "[CodeGraph] parsed 0 files under %s but skipped %d source file(s) "
+                    "in unsupported languages: %s. find_callers will report "
+                    "'no callers found' for everything in this repo — that is a missing "
+                    "grammar, not a fact about the code. Supported: %s",
+                    root, sum(skipped_code.values()), top,
+                    ", ".join(sorted(_SUPPORTED_EXTENSIONS)),
+                )
+            else:
+                logger.warning(
+                    "[CodeGraph] parsed 0 files under %s — no supported source found "
+                    "(supported: %s)",
+                    root, ", ".join(sorted(_SUPPORTED_EXTENSIONS)),
+                )
+        elif sum(skipped_code.values()) > files_parsed:
+            # Partial blindness: we built *a* graph, but most of the repo is in a
+            # language we can't read, so the graph is misleadingly incomplete.
+            top = ", ".join(f"{ext} ({n})" for ext, n in skipped_code.most_common(3))
+            logger.warning(
+                "[CodeGraph] parsed %d file(s) under %s but skipped %d source file(s) "
+                "in unsupported languages: %s. The call graph covers only part of this "
+                "repo — find_callers results will be incomplete.",
+                files_parsed, root, sum(skipped_code.values()), top,
+            )
+
         return graph
 
     # -------------------------------------------------------------------------

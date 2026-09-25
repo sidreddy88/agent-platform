@@ -256,6 +256,20 @@ _STACK_FRAME_RE = re.compile(
     r"/app/([\w./\-]+\.(?:js|mjs|cjs|ts|tsx))\b"
 )
 
+# CPython traceback frame:  File "/testbed/django/db/models/query.py", line 71, in __iter__
+# Note the inverted order vs V8 — the path comes first, the function name last
+# (and is optional; the trailing ", in <name>" is absent for module-level frames).
+_PY_FRAME_RE = re.compile(
+    r'File "([^"\n]+\.py)", line \d+(?:, in ([A-Za-z_]\w*))?'
+)
+
+# Python's equivalent of node_modules: installed dependencies and stdlib. A
+# frame in one of these is library code, not the repo under diagnosis.
+_PY_VENDOR_MARKERS = (
+    "/site-packages/", "/dist-packages/", "/lib/python", "/.venv/", "/venv/",
+    "<frozen ", "/usr/lib/", "/opt/conda/",
+)
+
 
 def extract_stack_trace_paths(text: str) -> list[dict]:
     """Deterministically pull this app's own file paths out of raw error text.
@@ -298,6 +312,28 @@ def extract_stack_trace_paths(text: str) -> list[dict]:
         # permanently blank out a real name a later occurrence provides.
         if path not in seen or (seen[path] is None and fn is not None):
             seen[path] = fn
+
+    # ── CPython tracebacks ────────────────────────────────────────────────
+    # Paths here are absolute against whatever root the process ran under
+    # (/testbed/... under SWE-bench, /srv/app/... in a container), so unlike
+    # the V8 branch there's no single prefix to strip. Emit progressively
+    # shorter suffixes and let the caller's repo file_exists() check pick the
+    # one that resolves — the caller already filters, so extra candidates cost
+    # nothing and a wrong guess here can't leak through.
+    for m in _PY_FRAME_RE.finditer(text):
+        raw_path, fn = m.group(1), m.group(2)
+        if any(marker in raw_path for marker in _PY_VENDOR_MARKERS):
+            continue
+        parts = raw_path.lstrip("/").split("/")
+        # Longest first: "django/db/models/query.py" before "db/models/query.py".
+        # Stop at two segments — a bare "query.py" or "base.py" resolves against
+        # half a dozen unrelated packages in repos this size, and file_exists()
+        # would happily confirm the wrong one.
+        for i in range(max(len(parts) - 1, 1)):
+            candidate = "/".join(parts[i:])
+            if candidate not in seen or (seen[candidate] is None and fn is not None):
+                seen[candidate] = fn
+
     return [{"file": path, "function": fn} for path, fn in seen.items()]
 
 
@@ -1318,6 +1354,18 @@ class DiagnosisAgent(BaseAgent):
         detected_paths = extract_stack_trace_paths(event.description or "")
         if self._local_repo.ready:
             detected_paths = [p for p in detected_paths if self._local_repo.file_exists(p["file"])]
+            # Python frames emit several suffix candidates per real file
+            # ("django/db/models/query.py", "db/models/query.py", ...) and more
+            # than one can resolve. Keep the longest surviving path per
+            # basename — it's the most specific, so the least likely to be a
+            # same-named file in an unrelated package.
+            by_basename: dict[str, dict] = {}
+            for p in detected_paths:
+                base = p["file"].rsplit("/", 1)[-1]
+                incumbent = by_basename.get(base)
+                if incumbent is None or p["file"].count("/") > incumbent["file"].count("/"):
+                    by_basename[base] = p
+            detected_paths = list(by_basename.values())
         stack_trace_section = ""
         if detected_paths:
             lines = [
