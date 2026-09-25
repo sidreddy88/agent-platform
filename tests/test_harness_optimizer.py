@@ -397,3 +397,28 @@ def test_in_flight_reservations_count_against_the_cap():
         b.reserve(3.0, "lane 3")
     b.release(held, actual_usd=1.0)
     assert b.spent_usd == 1.0 and b.reserved_usd == pytest.approx(3.75)
+
+
+def test_critic_and_proposer_are_told_about_eval_only_empty_tools():
+    from app.harness_optimizer import critic as c
+    from app.harness_optimizer import proposer as p
+
+    for system in (c.SYSTEM, p.SYSTEM):
+        assert "search_similar_incidents" in system and "production" in system
+
+
+def test_a_finished_run_can_be_extended_with_more_rounds(tmp_path):
+    asyncio.run(_opt(tmp_path, FakeEvaluator(), max_rounds=0).run_until_stopped())
+    from app.harness_optimizer.state import RunDir
+
+    run = RunDir(tmp_path / "run")
+    state = run.load()
+    assert state.phase == "done"
+    # what the CLI does on `--rounds 1` for an existing run
+    state.config["max_rounds"] = 1
+    state.phase, state.stop_reason = "propose", None
+    run.save(state)
+    ev_ = FakeEvaluator()
+    final = asyncio.run(_opt(tmp_path, ev_, max_rounds=1).run_until_stopped())
+    assert final.accepted == ["r1"]
+    assert len(ev_.calls) == 4           # round 0 came from the cache; only the candidate's 4 cases ran

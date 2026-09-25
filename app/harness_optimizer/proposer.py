@@ -51,6 +51,10 @@ logs as well as the Python repositories you see here. Never mention specific tas
 repositories, file paths or answers from the evidence. Never weaken the grounding
 requirements (verbatim snippets, symbol verification, calling submit_diagnosis).
 Do not repeat an edit the history shows was already rejected.
+Evaluation-only conditions you must not optimise for: search_similar_incidents always
+returns nothing here (no past-incident knowledge base for these repositories) and the
+CloudWatch log tools have no data. Both carry real information in production, so don't
+discourage or remove them.
 
 Return STRICT JSON only:
 {"component": one of %s,

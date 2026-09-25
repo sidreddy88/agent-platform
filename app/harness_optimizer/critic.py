@@ -43,6 +43,13 @@ incidents in a JavaScript/Node application, reported from CloudWatch logs. A goo
 change helps on both. A change that only makes sense for Python, for SWE-bench, or
 for particular repositories is overfitting even if it looks general.
 
+EVALUATION-ONLY CONDITIONS (not true in production; don't let the harness learn them):
+search_similar_incidents always returns nothing here (these repositories have no
+past-incident knowledge base), and the CloudWatch log tools have no data (SWE-bench
+issues have no log group). In production both carry real information. A change that
+discourages, skips or removes these because they return nothing in evaluation is
+overfitting: reject it under 1.
+
 REJECT if ANY of:
 
 1. LEAKAGE / TASK-SPECIALIZATION: the diff encodes knowledge of specific evaluation

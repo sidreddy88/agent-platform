@@ -111,6 +111,7 @@ def main() -> int:
                              "sequence). Operational, so it can be changed on resume. Default 1.")
     parser.add_argument("--status", action="store_true")
     args = parser.parse_args()
+    args.rounds_given = any(a == "--rounds" or a.startswith("--rounds=") for a in sys.argv[1:])
 
     if args.status:
         return status(args.run_dir)
@@ -132,6 +133,17 @@ def main() -> int:
         # can't change mid-run; parallelism is operational and can.
         if args.parallel is not None:
             cfg.parallel_lanes = args.parallel
+        # Extending a run: more rounds may be added on resume (never fewer,
+        # never other method settings). A run that stopped because it hit its
+        # round limit is reopened at the next round.
+        state = run.load()
+        if args.rounds_given and args.rounds > cfg.max_rounds:
+            cfg.max_rounds = args.rounds
+            state.config["max_rounds"] = args.rounds
+            if state.phase == "done" and (state.stop_reason or "").startswith(("completed", "round 0 only")):
+                state.phase, state.stop_reason = "propose", None
+            run.save(state)
+            print(f"extended to {args.rounds} rounds")
         cfg.case_lanes = cfg.case_lanes or case_lanes(split)
         print(f"resuming {args.run_dir} (method config from the run's state; "
               f"parallel lanes = {cfg.parallel_lanes})")
