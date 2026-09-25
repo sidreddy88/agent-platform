@@ -35,6 +35,7 @@ PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
     "claude-opus-5": (5.00, 25.00),      # harness optimizer's proposer and critic
+    "claude-sonnet-5": (2.00, 10.00),    # routing.diagnosis.model (production + evals via the gateway)
 }
 CACHE_WRITE_MULTIPLIER = 1.25
 CACHE_READ_MULTIPLIER = 0.10

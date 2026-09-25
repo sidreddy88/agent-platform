@@ -314,3 +314,34 @@ def test_rounds_zero_measures_the_baseline_and_proposes_nothing(tmp_path):
     state = asyncio.run(_opt(tmp_path, ev_, proposer_llm=must_not_be_called, max_rounds=0).run_until_stopped())
     assert state.phase == "done" and state.stop_reason.startswith("round 0 only")
     assert state.delta is not None and state.S_star is not None and len(ev_.calls) == 4
+
+
+def test_an_unpriced_model_stops_the_run_instead_of_spending_blind(tmp_path):
+    from app.harness_optimizer.evaluator import UnpricedModel
+
+    class Blind(FakeEvaluator):
+        async def evaluate(self, harness_dir, case_ids, trials):
+            raise UnpricedModel("no price for ['claude-mystery-9']")
+
+    state = asyncio.run(_opt(tmp_path, Blind()).run_until_stopped())
+    assert state.phase != "done" and "no price" in state.stop_reason
+
+
+def test_proposer_and_critic_calls_on_an_unpriced_model_also_stop(tmp_path):
+    from app.services import cost_meter
+
+    async def unpriced_llm(system, prompt):
+        cost_meter.record("claude-mystery-9", 100, 100)
+        return '{"verdict": "accept", "reasons": []}'
+
+    opt = _opt(tmp_path, FakeEvaluator(), proposer_llm=terse_proposer(), critic_llm=unpriced_llm, max_rounds=1)
+    state = asyncio.run(opt.run_until_stopped())
+    assert state.phase == "screen" and "no price" in state.stop_reason
+
+
+def test_the_routed_diagnosis_model_is_priced():
+    from app.services.cost_meter import PRICES_PER_MTOK, _price_key
+    from app.services.llm_gateway import llm_gateway
+
+    _, model, _ = llm_gateway._get_routing("diagnosis")
+    assert _price_key(model) in PRICES_PER_MTOK, f"routing.diagnosis.model {model} has no price"

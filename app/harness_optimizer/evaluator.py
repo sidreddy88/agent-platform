@@ -36,6 +36,14 @@ class ProviderFailure(RuntimeError):
         self.cost_usd = cost_usd
 
 
+class UnpricedModel(ProviderFailure):
+    """A call came back from a model with no known price, so its cost reads as
+    $0 and the budget cap can't see it. Stop (resumably) rather than keep
+    spending blind. Found on the first real round 0: evals run on the routed
+    diagnosis model (claude-sonnet-5), which the cost meter didn't price, and
+    the $80 cap recorded $0 per case."""
+
+
 @dataclass
 class EvalOutcome:
     result: EvalResult
@@ -78,7 +86,11 @@ class ReplayEvaluator:
                 with cost_meter.metered() as meter:
                     res = await _replay_attempt(replay, inst, github,
                                                 {"instance_id": cid, "repo": inst["repo"]})
-                cost = meter.summary()["cost_usd"] or 0.0
+                summary = meter.summary()
+                if summary["unpriced_models"]:
+                    raise UnpricedModel(f"{cid} trial {t + 1}: no price for "
+                                        f"{summary['unpriced_models']}; add it to cost_meter.PRICES_PER_MTOK")
+                cost = summary["cost_usd"] or 0.0
                 total += cost
                 if res["verdict"] == "INFRA":
                     raise ProviderFailure(f"{cid} trial {t + 1}: {res['detail'][:300]}", cost_usd=total)

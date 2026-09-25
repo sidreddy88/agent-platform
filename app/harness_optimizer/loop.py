@@ -50,7 +50,7 @@ from app.harness_optimizer.acceptance import (
     decide,
 )
 from app.harness_optimizer.budget import Budget, BudgetExceeded
-from app.harness_optimizer.evaluator import Evaluator, ProviderFailure
+from app.harness_optimizer.evaluator import Evaluator, ProviderFailure, UnpricedModel
 from app.harness_optimizer.history import EditHistory, HistoryEntry
 from app.harness_optimizer.state import RunDir, RunState
 
@@ -195,8 +195,12 @@ class Optimizer:
             try:
                 return await llm(system, prompt)
             finally:
-                budget.record(m.summary()["cost_usd"] or 0.0)
+                summary = m.summary()
+                budget.record(summary["cost_usd"] or 0.0)
                 state.spent_usd = budget.spent_usd
+                if summary["unpriced_models"]:
+                    raise UnpricedModel(f"no price for {summary['unpriced_models']}; "
+                                        f"add it to cost_meter.PRICES_PER_MTOK")
 
     async def _evaluate(self, state: RunState, budget: Budget, harness_dir: Path,
                         cases: list[str], trials: int) -> tuple[EvalResult, list[dict]]:
