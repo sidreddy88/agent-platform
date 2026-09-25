@@ -200,3 +200,70 @@ def test_aggregate_reports_measured_cost(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Total: $2.00" in out and "mean $1.000" in out
     assert "Cache hit rate (cache reads / all input tokens): 75.0%" in out
+
+
+def test_hung_replay_times_out_and_shows_where_it_was_stuck(monkeypatch, capsys):
+    import asyncio
+
+    monkeypatch.setattr(gate, "CASE_TIMEOUT_SECONDS", 0.2)
+
+    async def stuck_in_git():
+        await asyncio.Event().wait()
+
+    async def replay(item, github):
+        await stuck_in_git()
+
+    result = asyncio.run(gate._replay_attempt(replay, {}, None, {"instance_id": "x"}))
+    assert result["verdict"] == "TIMEOUT"
+    out = capsys.readouterr().out
+    assert "TIMEOUT after" in out and "in stuck_in_git" in out
+
+
+def test_timeout_is_bounded_even_if_cancellation_blocks(monkeypatch):
+    import asyncio
+    import time
+
+    monkeypatch.setattr(gate, "CASE_TIMEOUT_SECONDS", 0.1)
+    real_wait = asyncio.wait
+
+    async def short_wait(fs, timeout=None):  # shrink the 60s cancel grace period
+        return await real_wait(fs, timeout=min(timeout or 1, 0.3))
+
+    monkeypatch.setattr(gate.asyncio, "wait", short_wait)
+
+    async def replay(item, github):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.shield(asyncio.Event().wait())  # cleanup that never returns
+
+    async def main():
+        start = time.monotonic()
+        r = await gate._replay_attempt(replay, {}, None, {"instance_id": "x"})
+        return r, time.monotonic() - start
+
+    async def run_and_abandon():
+        r, elapsed = await main()
+        for t in asyncio.all_tasks():
+            if t is not asyncio.current_task():
+                t.cancel()
+        return r, elapsed
+
+    r, elapsed = asyncio.run(run_and_abandon())
+    assert r["verdict"] == "TIMEOUT" and elapsed < 2
+
+
+def test_timeout_is_not_retried(monkeypatch):
+    import asyncio
+
+    calls = _patch_swebench_replay(monkeypatch, {"a": ["PASS"]})
+    monkeypatch.setattr(gate, "CASE_TIMEOUT_SECONDS", 0.1)
+    import scripts.eval_swebench_diagnosis as swe
+
+    async def hang(instance, github):
+        calls.append(instance["instance_id"])
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(swe, "_replay_one", hang)
+    results = asyncio.run(gate._run_swebench_suite([{"instance_id": "a", "repo": "r"}]))
+    assert calls == ["a"] and results[0]["verdict"] == "TIMEOUT"

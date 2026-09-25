@@ -170,10 +170,14 @@ class LocalRepoService:
         if not self._pinned_sha or not self._path.exists():
             return
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
-        await _run(
+        # Best-effort cleanup: this runs in `finally` blocks, so it must not
+        # raise and replace the exception that is actually propagating.
+        rc, _, stderr = await _run(
             ["git", "-C", str(self._base_path), "worktree", "remove", "--force", str(self._path)],
-            env=env,
+            env=env, timeout=120,
         )
+        if rc != 0:
+            logger.warning("LocalRepo: worktree remove failed for %s: %s", self._path, stderr.strip())
         self._ready = False
 
     async def _pull(self) -> None:
@@ -220,12 +224,30 @@ class LocalRepoService:
         return stdout.strip() or "HEAD"
 
 
-async def _run(cmd: list[str], env: dict | None = None) -> tuple[int, str, str]:
+# Upper bound on any single git subprocess. Generous on purpose -- a first
+# clone of a large repo (sympy, django) takes minutes -- but finite: with no
+# timeout at all, one stuck git call (lock contention, a network stall, an
+# unexpected prompt) blocks diagnose() forever. A diagnosis gate shard sat
+# silent for 93 minutes until the job timeout killed it; a git call in the
+# replay's cleanup path is one of the unbounded waits it could have been in.
+GIT_TIMEOUT_SECONDS = 900
+
+
+async def _run(cmd: list[str], env: dict | None = None,
+               timeout: float = GIT_TIMEOUT_SECONDS) -> tuple[int, str, str]:
+    """Run a subprocess; on timeout, kill it and return rc=-1 with the reason
+    in stderr, so callers' existing `rc != 0` handling reports it."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.error("LocalRepo: %s timed out after %.0fs -- killed", " ".join(cmd[:4]), timeout)
+        return -1, "", f"timed out after {timeout:.0f}s: {' '.join(cmd)}"
     return proc.returncode, stdout.decode(), stderr.decode()
