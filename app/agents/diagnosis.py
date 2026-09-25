@@ -854,36 +854,54 @@ class DiagnosisAgent(BaseAgent):
             return "\n".join(lines)
 
         async def _verify_symbol_in_repo(symbol: str) -> str:
-            """Verify a function/symbol name actually exists in the target repo.
+            """Verify a function/symbol name actually exists in the repo being diagnosed.
 
-            Uses GitHub Code Search (authoritative for the default branch). Returns
-            matching file paths + matched fragments, or NOT_FOUND. Use this BEFORE
-            naming a function in affected_function / additional_fix_function so you
-            never invent a symbol that doesn't exist.
+            Checks the local checkout when one is ready (the pinned commit in a
+            replay, the live clone in production), falling back to GitHub Code
+            Search. It used to query GitHub only: default-branch-only, rate-limited,
+            and with an expired token it answered NOT_FOUND for 87 of 87 lookups in
+            one eval run (85 of them real symbols), each telling the agent to drop
+            the symbol and cap its confidence. A lookup that fails now says so;
+            only a lookup that ran and found nothing says NOT_FOUND.
             """
-            name = (symbol or "").strip()
-            if not name:
+            raw = (symbol or "").strip()
+            if not raw:
                 return "NOT_FOUND: empty symbol."
-            # Code Search supports bare-token queries. The trailing '(' nudges toward
-            # call/definition sites and away from prose mentions.
-            queries = [f'"{name}("', f'"{name}"']
-            for q in queries:
-                try:
-                    hits = await github.search_code(owner, repo, q)
-                except Exception as exc:
-                    return f"VERIFY_ERROR: {exc}"
+            name = self._bare_symbol(raw)
+            note = f" (checked the bare name '{name}' from '{raw}')" if name != raw else ""
+            if self._local_repo.ready:
+                hits = self._local_symbol_hits(name)
                 if hits:
-                    lines = [f"FOUND ({len(hits)} match(es)) for '{name}':"]
+                    lines = [f"FOUND ({len(hits)} match(es)) for '{name}' in this checkout{note}:"]
+                    for path, line, text in hits:
+                        lines.append(f"  - {path}:{line}  :: {text}")
+                        self._retrieved_file_paths.add(path)
+                    return "\n".join(lines)
+                return (
+                    f"NOT_FOUND: '{name}' is not defined, called or referenced anywhere in this "
+                    f"checkout of {owner}/{repo}{note}. Do not name it in affected_function or "
+                    f"additional_fix_function: set the field to null, lower confidence to ≤0.65, and "
+                    f"surface candidate file paths in evidence instead."
+                )
+            # No local checkout: GitHub Code Search (default branch only).
+            for q in (f'"{name}("', f'"{name}"'):
+                try:
+                    hits = await github.search_code(owner, repo, q, strict=True)
+                except Exception as exc:
+                    return (f"VERIFY_ERROR: the symbol lookup itself failed ({exc}); this says "
+                            f"nothing about whether '{name}' exists. Verify it by reading the file "
+                            f"with get_file_contents or grep_codebase instead.")
+                if hits:
+                    lines = [f"FOUND ({len(hits)} match(es)) for '{name}'{note}:"]
                     for h in hits[:5]:
                         frag = (h.get("fragment") or "").replace("\n", " ").strip()[:160]
                         lines.append(f"  - {h['path']}  :: {frag}")
                         self._retrieved_file_paths.add(h["path"])
                     return "\n".join(lines)
             return (
-                f"NOT_FOUND: '{name}' does not appear in repo {owner}/{repo} on the default branch. "
-                f"DO NOT name this symbol in affected_function or additional_fix_function. "
-                f"Set the function field to null, lower confidence to ≤0.65, and surface candidate "
-                f"file paths in evidence instead."
+                f"NOT_FOUND: '{name}' does not appear in repo {owner}/{repo} on the default branch{note}. "
+                f"Do not name it in affected_function or additional_fix_function: set the field to "
+                f"null, lower confidence to ≤0.65, and surface candidate file paths in evidence instead."
             )
 
         self.register_tool(
@@ -1080,6 +1098,46 @@ class DiagnosisAgent(BaseAgent):
             return True  # too short to meaningfully verify — avoid false positives
         return skeleton in _snippet_skeleton(content)
 
+    @staticmethod
+    def _bare_symbol(symbol: str) -> str:
+        """'def foo(x)', 'class Foo(Bar)', 'Mod.Class.method' -> the bare identifier."""
+        name = (symbol or "").strip()
+        name = re.sub(r"^(?:async\s+)?(?:def|class|function)\s+", "", name)
+        name = name.split("(")[0].strip()
+        return name.rsplit(".", 1)[-1].strip()
+
+    def _local_symbol_hits(self, name: str, limit: int = 5) -> list[tuple[str, int, str]]:
+        """(path, line, text) where `name` is defined, called, quoted or assigned
+        in the local checkout, definitions first. The checkout is what's being
+        diagnosed: the pinned commit in a replay, the live clone in production."""
+        n = re.escape(name)
+        definition = re.compile(rf"\b(?:def|class|function)\s+{n}\b")
+        usage = re.compile(rf"\b{n}\s*\(|['\"]{n}['\"]|\b{n}\s*[:=][^=]")
+        defs: list[tuple[str, int, str]] = []
+        uses: list[tuple[str, int, str]] = []
+        for rel_path in sorted(self._local_repo.list_files()):
+            try:
+                content = self._local_repo.read_file(rel_path)
+            except Exception:
+                continue
+            if name not in content:
+                continue
+            for i, line in enumerate(content.splitlines(), 1):
+                if definition.search(line):
+                    defs.append((rel_path, i, line.strip()[:160]))
+                elif len(uses) < limit and usage.search(line):
+                    uses.append((rel_path, i, line.strip()[:160]))
+        # Source before tests: the definition to fix, not a test double of it.
+        def is_test(path: str) -> bool:
+            parts = path.lower().split("/")
+            name = parts[-1]
+            return (any(p in ("tests", "test", "testing") for p in parts[:-1])
+                    or name.startswith("test_") or name.endswith(("_test.py", ".test.js", ".spec.js"))
+                    or name == "conftest.py")
+        defs.sort(key=lambda h: is_test(h[0]))
+        uses.sort(key=lambda h: is_test(h[0]))
+        return (defs + uses)[:limit]
+
     async def _symbol_exists_in_repo(self, symbol: str) -> bool:
         """Check whether `symbol` appears in the target repo.
 
@@ -1100,26 +1158,26 @@ class DiagnosisAgent(BaseAgent):
         if not name:
             return False
 
-        if self._local_repo.pinned and self._local_repo.ready:
-            needles = (f"{name}(", f'"{name}"')
-            for rel_path in self._local_repo.list_files():
-                try:
-                    content = self._local_repo.read_file(rel_path)
-                except Exception:
-                    continue
-                if any(n in content for n in needles):
-                    return True
-            return False
+        # Local checkout first whenever one is ready, pinned or live: it is the
+        # code actually being diagnosed, and GitHub search is rate-limited and
+        # default-branch only. (This used to apply to pinned replays only, while
+        # the verify_symbol_in_repo tool never checked locally at all.)
+        if self._local_repo.ready:
+            return bool(self._local_symbol_hits(self._bare_symbol(name), limit=1))
 
+        errored = 0
         for q in (f'"{name}("', f'"{name}"'):
             try:
-                hits = await self._github.search_code(self._owner, self._repo, q)
-            except Exception:
-                # Treat transient lookup errors as "unknown" — fall through to next query.
+                hits = await self._github.search_code(self._owner, self._repo, q, strict=True)
+            except Exception as exc:
+                errored += 1
+                logger.warning("DiagnosisAgent: symbol lookup for %r failed: %s", name, exc)
                 continue
             if hits:
                 return True
-        return False
+        # Unknown is not "fabricated": if every lookup failed, don't let the
+        # grounding gate reject a symbol on the strength of an API error.
+        return errored == 2
 
     def _snippet_problem(
         self, field: str, file_path: str, symbol: str | None, snippet: str | None
