@@ -1,0 +1,2 @@
+
+STEPS 1-3 — LOG CONTEXT: log_group is not set for this incident, so log-based steps could not be fetched (they would return no data) and were skipped. Set reproduction_confirmed=false and cap confidence at 0.75.

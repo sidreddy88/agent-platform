@@ -1,0 +1,4 @@
+
+STACK TRACE FILE DETECTION (deterministic, extracted from the error text and confirmed to exist in the repo — not a search result):
+{paths}
+These are real, confirmed paths. In step 5, call get_file_contents on these FIRST instead of search_codebase — do not spend a step searching for a file you already have. Only fall back to search_codebase if none of these turn out to contain the actual bug.
