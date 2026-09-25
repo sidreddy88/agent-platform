@@ -61,6 +61,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.services import cost_meter  # noqa: E402  (stdlib-only module)
+
 _PRODUCTION_DATASET = Path(__file__).resolve().parent.parent / "app" / "evals" / "diagnosis_regression.jsonl"
 _SWEBENCH_DATASET = Path(__file__).resolve().parent.parent / "app" / "evals" / "swebench_diagnosis_regression.jsonl"
 
@@ -176,17 +178,22 @@ async def _run_suite(suite: str, items: list[dict[str, Any]], replay,
             continue
         print(f"[{suite} {i}/{len(items)}] {label_of(item)} ...", flush=True)
         attempts = []
-        for attempt in range(1 + RETRIES):
-            if attempt:
-                print(f"    retrying ({attempt}/{RETRIES}) ...", flush=True)
-            result = await _replay_attempt(replay, item, github, base)
-            attempts.append(result["verdict"])
-            print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
-            if result["verdict"] in ("PASS", "INFRA"):
-                break
+        # One meter per case, across all attempts: a retry is part of what
+        # the case cost the gate.
+        with cost_meter.metered() as meter:
+            for attempt in range(1 + RETRIES):
+                if attempt:
+                    print(f"    retrying ({attempt}/{RETRIES}) ...", flush=True)
+                result = await _replay_attempt(replay, item, github, base)
+                attempts.append(result["verdict"])
+                print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
+                if result["verdict"] in ("PASS", "INFRA"):
+                    break
+        cost = meter.summary()
+        print(f"    cost: ${cost['cost_usd']} over {cost['calls']} LLM calls", flush=True)
         if result.get("infra_kind") in _FATAL_PROVIDER_FAILURES:
             fatal = result["infra_kind"]
-        results.append({**result, "suite": suite, "attempts": attempts,
+        results.append({**result, "suite": suite, "attempts": attempts, "cost": cost,
                         "flaky": result["verdict"] == "PASS" and len(attempts) > 1})
     return results
 
@@ -212,9 +219,35 @@ async def _run_swebench_suite(instances: list[dict[str, Any]]) -> list[dict[str,
     )
 
 
+def _print_cost(results: list[dict[str, Any]]) -> None:
+    """Measured spend for the run -- printed for invalid runs too, since a
+    run that dies on a billing error is exactly when the number matters."""
+    costs = [r["cost"] for r in results if r.get("cost")]
+    if not costs:
+        return
+    priced = [c["cost_usd"] for c in costs if c["cost_usd"] is not None]
+    unpriced = sorted({m for c in costs for m in c["unpriced_models"]})
+    by_type = {k: sum(c["by_billing_type"][k] for c in costs)
+               for k in ("input", "output", "cache_write", "cache_read")}
+    tokens = {k: sum(c["tokens"][k] for c in costs)
+              for k in ("input", "output", "cache_write", "cache_read")}
+    all_input = tokens["input"] + tokens["cache_write"] + tokens["cache_read"]
+    total = sum(priced)
+    print(f"\n## Cost (measured, {len(costs)} cases replayed)\n")
+    print(f"Total: ${total:.2f}  |  per case: mean ${total / len(priced):.3f}, "
+          f"max ${max(priced):.3f}" if priced else "Total: unknown")
+    print("By billing type: " + ", ".join(f"{k} ${v:.2f}" for k, v in by_type.items()))
+    if all_input:
+        print(f"Cache hit rate (cache reads / all input tokens): "
+              f"{tokens['cache_read'] / all_input:.1%}")
+    if unpriced:
+        print(f"WARNING: no price for {unpriced} -- totals exclude those calls.")
+
+
 def _print_report(results: list[dict[str, Any]]) -> bool:
     """Returns True if the gate should FAIL (non-pass rate exceeds the
     threshold, or the run is invalid)."""
+    _print_cost(results)
     infra = [r for r in results if r["verdict"] == "INFRA"]
     if infra:
         # Refuse to score at all, rather than scoring only the clean cases:

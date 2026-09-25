@@ -394,6 +394,13 @@ class LLMGateway:
         )
 
         self._record_cost(task_type, provider_name, cost)
+        from app.services import cost_meter
+        # Same assumption as billed_input above: LiteLLM's prompt_tokens
+        # includes cache reads. Not yet verified against a live cached call.
+        cost_meter.record(
+            model, billed_input, raw.output_tokens,
+            raw.cache_read_input_tokens, raw.cache_creation_input_tokens,
+        )
         logger.info(
             "[gateway] task=%s provider=%s model=%s in=%d out=%d cache_read=%d cache_write=%d cost=%.6f latency=%.0fms",
             task_type, provider_name, model,

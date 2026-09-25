@@ -122,6 +122,17 @@ class LLMService:
             self.last_output_tokens = (
                 response.usage.output_tokens if response.usage else 0
             )
+            if response.usage:
+                # input_tokens is uncached input only; cache traffic is
+                # reported separately and was previously dropped here.
+                from app.services import cost_meter
+                cost_meter.record(
+                    self._model,
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                    getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                    getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                )
             return response.content[0].text
 
         async def _complete() -> str:

@@ -182,3 +182,21 @@ def test_billing_failure_on_retry_still_stops_the_shard(monkeypatch):
     results = asyncio.run(gate._run_swebench_suite(instances))
     assert calls == ["a", "a"]
     assert [r["verdict"] for r in results] == ["INFRA", "INFRA"]
+
+
+def test_aggregate_reports_measured_cost(tmp_path, capsys):
+    cost = {"calls": 12, "models": ["claude-sonnet-4-6"],
+            "tokens": {"input": 1000, "output": 100, "cache_write": 0, "cache_read": 3000},
+            "cache_hit_rate": 0.75,
+            "by_billing_type": {"input": 0.5, "output": 0.3, "cache_write": 0.0, "cache_read": 0.2},
+            "cost_usd": 1.0, "unpriced_models": []}
+    _write_shard(tmp_path, 1, 1, ["PASS", "PASS"])
+    payload = json.loads((tmp_path / "shard-1.json").read_text())
+    for r in payload["results"]:
+        r["cost"] = cost
+    (tmp_path / "shard-1.json").write_text(json.dumps(payload))
+
+    assert gate._aggregate(tmp_path, expect_shards=1) == 0
+    out = capsys.readouterr().out
+    assert "Total: $2.00" in out and "mean $1.000" in out
+    assert "Cache hit rate (cache reads / all input tokens): 75.0%" in out
