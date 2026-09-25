@@ -13,7 +13,7 @@ INCIDENT:
   occurrences_24h : {occurrences_24h}
   blast_radius    : {blast_radius}
   triage_reasoning: {triage_reasoning}
-{log_context}{prior_knowledge}{stack_trace}
+{log_context}{prior_knowledge}{stack_trace}{retrieval_note}
 STEPS — call tools in this exact order, starting from step 4 (steps 1-3 are the
 pre-fetched LOG CONTEXT above — already done, no tool call needed for them).
 Complete each step before moving to the next.

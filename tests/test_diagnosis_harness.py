@@ -95,3 +95,16 @@ def test_dockerignore_does_not_drop_harness_files():
         hits = [p for p in patterns if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(f.name, p)
                 or rel.startswith(p.rstrip("/") + "/")]
         assert not hits, f"{rel} is excluded from the Docker build by {hits}"
+
+
+def test_search_codebase_is_offered_only_with_a_rag_index():
+    from tests.diagnosis_harness_scenarios import capture_task_prompt
+
+    note = (DEFAULT_ROOT / "diagnosis" / "retrieval_unavailable.prompt").read_text()
+    without = _agent()                                   # rag=None: production and eval replays today
+    assert "search_codebase" not in without._tools
+    assert note in capture_task_prompt("no_logs_plain")
+
+    with_rag = DiagnosisAgent(github=MagicMock(), local_repo=MagicMock(ready=False, pinned=False),
+                              owner="o", repo="r", rag=MagicMock())
+    assert "search_codebase" in with_rag._tools

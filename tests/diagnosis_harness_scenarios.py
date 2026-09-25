@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 from app.agents.base import _build_system_prompt
 from app.agents.diagnosis import DiagnosisAgent
 from app.models.events import ErrorEvent, EventSource, IncidentState
+from app.services.code_graph.graph import CodeGraph
 
 SCENARIOS = {
     "no_logs_plain": dict(
@@ -34,7 +35,8 @@ class _Stop(Exception):
 def make_agent() -> DiagnosisAgent:
     repo = MagicMock(ready=True, pinned=True)
     repo.file_exists.return_value = True
-    agent = DiagnosisAgent(github=MagicMock(), local_repo=repo, owner="o", repo="r", rag=None)
+    agent = DiagnosisAgent(github=MagicMock(), local_repo=repo, owner="o", repo="r", rag=None,
+                           code_graph=CodeGraph())
     agent._ensure_local_repo = AsyncMock()
     for name, out in (("get_error_samples", "SAMPLES: TypeError at users.js:42"),
                       ("check_still_occurring", "STILL OCCURRING: yes, 3 in last 10 min"),

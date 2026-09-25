@@ -8,12 +8,13 @@ copy via `DiagnosisAgent(harness_dir=...)` or `HARNESS_DIR_DIAGNOSIS`.
 
 | File | What it is | Placeholders |
 |---|---|---|
-| `task_prompt.prompt` | The first user message: incident fields, then the step-by-step procedure, output schema and confidence guide. ~17k chars, resent on every turn (cached since #260). | `error_type title description service log_group pattern task_id severity occurrences_24h blast_radius triage_reasoning log_context prior_knowledge stack_trace` |
+| `task_prompt.prompt` | The first user message: incident fields, then the step-by-step procedure, output schema and confidence guide. ~17k chars, resent on every turn (cached since #260). | `error_type title description service log_group pattern task_id severity occurrences_24h blast_radius triage_reasoning log_context prior_knowledge stack_trace retrieval_note` |
 | `log_context_fetched.prompt` | "Steps 1–3" block when CloudWatch logs were pre-fetched | `error_samples still_occurring occurrence_timeline` |
 | `log_context_missing.prompt` | The same block when the incident has no log group (every SWE-bench case) | none |
 | `prior_knowledge.prompt` | A matching past incident, framed as a lead to verify | `prior_context` |
 | `stack_trace.prompt` | Files detected deterministically from the error text | `paths` |
-| `tool_descriptions.json` | The description of each of the 10 tools, as shown in the system prompt | none |
+| `retrieval_unavailable.prompt` | Added to the task prompt when there is no RAG index, so `search_codebase` isn't offered (production and eval replays today): points the steps at grep + ranged reads instead | none |
+| `tool_descriptions.json` | The description of each of the 10 tools, as shown in the system prompt (`search_codebase` only when a RAG index exists) | none |
 | `settings.json` | `max_iterations`, `file_read_char_limit`, `grep_default_glob`, `grep_max_matches` | none |
 
 Templates are rendered with `str.format`, so literal braces are written `{{ }}`.

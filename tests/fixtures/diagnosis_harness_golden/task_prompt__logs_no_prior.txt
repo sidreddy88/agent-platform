@@ -27,6 +27,8 @@ STILL OCCURRING: yes, 3 in last 10 min
 3. OCCURRENCE TIMELINE (get_occurrence_timeline, hours=24):
 TIMELINE: 14:00 x2, 14:05 x1
 
+RETRIEVAL: search_codebase is not available for this incident (there is no semantic index of this repository). Wherever the steps below say search_codebase, use grep_codebase with exact names from the error text (function, class, module or message strings) to find where code lives, then get_file_contents (with start_line/end_line for large files) to read it.
+
 STEPS — call tools in this exact order, starting from step 4 (steps 1-3 are the
 pre-fetched LOG CONTEXT above — already done, no tool call needed for them).
 Complete each step before moving to the next.

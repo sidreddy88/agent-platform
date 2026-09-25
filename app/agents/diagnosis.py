@@ -901,11 +901,19 @@ class DiagnosisAgent(BaseAgent):
             _get_occurrence_timeline,
             self._harness.tool_description("get_occurrence_timeline"),
         )
-        self.register_tool(
-            "search_codebase",
-            _search_codebase,
-            self._harness.tool_description("search_codebase"),
-        )
+        # Only offered when there is an index to search. Without one it can only
+        # answer "RAG not configured", and that has been every call in
+        # production (incident_loop constructs DiagnosisAgent() with no rag,
+        # since the agent was created) and in every eval replay. Offering it
+        # wasted turns, and would teach the harness optimizer to steer the
+        # agent away from a tool that does work wherever RAG exists. The task
+        # prompt gets retrieval_unavailable.prompt instead (see diagnose()).
+        if getattr(self, "_rag", None) is not None:
+            self.register_tool(
+                "search_codebase",
+                _search_codebase,
+                self._harness.tool_description("search_codebase"),
+            )
         self.register_tool(
             "get_file_contents",
             _get_file_contents,
@@ -1533,6 +1541,8 @@ class DiagnosisAgent(BaseAgent):
             log_context=log_group_warning,
             prior_knowledge=prior_section,
             stack_trace=stack_trace_section,
+            retrieval_note=("" if "search_codebase" in self._tools
+                            else self._harness.render("retrieval_unavailable")),
         )
 
         await self.run(prompt)
