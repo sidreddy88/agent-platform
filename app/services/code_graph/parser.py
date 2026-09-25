@@ -1,16 +1,23 @@
 """
 Code graph — Phase 1: tree-sitter parser.
 
-Parses JS/TS source files and extracts two things:
+Parses JS/TS/Python source files and extracts two things:
   1. FunctionDef  — where each function is defined (name, location, kind, export status)
   2. CallSite     — where each function is called from (caller → callee edges)
 
 Together these produce the raw edge list that graph.py turns into a call graph.
 
 Supported function kinds:
-  function  — `function foo() {}`
-  arrow     — `const foo = () => {}`
-  method    — `class Foo { bar() {} }`
+  function  — `function foo() {}`      / `def foo():`
+  arrow     — `const foo = () => {}`   (JS/TS only)
+  method    — `class Foo { bar() {} }` / `class Foo:` + `def bar(self):`
+
+Python support was added after a SWE-bench audit found `find_callers` returning
+"no callers found / index not built" on all 100 instances of the Verified sample
+— the sample is 100% Python, and this module only loaded the JS and TS grammars.
+The call graph was structurally dead for that entire evaluation. Language
+dispatch happens on `tree.language` (a tree-sitter Tree knows its own grammar),
+so no caller signature changed.
 
 Usage:
     from app.services.code_graph.parser import parse_file, extract_function_definitions, extract_call_sites
@@ -27,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tree_sitter_javascript as tsjs
+import tree_sitter_python as tspy
 import tree_sitter_typescript as tsts
 from tree_sitter import Language, Node, Parser
 
@@ -41,6 +49,7 @@ from tree_sitter import Language, Node, Parser
 _JS_LANGUAGE = Language(tsjs.language())
 _TS_LANGUAGE = Language(tsts.language_typescript())
 _TSX_LANGUAGE = Language(tsts.language_tsx())
+_PY_LANGUAGE = Language(tspy.language())
 
 # Map file extension → parser. .jsx uses the JS grammar (JSX is a JS superset).
 _PARSERS: dict[str, Parser] = {
@@ -48,7 +57,18 @@ _PARSERS: dict[str, Parser] = {
     ".jsx": Parser(_JS_LANGUAGE),
     ".ts":  Parser(_TS_LANGUAGE),
     ".tsx": Parser(_TSX_LANGUAGE),
+    ".py":  Parser(_PY_LANGUAGE),
 }
+
+
+def _is_python(tree: "tree_sitter.Tree") -> bool:
+    """Which grammar produced this tree.
+
+    Dispatching on the tree rather than threading a `suffix` argument through
+    every public function keeps extract_function_definitions/extract_call_sites
+    signature-compatible with their existing callers (rag.py, graph.py).
+    """
+    return tree.language is _PY_LANGUAGE
 
 
 # ---------------------------------------------------------------------------
@@ -113,10 +133,14 @@ def extract_function_definitions(tree: "tree_sitter.Tree", source: str) -> list[
 
     Top-level means: not nested inside another function. Nested functions are
     skipped intentionally — they're implementation details of their parent and
-    would create noise in the call graph.
+    would create noise in the call graph. Class methods are collected in both
+    languages; they're independently callable by name.
     """
     results: list[FunctionDef] = []
-    _walk(tree.root_node, source, results, exported=False)
+    if _is_python(tree):
+        _walk_python(tree.root_node, results, in_class=False)
+    else:
+        _walk(tree.root_node, source, results, exported=False)
     return results
 
 
@@ -138,6 +162,11 @@ def extract_call_sites(tree: "tree_sitter.Tree", source: str) -> list[CallSite]:
       obj.foo()     → "foo"         (member_expression — take the rightmost property)
       foo.bar.baz() → "baz"         (nested member_expression — still rightmost)
       foo()()       → skipped       (dynamic call — callee is a call_expression)
+
+    Python uses different node names for the same two shapes — `call` instead of
+    `call_expression`, and `attribute` instead of `member_expression` — so the
+    node type and the callee extractor are both selected per grammar. The
+    containment algorithm above is language-independent.
     """
     # Step 1: get all function definitions sorted by start_byte for binary search
     fn_defs = extract_function_definitions(tree, source)
@@ -148,14 +177,18 @@ def extract_call_sites(tree: "tree_sitter.Tree", source: str) -> list[CallSite]:
     fn_defs_sorted = sorted(fn_defs, key=lambda f: f.start_byte)
     start_bytes = [f.start_byte for f in fn_defs_sorted]
 
-    # Step 2: collect all call_expression nodes by walking the full tree
+    # Step 2: collect all call nodes by walking the full tree
+    is_python = _is_python(tree)
+    call_type = "call" if is_python else "call_expression"
+    extract_callee = _extract_callee_name_python if is_python else _extract_callee_name
+
     call_nodes: list[Node] = []
-    _collect_calls(tree.root_node, call_nodes)
+    _collect_calls(tree.root_node, call_nodes, call_type)
 
     # Step 3 + 4: for each call, find its containing function and extract callee name
     results: list[CallSite] = []
     for call_node in call_nodes:
-        callee_name = _extract_callee_name(call_node)
+        callee_name = extract_callee(call_node)
         if callee_name is None:
             continue  # dynamic or computed call — skip
 
@@ -262,18 +295,69 @@ def _walk(node: Node, source: str, out: list[FunctionDef], exported: bool) -> No
         _walk(child, source, out, exported=exported)
 
 
-def _collect_calls(node: Node, out: list[Node]) -> None:
-    """Walk the full CST and collect every call_expression node.
+def _walk_python(node: Node, out: list[FunctionDef], in_class: bool) -> None:
+    """Python counterpart to _walk().
+
+    The grammar is simpler than JS/TS here — there is exactly one definition
+    node type, `function_definition`, covering `def`, `async def`, and methods.
+    What varies is context, so `in_class` is threaded down to set `kind`.
+
+    Two Python-specific wrinkles:
+      - `decorated_definition` wraps a decorated function, so recurse through
+        it rather than treating it as a leaf. The recorded byte range is then
+        the `def` itself, excluding decorator lines — correct for the
+        containment check in extract_call_sites, which only cares about calls
+        in the body.
+      - Python has no `export` keyword. `is_exported` follows the language's
+        actual visibility convention: a leading underscore means private.
+    """
+    if node.type == "decorated_definition":
+        for child in node.children:
+            _walk_python(child, out, in_class)
+        return
+
+    if node.type == "function_definition":
+        name_node = node.child_by_field_name("name")
+        name = name_node.text.decode() if name_node else None
+        # Skip __init__ for the same reason JS skips `constructor` — it isn't
+        # independently callable by name.
+        if name and name != "__init__":
+            out.append(FunctionDef(
+                name=name,
+                start_line=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
+                kind="method" if in_class else "function",
+                is_exported=not name.startswith("_"),
+            ))
+        # Stop here — nested defs are implementation details, same rule as JS.
+        return
+
+    if node.type == "class_definition":
+        for child in node.children:
+            _walk_python(child, out, in_class=True)
+        return
+
+    for child in node.children:
+        _walk_python(child, out, in_class)
+
+
+def _collect_calls(node: Node, out: list[Node], call_type: str = "call_expression") -> None:
+    """Walk the full CST and collect every call node.
 
     We collect ALL call expressions (including those inside function bodies,
     conditionals, loops, etc.) because step 3 in extract_call_sites will
     filter by containment — only calls inside a known function are kept.
+
+    call_type is the grammar's node name for a call: "call_expression" in
+    JS/TS, "call" in Python.
     """
-    if node.type == "call_expression":
+    if node.type == call_type:
         out.append(node)
         # Still recurse — a call can contain another call: foo(bar())
     for child in node.children:
-        _collect_calls(child, out)
+        _collect_calls(child, out, call_type)
 
 
 def _extract_callee_name(call_node: Node) -> str | None:
@@ -306,6 +390,36 @@ def _extract_callee_name(call_node: Node) -> str | None:
 
     # Anything else (subscript, call expression, parenthesized expression, etc.)
     # is a dynamic call that can't be statically resolved — skip it.
+    return None
+
+
+def _extract_callee_name_python(call_node: Node) -> str | None:
+    """Python counterpart to _extract_callee_name().
+
+    Same two resolvable shapes, different node names:
+      foo()            → "foo"   (identifier)
+      obj.foo()        → "foo"   (attribute — take the `attribute` field)
+      foo.bar.baz()    → "baz"   (nested attribute — still the outermost field)
+      self.method()    → "method"
+      arr[0]()         → None    (subscript — dynamic)
+      (fn or noop)()   → None    (parenthesized expression — dynamic)
+
+    Note `obj.foo()` and a bare `foo()` collapse to the same edge name, exactly
+    as in the JS path. The call graph is name-keyed, not type-resolved.
+    """
+    callee = call_node.child_by_field_name("function")
+    if callee is None:
+        return None
+
+    if callee.type == "identifier":
+        return callee.text.decode()
+
+    if callee.type == "attribute":
+        # The "attribute" field is the rightmost name: os.path.join → "join"
+        prop = callee.child_by_field_name("attribute")
+        if prop is not None and prop.type == "identifier":
+            return prop.text.decode()
+
     return None
 
 

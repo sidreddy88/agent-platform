@@ -23,6 +23,21 @@ HAIKU_MODEL = DEFAULT_MODELS["haiku"]
 MAX_TOKENS = 8192
 
 _MAX_RETRIES = 3
+
+# Per-attempt HTTP timeout. Non-streaming, so the whole generation (up to
+# MAX_TOKENS of output, ~2-3 min on Sonnet) arrives before the response
+# headers -- the read timeout has to cover all of it. 5 min leaves room for a
+# slow response while bounding a stalled one.
+#
+# Why this exists: in gate run 36158424400, matplotlib__matplotlib-22865 sat
+# for 30 min waiting on response headers (anthropic -> httpx -> TLS read).
+# The client used the SDK default (600s per attempt, 2 SDK retries) *inside*
+# _retry_with_backoff's own 3 retries, which also retry timeouts: up to 12
+# attempts x 10 min, about 2 hours, for one stalled call. That applies to
+# production incidents as well as the gate. The SDK's own retries are turned
+# off so _retry_with_backoff is the only retry layer; worst case is now
+# 4 attempts x 5 min.
+_REQUEST_TIMEOUT = anthropic.Timeout(300.0, connect=10.0)
 _BASE_DELAY_SECONDS = 1.0
 _MAX_DELAY_SECONDS = 60.0
 
@@ -71,9 +86,27 @@ async def _retry_with_backoff(call_fn):
             await asyncio.sleep(wait)
 
 
+def _mark_system_for_cache(system: str | list) -> list:
+    """Return system as content blocks with a cache breakpoint on the last one.
+
+    Leaves any breakpoint the caller already placed (BaseAgent._with_harness
+    marks its harness-docs block) and never mutates the caller's list.
+    """
+    if isinstance(system, str):
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    blocks = [dict(b) for b in system]
+    if blocks and "cache_control" not in blocks[-1]:
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    return blocks
+
+
 class LLMService:
     def __init__(self, model: str | None = None, temperature: float | None = None) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key,
+            timeout=_REQUEST_TIMEOUT,
+            max_retries=0,   # _retry_with_backoff is the one retry layer
+        )
         self._model = model or MODEL
         # None (default) omits temperature entirely, preserving the Anthropic
         # API's own default (1.0) -- unchanged behavior for every existing
@@ -89,15 +122,32 @@ class LLMService:
         messages: list[dict],
         system: str | list | None = None,
         tracing_ctx: "TracingContext | None" = None,
+        cache: bool = False,
     ) -> str:
-        """Single blocking call — returns full response text. Use for agent loops."""
+        """Single blocking call — returns full response text. Use for agent loops.
+
+        cache=True turns on prompt caching for a multi-turn loop: an explicit
+        breakpoint on the last system block (the static prefix -- tool
+        descriptions and instructions) plus top-level automatic caching, which
+        moves a breakpoint to the end of the growing conversation each turn.
+        Off by default: a one-shot call pays the 1.25x cache-write premium on
+        its whole prompt and never reads it back.
+
+        Why: the #255 gate run (36158424400) measured $91.63 for 56 cases with
+        a 0.0% cache hit rate -- $61.06 of it uncached input -- because the
+        only cache_control in the codebase sat on harness docs, which are
+        absent outside the target app, and nothing marked the conversation a
+        ReAct loop resends on every one of up to 15 turns.
+        """
         kwargs: dict = {
             "model": self._model,
             "max_tokens": MAX_TOKENS,
             "messages": messages,
         }
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = _mark_system_for_cache(system) if cache else system
+        if cache:
+            kwargs["cache_control"] = {"type": "ephemeral"}
         # getattr, not self._temperature directly: several existing tests
         # construct LLMService via __new__ (bypassing __init__) and only set
         # the attributes they care about -- _temperature didn't exist before
@@ -122,6 +172,17 @@ class LLMService:
             self.last_output_tokens = (
                 response.usage.output_tokens if response.usage else 0
             )
+            if response.usage:
+                # input_tokens is uncached input only; cache traffic is
+                # reported separately and was previously dropped here.
+                from app.services import cost_meter
+                cost_meter.record(
+                    self._model,
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                    getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                    getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                )
             return response.content[0].text
 
         async def _complete() -> str:

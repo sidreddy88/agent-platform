@@ -94,7 +94,7 @@ class CodeChunk:
     start_line: int
     end_line: int
     content: str
-    # set only for function/method chunks (_chunk_js_by_ast)
+    # set only for function/method chunks (_chunk_by_ast)
     function_name: str | None = None
     kind: str | None = None            # "function" | "arrow" | "method"
     description: str = ""              # LLM-generated, see _generate_function_description
@@ -147,11 +147,11 @@ def _chunk_file(file_path: str, content: str, language: str) -> list[CodeChunk]:
     return chunks
 
 
-def _chunk_js_by_ast(file_path: str, content: str, raw: bytes, language: str) -> list[CodeChunk]:
+def _chunk_by_ast(file_path: str, content: str, raw: bytes, language: str) -> list[CodeChunk]:
     """
-    Extract function-boundary chunks from JS/TS source using the real tree-sitter
-    parser already built for the call graph (app.services.code_graph.parser) —
-    not a regex.
+    Extract function-boundary chunks from JS/TS/Python source using the real
+    tree-sitter parser already built for the call graph
+    (app.services.code_graph.parser) — not a regex.
 
     One chunk per top-level function/arrow-function/method declaration, each
     spanning its exact byte range. Short functions get their own chunk with no
@@ -163,6 +163,12 @@ def _chunk_js_by_ast(file_path: str, content: str, raw: bytes, language: str) ->
 
     Falls back to an empty list for files with no top-level definitions or a
     parse error (caller then falls back to _chunk_file).
+
+    Python was added alongside the call graph's Python grammar. Before that,
+    .py files fell straight through to _chunk_file's fixed line windows — the
+    exact dilution problem this function exists to fix. That mattered less when
+    the only indexed codebase was Node, but it silently degraded any Python
+    evaluation (see the SWE-bench retrieval-path audit).
     """
     from app.services.code_graph.parser import extract_function_definitions, parse_source
 
@@ -966,8 +972,8 @@ class RAGService:
             self._mark_superseded(relative)
 
         # ── Chunk — routed by file type, not one strategy for everything ────
-        if language in ("javascript", "typescript"):
-            chunks = _chunk_js_by_ast(relative, content, raw, language)
+        if language in ("javascript", "typescript", "python"):
+            chunks = _chunk_by_ast(relative, content, raw, language)
             if not chunks:
                 chunks = _chunk_file(relative, content, language)
         elif language == "markdown":
@@ -991,7 +997,7 @@ class RAGService:
             c.content = _truncate_to_tokens(c.content, MAX_EMBED_TOKENS)
 
         # ── Enrich function/method chunks with an LLM-generated description ─
-        # Only chunks that came from _chunk_js_by_ast have function_name set;
+        # Only chunks that came from _chunk_by_ast have function_name set;
         # markdown sections and line-based chunks have no single function to
         # describe, so they're embedded as plain code/text either way.
         if settings.rag_enable_function_descriptions:

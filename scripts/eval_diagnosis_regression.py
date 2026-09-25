@@ -114,6 +114,12 @@ async def _replay_one(case: dict[str, Any], github: Any) -> dict[str, Any]:
 
     pinned_repo = LocalRepoService(owner, repo, pinned_sha=pre_fix_sha)
     agent = DiagnosisAgent(github=github, local_repo=pinned_repo)
+    # Same gap as eval_swebench_diagnosis.py: DiagnosisAgent.__init__ has no
+    # llm= override, so config/llm_routing.json's "routing.diagnosis.model"
+    # is never read without this line. incident_loop.py is the only place
+    # that currently applies it.
+    from app.services.llm_gateway import llm_gateway
+    agent._llm = llm_gateway.get_llm_service_for("diagnosis")
     try:
         result = await agent.diagnose(incident)
     finally:

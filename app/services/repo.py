@@ -15,6 +15,8 @@ Usage:
 import asyncio
 import logging
 import os
+import shutil
+import signal
 from pathlib import Path
 
 from app.core.config import settings
@@ -166,14 +168,32 @@ class LocalRepoService:
         logger.info("LocalRepo: pinned worktree ready at %s (%s)", self._path, self._pinned_sha)
 
     async def remove_worktree(self) -> None:
-        """Tear down a pinned worktree. No-op for a normal (unpinned) instance."""
+        """Tear down a pinned worktree. No-op for a normal (unpinned) instance.
+
+        Deletes the directory directly and then runs `git worktree prune`,
+        instead of `git worktree remove --force`. In CI, `worktree remove`
+        for sympy__sympy-13091 never returned, in two separate gate runs:
+        once for 93 min until the job was killed, and once past a 120s
+        timeout where even the post-kill wait blocked (repo.py _run ->
+        asyncio subprocess wait), meaning something still held git's output
+        pipes. It never reproduced locally (2.5s). rmtree + prune does the
+        same cleanup without that command.
+
+        Best-effort: this runs in `finally` blocks, so it must not raise and
+        replace the exception that is actually propagating.
+        """
         if not self._pinned_sha or not self._path.exists():
             return
+        try:
+            await asyncio.to_thread(shutil.rmtree, self._path, ignore_errors=True)
+        except Exception as exc:
+            logger.warning("LocalRepo: could not delete worktree %s: %s", self._path, exc)
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
-        await _run(
-            ["git", "-C", str(self._base_path), "worktree", "remove", "--force", str(self._path)],
-            env=env,
+        rc, _, stderr = await _run(
+            ["git", "-C", str(self._base_path), "worktree", "prune"], env=env, timeout=120,
         )
+        if rc != 0:
+            logger.warning("LocalRepo: worktree prune failed for %s: %s", self._base_path, stderr.strip())
         self._ready = False
 
     async def _pull(self) -> None:
@@ -220,12 +240,44 @@ class LocalRepoService:
         return stdout.strip() or "HEAD"
 
 
-async def _run(cmd: list[str], env: dict | None = None) -> tuple[int, str, str]:
+# Upper bound on any single git subprocess. Generous on purpose -- a first
+# clone of a large repo (sympy, django) takes minutes -- but finite: with no
+# timeout at all, one stuck git call (lock contention, a network stall, an
+# unexpected prompt) blocks diagnose() forever. A diagnosis gate shard sat
+# silent for 93 minutes until the job timeout killed it; a git call in the
+# replay's cleanup path is one of the unbounded waits it could have been in.
+GIT_TIMEOUT_SECONDS = 900
+_POST_KILL_WAIT_SECONDS = 10
+
+
+async def _run(cmd: list[str], env: dict | None = None,
+               timeout: float = GIT_TIMEOUT_SECONDS) -> tuple[int, str, str]:
+    """Run a subprocess; on timeout, kill it and return rc=-1 with the reason
+    in stderr, so callers' existing `rc != 0` handling reports it."""
+    # Own process group, so a timeout kills git *and* anything it spawned.
+    # Killing only git was not enough: in CI the post-kill wait still blocked,
+    # because asyncio's Process.wait() doesn't return until the stdout/stderr
+    # pipes close, and a surviving child was holding them.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        try:
+            # Bounded: a child that left the process group (setsid) can still
+            # hold the pipes; abandon the wait rather than block on it.
+            await asyncio.wait_for(proc.wait(), _POST_KILL_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.error("LocalRepo: %s still held its pipes after kill -- abandoning", cmd[:4])
+        logger.error("LocalRepo: %s timed out after %.0fs -- killed", " ".join(cmd[:4]), timeout)
+        return -1, "", f"timed out after {timeout:.0f}s: {' '.join(cmd)}"
     return proc.returncode, stdout.decode(), stderr.decode()

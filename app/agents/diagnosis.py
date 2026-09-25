@@ -39,6 +39,7 @@ Confidence gate (CONFIDENCE_THRESHOLD = 0.70):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -171,6 +172,38 @@ _BUILTIN_CAMEL = frozenset({
 # is probably brainstorming and the whole thing should be reviewed anyway.
 _MAX_PROSE_CANDIDATES = 8
 
+# Per-read cap on get_file_contents output, whole-file or ranged. The grounding
+# gate uses it too: when a snippet fails to match, whether the file is bigger
+# than one read decides what advice can actually work. See _snippet_problem().
+_FILE_READ_CHAR_LIMIT = 12000
+
+
+def _cap_lines(lines: list[str], first: int, total: int, file_path: str) -> str:
+    """Join lines (numbered from `first`) up to _FILE_READ_CHAR_LIMIT, cutting
+    only at a line boundary, and say exactly which lines were returned.
+
+    The old notice said "only first 12000 chars shown" and suggested
+    re-reading "with a more specific path" -- meaningless for one file, and
+    re-reading returned the identical prefix. Line numbers make the rest of
+    the file addressable.
+    """
+    out: list[str] = []
+    size = 0
+    for line in lines:
+        if out and size + len(line) > _FILE_READ_CHAR_LIMIT:
+            break
+        out.append(line)
+        size += len(line)
+    last = first + len(out) - 1
+    text = "".join(out)
+    if first == 1 and last == total:
+        return text
+    notice = f"[Showing lines {first}-{last} of {total} in {file_path}."
+    if last < total:
+        notice += (f" To read further, call get_file_contents with start_line/end_line"
+                   f" (e.g. start_line={last + 1}); grep_codebase finds line numbers.")
+    return text.rstrip("\n") + "\n\n" + notice + "]"
+
 
 _PASCAL_CASE_RE = re.compile(r"\b[A-Z][A-Za-z0-9]*\b")
 
@@ -226,6 +259,38 @@ _STACK_FRAME_RE = re.compile(
     r"/app/([\w./\-]+\.(?:js|mjs|cjs|ts|tsx))\b"
 )
 
+def _submission_fingerprint(kwargs: dict) -> str:
+    """Stable hash of the fields the grounding gate actually checks.
+
+    Used only to notice that the model has re-sent something already rejected.
+    Deliberately narrow — confidence wobbling by 0.05 between attempts is not a
+    change of substance, and shouldn't hide a genuine repeat.
+    """
+    keyed = {
+        k: kwargs.get(k) for k in (
+            "affected_file", "affected_function", "root_cause_snippet",
+            "additional_fix_file", "additional_fix_function", "additional_fix_snippet",
+            "root_cause",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(keyed, sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+
+# CPython traceback frame:  File "/testbed/django/db/models/query.py", line 71, in __iter__
+# Note the inverted order vs V8 — the path comes first, the function name last
+# (and is optional; the trailing ", in <name>" is absent for module-level frames).
+_PY_FRAME_RE = re.compile(
+    r'File "([^"\n]+\.py)", line \d+(?:, in ([A-Za-z_]\w*))?'
+)
+
+# Python's equivalent of node_modules: installed dependencies and stdlib. A
+# frame in one of these is library code, not the repo under diagnosis.
+_PY_VENDOR_MARKERS = (
+    "/site-packages/", "/dist-packages/", "/lib/python", "/.venv/", "/venv/",
+    "<frozen ", "/usr/lib/", "/opt/conda/",
+)
+
 
 def extract_stack_trace_paths(text: str) -> list[dict]:
     """Deterministically pull this app's own file paths out of raw error text.
@@ -268,6 +333,28 @@ def extract_stack_trace_paths(text: str) -> list[dict]:
         # permanently blank out a real name a later occurrence provides.
         if path not in seen or (seen[path] is None and fn is not None):
             seen[path] = fn
+
+    # ── CPython tracebacks ────────────────────────────────────────────────
+    # Paths here are absolute against whatever root the process ran under
+    # (/testbed/... under SWE-bench, /srv/app/... in a container), so unlike
+    # the V8 branch there's no single prefix to strip. Emit progressively
+    # shorter suffixes and let the caller's repo file_exists() check pick the
+    # one that resolves — the caller already filters, so extra candidates cost
+    # nothing and a wrong guess here can't leak through.
+    for m in _PY_FRAME_RE.finditer(text):
+        raw_path, fn = m.group(1), m.group(2)
+        if any(marker in raw_path for marker in _PY_VENDOR_MARKERS):
+            continue
+        parts = raw_path.lstrip("/").split("/")
+        # Longest first: "django/db/models/query.py" before "db/models/query.py".
+        # Stop at two segments — a bare "query.py" or "base.py" resolves against
+        # half a dozen unrelated packages in repos this size, and file_exists()
+        # would happily confirm the wrong one.
+        for i in range(max(len(parts) - 1, 1)):
+            candidate = "/".join(parts[i:])
+            if candidate not in seen or (seen[candidate] is None and fn is not None):
+                seen[candidate] = fn
+
     return [{"file": path, "function": fn} for path, fn in seen.items()]
 
 
@@ -491,6 +578,9 @@ class DiagnosisAgent(BaseAgent):
         # -> scripts/measure_diagnosis_grounding.py's rejection-rate metric. Reset at
         # the top of every diagnose() call, same as _diagnosis_submitted.
         self._rejection_count = 0
+        # Fingerprint of the last rejected submission + its reasons, so a verbatim
+        # re-send can be called out instead of answered with the same message.
+        self._last_rejection_signature: tuple | None = None
         # Raw text of every chunk search_codebase actually returned during one
         # diagnose() call -- read externally (incident_loop.py) as the "retrieved
         # context" input to the sampled RAG faithfulness judge. Reset at the top
@@ -618,14 +708,23 @@ class DiagnosisAgent(BaseAgent):
             scan_for_injection(raw, source="rag-codebase-search")
             return wrap_untrusted(raw, source="rag-codebase-search")
 
-        async def _get_file_contents(file_path: str) -> str:
-            """Fetch the full source of a file from the target repo.
+        async def _get_file_contents(file_path: str, start_line: int | None = None,
+                                     end_line: int | None = None) -> str:
+            """Fetch a file's source from the target repo, whole or as a line range.
 
             When self._local_repo is pinned to a historical SHA (replay/eval
             tooling), reads from that pinned worktree instead of the GitHub API —
             get_file_contents defaults to ref="main" (github.py), i.e. the live
             default branch, which is wrong for a pinned replay by construction.
             Same bug class as _symbol_exists_in_repo's pinned-mode fix.
+
+            Why a line range: whole-file reads are capped at _FILE_READ_CHAR_LIMIT,
+            and nothing past the cap was reachable. On matplotlib__matplotlib-22865
+            the bug sat ~line 650 of a colorbar.py far past the cut; the agent never
+            saw it, invented a method name, and burned its budget on grounding
+            rejections asking for an excerpt it could not read. grep_codebase gives
+            line numbers; a range read then returns that region verbatim, so the
+            snippet it copies matches the file.
             """
             try:
                 p = file_path.lstrip("/")
@@ -633,27 +732,35 @@ class DiagnosisAgent(BaseAgent):
                     content = self._local_repo.read_file(p)
                 else:
                     content, _ = await github.get_file_contents(owner, repo, p)
-                if len(content) > 12000:
-                    content = (
-                        content[:12000]
-                        + f"\n\n[TRUNCATED — file is {len(content)} chars, only first 12000 shown. "
-                        f"If the function you need is not visible, call get_file_contents again "
-                        f"with a more specific path or search for the function name via search_codebase.]"
-                    )
+                lines = content.splitlines(keepends=True)
+                total = len(lines)
+                if start_line is not None or end_line is not None:
+                    first = max(1, int(start_line or 1))
+                    last = min(total, int(end_line or total))
+                    if first > last:
+                        return (f"Invalid range {start_line}-{end_line} for {file_path} "
+                                f"({total} lines).")
+                    content = _cap_lines(lines[first - 1:last], first, total, file_path)
+                elif len(content) > _FILE_READ_CHAR_LIMIT:
+                    content = _cap_lines(lines, 1, total, file_path)
                 self._retrieved_file_paths.add(p)
                 scan_for_injection(content, source=f"github-file:{file_path}")
                 return wrap_untrusted(content, source=f"github-file:{file_path}")
             except Exception as exc:
                 return f"Could not fetch {file_path}: {exc}"
 
-        async def _grep_codebase(pattern: str, file_glob: str = "*.js") -> str:
+        async def _grep_codebase(pattern: str, file_glob: str = "*") -> str:
             """Exact-string search across every file in the local repo clone.
 
             Returns each matching line with its file path and line number.
             Use this when you need to find WHERE a specific function or string is
             called/defined — e.g. 'mongoose.connect' or 'require(\"mongoose\")'.
             Faster and more precise than search_codebase for exact patterns.
-            Input: {pattern: string, file_glob: string (default '**/*.js')}
+            Input: {pattern: string, file_glob: string (default '*', every file)}
+
+            The default was '*.js', a leftover from the JS-only target app: on
+            every Python repo an unscoped grep searched nothing and reported
+            "No matches", which reads as evidence the code doesn't exist.
             """
             local_repo = self._local_repo
             if not local_repo.ready:
@@ -770,13 +877,16 @@ class DiagnosisAgent(BaseAgent):
             "get_file_contents",
             _get_file_contents,
             (
-                "Fetch the complete source of a file from the target repository. "
+                "Fetch the source of a file from the target repository. "
                 "Use this after search_codebase identifies a candidate file — read the FULL file "
                 "to see every return statement and code path, not just RAG fragments. "
                 "If the file calls workers, helpers, or other modules relevant to the failure, "
                 "call this again on those files. Follow the code until you reach the failure site. "
-                "If a file is truncated, search for the specific function name via search_codebase. "
-                "Input: {file_path: string (e.g. 'constants/validationMain.js')}"
+                "Large files are cut off; the notice says which lines you got. To read any other "
+                "part, pass start_line/end_line (1-based, inclusive) — grep_codebase gives the "
+                "line numbers to aim for. "
+                "Input: {file_path: string (e.g. 'constants/validationMain.js'), "
+                "start_line: int (optional), end_line: int (optional)}"
             ),
         )
         self.register_tool(
@@ -788,7 +898,7 @@ class DiagnosisAgent(BaseAgent):
                 "Use this instead of search_codebase when you need to find WHERE a specific "
                 "string appears — e.g. 'mongoose.connect', 'require(\"mongoose\")', a function "
                 "call, or an import. search_codebase is semantic/fuzzy; grep_codebase is exact. "
-                "Input: {pattern: string, file_glob: string (default '*.js', matches all .js files at any depth)}"
+                "Input: {pattern: string, file_glob: string (optional, e.g. '*.py'; default '*', every file)}"
             ),
         )
         self.register_tool(
@@ -851,10 +961,27 @@ class DiagnosisAgent(BaseAgent):
                     "DiagnosisAgent: submit_diagnosis rejected (attempt %d): %s",
                     self._rejection_count, "; ".join(problems),
                 )
-                return (
-                    "REJECTED — fix the following and call submit_diagnosis again:\n"
-                    + "\n".join(f"- {p}" for p in problems)
-                )
+                # Loop breaker. A real trajectory (psf__requests-1142) rejected
+                # four times on byte-identical grounds against a byte-identical
+                # submission, each round re-reading the same file, until the
+                # 15-iteration budget ran out and the run escalated. Repeating
+                # the same rejection verbatim is not feedback — it reads as
+                # "try again" when the honest content is "this exact thing has
+                # already failed". Say that instead.
+                signature = (tuple(problems), _submission_fingerprint(kwargs))
+                repeated = signature == self._last_rejection_signature
+                self._last_rejection_signature = signature
+                header = "REJECTED — fix the following and call submit_diagnosis again:"
+                if repeated:
+                    header = (
+                        "REJECTED AGAIN — this is the SAME submission you just sent, failing "
+                        "for the SAME reasons. Re-sending it will fail identically.\n"
+                        "Stop and change your approach: if a snippet won't verify, the text you "
+                        "are submitting is not in the file. Do not reconstruct it from memory — "
+                        "locate the real text with grep_codebase, or set the field to null and "
+                        "lower your confidence. Outstanding problems:"
+                    )
+                return header + "\n" + "\n".join(f"- {p}" for p in problems)
             confidence = float(kwargs.get("confidence", 0.5))
             contract_change = str(kwargs.get("contract_change", "none") or "none").lower()
             if contract_change not in ("none", "signature", "return_type", "side_effect"):
@@ -1005,6 +1132,60 @@ class DiagnosisAgent(BaseAgent):
                 return True
         return False
 
+    def _snippet_problem(
+        self, field: str, file_path: str, symbol: str | None, snippet: str | None
+    ) -> str:
+        """Explain a failed snippet check in a way the model can act on.
+
+        The old message was a single string for every case: "call
+        get_file_contents on X and copy a real excerpt". A real trajectory
+        (psf__requests-1142) showed why that can be actively wrong.
+        requests/models.py is 20,789 chars; get_file_contents returns the first
+        12,000; the target function's *definition* sat past the cut, so only
+        its call site was visible. The model reconstructed the body from
+        memory — plausible, well-formed, not the file's actual text — and was
+        rejected. It then did exactly what the message said, re-read the file,
+        got the identical truncated content, and resubmitted the identical
+        fabrication. Four rounds, budget exhausted, run escalated.
+
+        The instruction was followed faithfully and could not have worked. So
+        the message now distinguishes the cases, and when the file is larger
+        than the read limit it names the one tool that *can* reach the rest.
+        """
+        missing = not snippet
+        head = (
+            f"{field} is missing"
+            if missing else
+            f"{field} does not match {file_path}'s actual current content "
+            f"(the text you submitted is not in the file)"
+        )
+
+        size = None
+        try:
+            if self._local_repo.ready:
+                size = len(self._local_repo.read_file(file_path))
+        except Exception:
+            size = None
+
+        if size is not None and size > _FILE_READ_CHAR_LIMIT:
+            target = f"'{symbol}'" if symbol else "the relevant code"
+            return (
+                f"{head}. NOTE: {file_path} is {size} chars and a plain get_file_contents "
+                f"call returns only the first {_FILE_READ_CHAR_LIMIT} — re-reading it the "
+                f"same way returns the same partial content. Use grep_codebase to find the "
+                f"line number of {target}, then call get_file_contents with start_line/"
+                f"end_line around it and copy the snippet verbatim from that read. Do not "
+                f"reconstruct the code from memory; if you cannot retrieve the real text, "
+                f"set {field} to null and lower confidence."
+            )
+
+        return (
+            f"{head}. Call get_file_contents on {file_path} and copy a verbatim excerpt "
+            f"showing the claimed bug — not a paraphrase or a remembered version. If the "
+            f"code isn't there, set {field} to null and lower confidence rather than "
+            f"inventing one."
+        )
+
     async def _validate_diagnosis_submission(self, data: dict) -> list[str]:
         """Validate one submit_diagnosis attempt. Returns a list of problems —
         empty means the submission is grounded and can be accepted.
@@ -1064,11 +1245,12 @@ class DiagnosisAgent(BaseAgent):
         # called, but `bool(snippet) and ...` short-circuits before ever calling it.
         if affected_file and file_ok and self._local_repo.ready:
             if not root_cause_snippet or not await self._snippet_is_grounded(affected_file, root_cause_snippet):
-                problems.append(
-                    f"root_cause_snippet is missing or doesn't match {affected_file}'s actual "
-                    f"current content. Call get_file_contents on {affected_file} and copy a real "
-                    f"excerpt showing the claimed bug."
-                )
+                problems.append(self._snippet_problem(
+                    field="root_cause_snippet",
+                    file_path=affected_file,
+                    symbol=affected_function,
+                    snippet=root_cause_snippet,
+                ))
 
         additional_fix_file = data.get("additional_fix_file")
         additional_fix_snippet = data.get("additional_fix_snippet")
@@ -1245,6 +1427,7 @@ class DiagnosisAgent(BaseAgent):
         # a stale value from a previous call must never leak into this one.
         self._diagnosis_submitted = None
         self._rejection_count = 0
+        self._last_rejection_signature = None
         self._last_retrieved_chunks = []
         self._retrieved_file_paths = set()
 
@@ -1268,6 +1451,18 @@ class DiagnosisAgent(BaseAgent):
         detected_paths = extract_stack_trace_paths(event.description or "")
         if self._local_repo.ready:
             detected_paths = [p for p in detected_paths if self._local_repo.file_exists(p["file"])]
+            # Python frames emit several suffix candidates per real file
+            # ("django/db/models/query.py", "db/models/query.py", ...) and more
+            # than one can resolve. Keep the longest surviving path per
+            # basename — it's the most specific, so the least likely to be a
+            # same-named file in an unrelated package.
+            by_basename: dict[str, dict] = {}
+            for p in detected_paths:
+                base = p["file"].rsplit("/", 1)[-1]
+                incumbent = by_basename.get(base)
+                if incumbent is None or p["file"].count("/") > incumbent["file"].count("/"):
+                    by_basename[base] = p
+            detected_paths = list(by_basename.values())
         stack_trace_section = ""
         if detected_paths:
             lines = [

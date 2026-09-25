@@ -382,7 +382,10 @@ class BaseAgent:
                     messages = await context_checkpointer.compress(messages, steps)
 
                 step = Step(iteration=i)
-                raw = await self._llm.complete(messages=messages, system=system, tracing_ctx=self._tracing_ctx)
+                # cache=True: the system prefix and every prior turn are resent
+                # on each iteration, so this is exactly what prompt caching pays for.
+                raw = await self._llm.complete(messages=messages, system=system,
+                                               tracing_ctx=self._tracing_ctx, cache=True)
                 _total_input_tokens += self._llm.last_input_tokens
                 _total_output_tokens += self._llm.last_output_tokens
 
@@ -520,8 +523,19 @@ class BaseAgent:
 
         try:
             parsed_input = json.loads(raw_input)
-        except json.JSONDecodeError:
-            parsed_input = raw_input  # pass raw string if JSON is malformed
+        except json.JSONDecodeError as exc:
+            if raw_input.lstrip().startswith("{"):
+                # Meant as JSON but malformed -- tell the model instead of
+                # guessing. The old fallback passed the whole string as the
+                # tool's first argument: on matplotlib__matplotlib-22865 an
+                # invalid "\|" escape turned a grep call into a search for the
+                # literal JSON text, which "found nothing", twice, silently.
+                return (
+                    f"Error: Action Input for '{name}' is not valid JSON ({exc.msg} at "
+                    f"char {exc.pos}). Resend it as a JSON object. Inside JSON strings a "
+                    f"backslash must be written as \\\\ -- sequences like \\| are invalid."
+                )
+            parsed_input = raw_input  # plain-string input for single-argument tools
 
         try:
             if isinstance(parsed_input, dict):
