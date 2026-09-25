@@ -479,6 +479,14 @@ class TestApprovalResolution:
         with (
             patch("app.api.routes.approvals.incident_store", store),
             patch("app.api.routes.approvals.approval_service") as mock_svc,
+            # Real reject() calls preference_logger.log_rejection() on the
+            # module-level singleton, which appends to the real
+            # .preference_pairs.jsonl in the repo root -- unpatched, this
+            # test silently wrote a fake rejection row into that file on
+            # every run (253 identical rows found accumulating since
+            # 2026-04-12 before this was caught). Patch it the same way
+            # incident_store/approval_service already are above.
+            patch("app.api.routes.approvals.preference_logger") as mock_pref_logger,
         ):
             mock_svc.reject.return_value = approval
             approval.status = ApprovalStatus.REJECTED
@@ -496,6 +504,9 @@ class TestApprovalResolution:
         assert incident.outcome == "fix_rejected"
         assert incident.human_decision_reason == "Fix too aggressive — try scoping to NoSuchKey only"
         assert incident.resolved_at is not None
+        mock_pref_logger.log_rejection.assert_called_once_with(
+            incident, "siddharth", "Fix too aggressive — try scoping to NoSuchKey only"
+        )
 
     @pytest.mark.asyncio
     async def test_approve_without_incident_id_is_safe(self):
