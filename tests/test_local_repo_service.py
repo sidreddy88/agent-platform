@@ -150,3 +150,51 @@ def test_remove_worktree_does_not_raise_on_failure(tmp_path):
     with patch("app.services.repo._run", new=AsyncMock(return_value=(-1, "", "timed out"))):
         asyncio.run(svc.remove_worktree())  # must not raise
     assert svc._ready is False
+
+
+def test_timeout_kills_children_holding_the_pipes():
+    """A child that inherits git's stdout would keep Process.wait() blocked
+    after killing only the parent -- the CI hang in remove_worktree."""
+    import asyncio
+    import time
+
+    from app.services.repo import _run
+
+    start = time.monotonic()
+    rc, _, err = asyncio.run(_run(["sh", "-c", "sleep 30 & sleep 30"], timeout=0.3))
+    assert rc == -1 and "timed out" in err
+    assert time.monotonic() - start < 5
+
+
+def test_post_kill_wait_is_bounded_when_a_child_escapes_the_group(monkeypatch):
+    import asyncio
+    import sys
+    import time
+
+    from app.services import repo
+
+    monkeypatch.setattr(repo, "_POST_KILL_WAIT_SECONDS", 0.5)
+    escapee = ("import subprocess, time; "
+               "subprocess.Popen(['sleep', '20'], start_new_session=True); time.sleep(20)")
+    start = time.monotonic()
+    rc, _, _ = asyncio.run(repo._run([sys.executable, "-c", escapee], timeout=0.5))
+    assert rc == -1
+    assert time.monotonic() - start < 5
+
+
+def test_remove_worktree_deletes_dir_and_prunes(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.repo import LocalRepoService
+
+    svc = LocalRepoService("o", "r", pinned_sha="abc")
+    wt = tmp_path / "wt"
+    (wt / "pkg").mkdir(parents=True)
+    (wt / "pkg" / "f.py").write_text("x")
+    svc._path = wt
+    with patch("app.services.repo._run", new=AsyncMock(return_value=(0, "", ""))) as run:
+        asyncio.run(svc.remove_worktree())
+    assert not wt.exists()
+    assert run.await_args.args[0][-2:] == ["worktree", "prune"]
+

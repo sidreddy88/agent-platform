@@ -23,6 +23,21 @@ HAIKU_MODEL = DEFAULT_MODELS["haiku"]
 MAX_TOKENS = 8192
 
 _MAX_RETRIES = 3
+
+# Per-attempt HTTP timeout. Non-streaming, so the whole generation (up to
+# MAX_TOKENS of output, ~2-3 min on Sonnet) arrives before the response
+# headers -- the read timeout has to cover all of it. 5 min leaves room for a
+# slow response while bounding a stalled one.
+#
+# Why this exists: in gate run 36158424400, matplotlib__matplotlib-22865 sat
+# for 30 min waiting on response headers (anthropic -> httpx -> TLS read).
+# The client used the SDK default (600s per attempt, 2 SDK retries) *inside*
+# _retry_with_backoff's own 3 retries, which also retry timeouts: up to 12
+# attempts x 10 min, about 2 hours, for one stalled call. That applies to
+# production incidents as well as the gate. The SDK's own retries are turned
+# off so _retry_with_backoff is the only retry layer; worst case is now
+# 4 attempts x 5 min.
+_REQUEST_TIMEOUT = anthropic.Timeout(300.0, connect=10.0)
 _BASE_DELAY_SECONDS = 1.0
 _MAX_DELAY_SECONDS = 60.0
 
@@ -73,7 +88,11 @@ async def _retry_with_backoff(call_fn):
 
 class LLMService:
     def __init__(self, model: str | None = None, temperature: float | None = None) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key,
+            timeout=_REQUEST_TIMEOUT,
+            max_retries=0,   # _retry_with_backoff is the one retry layer
+        )
         self._model = model or MODEL
         # None (default) omits temperature entirely, preserving the Anthropic
         # API's own default (1.0) -- unchanged behavior for every existing
