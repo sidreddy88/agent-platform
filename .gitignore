@@ -60,3 +60,6 @@ targets/target-app/
 # infra/target_monitoring/variables.tf.
 *.tfvars
 *.tfvars.json
+
+# Harness optimizer run directories (state, eval caches, trajectories): local, large
+runs/
