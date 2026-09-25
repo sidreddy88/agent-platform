@@ -142,6 +142,8 @@ class Optimizer:
 
     async def run_until_stopped(self) -> RunState:
         state = self.run.load() if self.run.exists() else self._init_state()
+        if state.phase != "done":
+            state.stop_reason = None     # resuming: the last stop (e.g. a provider failure) is over
         budget = Budget(self.cfg.budget_usd, spent_usd=state.spent_usd)
         try:
             while state.phase != "done":

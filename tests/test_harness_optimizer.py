@@ -481,3 +481,17 @@ def test_true_budget_exhaustion_still_stops(tmp_path):
                              case_lanes=LANES, default_case_cost_usd=1.0).run_until_stopped())
     assert state.phase == "done" and state.stop_reason.startswith("budget:")
     assert state.spent_usd <= 5.0
+
+
+def test_resuming_clears_the_previous_stop_reason(tmp_path):
+    asyncio.run(_opt(tmp_path, FakeEvaluator(provider_fail_at=2)).run_until_stopped())
+    from app.harness_optimizer.state import RunDir
+    assert "provider failure" in RunDir(tmp_path / "run").load().stop_reason
+
+    # Resume, and fail again at once: the stop reason must be the new failure,
+    # proving the old one was cleared rather than left in place.
+    state = asyncio.run(_opt(tmp_path, FakeEvaluator(provider_fail_at=1)).run_until_stopped())
+    assert "provider failure" in state.stop_reason
+    state = asyncio.run(_opt(tmp_path, FakeEvaluator(), max_rounds=0).run_until_stopped())
+    assert state.stop_reason.startswith("round 0 only")
+    assert RunDir(tmp_path / "run").load().stop_reason.startswith("round 0 only")
