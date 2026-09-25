@@ -75,7 +75,10 @@ class LiteLLMProvider(BaseProvider):
         import litellm
 
         system: str | list | None = kwargs.pop("system", None)
+        cache: bool = kwargs.pop("cache", False)
         msgs = list(messages)
+        if cache:
+            system, msgs = _mark_for_cache(system, msgs)
         if system:
             msgs = [{"role": "system", "content": system}] + msgs
 
@@ -105,6 +108,32 @@ class LiteLLMProvider(BaseProvider):
             cache_read_input_tokens=cache_read,
             cache_creation_input_tokens=cache_creation,
         )
+
+
+def _mark_for_cache(system: str | list | None, messages: list[dict]) -> tuple:
+    """Prompt-caching breakpoints for a multi-turn loop on the LiteLLM path:
+    one on the last system block (the static prefix) and one on the latest
+    message, so each turn reads the conversation the previous turn wrote.
+    LLMService does the same with the SDK's top-level automatic caching;
+    here the conversation breakpoint is explicit. Copies, never mutates, the
+    caller's history.
+    """
+    from app.services.llm import _mark_system_for_cache
+
+    if system:
+        system = _mark_system_for_cache(system)
+    if not messages:
+        return system, messages
+    last = dict(messages[-1])
+    content = last.get("content")
+    if isinstance(content, str):
+        last["content"] = [{"type": "text", "text": content,
+                            "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content:
+        blocks = [dict(b) for b in content]
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        last["content"] = blocks
+    return system, messages[:-1] + [last]
 
 
 def _infer_provider(model: str) -> str:
@@ -146,8 +175,11 @@ class GatewayLLMService:
         messages: list[dict],
         system: str | list | None = None,
         tracing_ctx: Any = None,
+        cache: bool = False,
     ) -> str:
-        resp = await self._gateway.complete(messages, self._task_type, system=system)
+        # Same signature as LLMService.complete: BaseAgent.run passes cache=True,
+        # and production agents run on this class (incident_loop swaps it in).
+        resp = await self._gateway.complete(messages, self._task_type, system=system, cache=cache)
         self.last_input_tokens = resp.input_tokens
         self.last_output_tokens = resp.output_tokens
         return resp.content
@@ -395,10 +427,14 @@ class LLMGateway:
 
         self._record_cost(task_type, provider_name, cost)
         from app.services import cost_meter
-        # Same assumption as billed_input above: LiteLLM's prompt_tokens
-        # includes cache reads. Not yet verified against a live cached call.
+        # Verified live (2026-09-25, claude-sonnet-4-6 via LiteLLM): prompt_tokens
+        # includes BOTH cache reads and cache writes (3,969 = 3 uncached + 3,966
+        # written), so uncached input is prompt_tokens minus both. (billed_input
+        # above subtracts only reads; it feeds the older daily-cost tracker.)
         cost_meter.record(
-            model, billed_input, raw.output_tokens,
+            model,
+            max(0, raw.input_tokens - raw.cache_read_input_tokens - raw.cache_creation_input_tokens),
+            raw.output_tokens,
             raw.cache_read_input_tokens, raw.cache_creation_input_tokens,
         )
         logger.info(

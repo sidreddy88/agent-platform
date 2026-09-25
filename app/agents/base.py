@@ -382,7 +382,10 @@ class BaseAgent:
                     messages = await context_checkpointer.compress(messages, steps)
 
                 step = Step(iteration=i)
-                raw = await self._llm.complete(messages=messages, system=system, tracing_ctx=self._tracing_ctx)
+                # cache=True: the system prefix and every prior turn are resent
+                # on each iteration, so this is exactly what prompt caching pays for.
+                raw = await self._llm.complete(messages=messages, system=system,
+                                               tracing_ctx=self._tracing_ctx, cache=True)
                 _total_input_tokens += self._llm.last_input_tokens
                 _total_output_tokens += self._llm.last_output_tokens
 

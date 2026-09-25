@@ -86,6 +86,20 @@ async def _retry_with_backoff(call_fn):
             await asyncio.sleep(wait)
 
 
+def _mark_system_for_cache(system: str | list) -> list:
+    """Return system as content blocks with a cache breakpoint on the last one.
+
+    Leaves any breakpoint the caller already placed (BaseAgent._with_harness
+    marks its harness-docs block) and never mutates the caller's list.
+    """
+    if isinstance(system, str):
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    blocks = [dict(b) for b in system]
+    if blocks and "cache_control" not in blocks[-1]:
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    return blocks
+
+
 class LLMService:
     def __init__(self, model: str | None = None, temperature: float | None = None) -> None:
         self._client = anthropic.AsyncAnthropic(
@@ -108,15 +122,32 @@ class LLMService:
         messages: list[dict],
         system: str | list | None = None,
         tracing_ctx: "TracingContext | None" = None,
+        cache: bool = False,
     ) -> str:
-        """Single blocking call — returns full response text. Use for agent loops."""
+        """Single blocking call — returns full response text. Use for agent loops.
+
+        cache=True turns on prompt caching for a multi-turn loop: an explicit
+        breakpoint on the last system block (the static prefix -- tool
+        descriptions and instructions) plus top-level automatic caching, which
+        moves a breakpoint to the end of the growing conversation each turn.
+        Off by default: a one-shot call pays the 1.25x cache-write premium on
+        its whole prompt and never reads it back.
+
+        Why: the #255 gate run (36158424400) measured $91.63 for 56 cases with
+        a 0.0% cache hit rate -- $61.06 of it uncached input -- because the
+        only cache_control in the codebase sat on harness docs, which are
+        absent outside the target app, and nothing marked the conversation a
+        ReAct loop resends on every one of up to 15 turns.
+        """
         kwargs: dict = {
             "model": self._model,
             "max_tokens": MAX_TOKENS,
             "messages": messages,
         }
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = _mark_system_for_cache(system) if cache else system
+        if cache:
+            kwargs["cache_control"] = {"type": "ephemeral"}
         # getattr, not self._temperature directly: several existing tests
         # construct LLMService via __new__ (bypassing __init__) and only set
         # the attributes they care about -- _temperature didn't exist before

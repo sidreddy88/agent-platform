@@ -98,10 +98,10 @@ async def test_gateway_records_uncached_input_separately():
     gw._provider = MagicMock()
     raw = LLMResponse(content="x", input_tokens=1000, output_tokens=10, provider="anthropic",
                       model="claude-sonnet-4-6", cost_usd=0.0,
-                      cache_read_input_tokens=800, cache_creation_input_tokens=0)
+                      cache_read_input_tokens=700, cache_creation_input_tokens=100)
     with patch.object(LLMGateway, "_get_routing", return_value=("anthropic", "claude-sonnet-4-6", 4096)), \
          patch.object(LLMGateway, "_call_provider", AsyncMock(return_value=raw)):
         with cost_meter.metered() as m:
             await gw.complete([{"role": "user", "content": "hi"}], "diagnosis")
-    assert m.summary()["tokens"]["input"] == 200
-    assert m.summary()["tokens"]["cache_read"] == 800
+    # LiteLLM's prompt_tokens includes reads AND writes (verified live)
+    assert m.summary()["tokens"] == {"input": 200, "output": 10, "cache_write": 100, "cache_read": 700}
