@@ -184,6 +184,34 @@ class GatewayLLMService:
         self.last_output_tokens = resp.output_tokens
         return resp.content
 
+    async def complete_structured(
+        self,
+        messages: list[dict],
+        tool_schema: dict,
+        system: str | list | None = None,
+        tracing_ctx: Any = None,
+    ) -> dict:
+        """Forced tool-use call on the routed model, via the Anthropic SDK path.
+
+        TriageAgent and MergeDecisionAgent call self._llm.complete_structured,
+        and production runs TriageAgent on this class (incident_loop swaps it
+        in). Without this method every production triage raised AttributeError,
+        which TriageAgent catches and turns into a silent real/P2 default -- no
+        noise/duplicate filtering and a meaningless severity on every incident.
+        Delegates to LLMService rather than reimplementing forced tool_choice on
+        LiteLLM, keeping the routed model; the cost meter still records it.
+        """
+        from app.services.llm import LLMService
+
+        if getattr(self, "_structured_llm", None) is None or self._structured_llm._model != self._model:
+            self._structured_llm = LLMService(model=self._model)
+        data = await self._structured_llm.complete_structured(
+            messages, tool_schema, system=system, tracing_ctx=tracing_ctx,
+        )
+        self.last_input_tokens = self._structured_llm.last_input_tokens
+        self.last_output_tokens = self._structured_llm.last_output_tokens
+        return data
+
     async def complete_with_tools(
         self,
         messages: list[dict],
