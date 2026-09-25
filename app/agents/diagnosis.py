@@ -171,6 +171,36 @@ _BUILTIN_CAMEL = frozenset({
 # is probably brainstorming and the whole thing should be reviewed anyway.
 _MAX_PROSE_CANDIDATES = 8
 
+# Per-read cap on get_file_contents output, whole-file or ranged.
+_FILE_READ_CHAR_LIMIT = 12000
+
+
+def _cap_lines(lines: list[str], first: int, total: int, file_path: str) -> str:
+    """Join lines (numbered from `first`) up to _FILE_READ_CHAR_LIMIT, cutting
+    only at a line boundary, and say exactly which lines were returned.
+
+    The old notice said "only first 12000 chars shown" and suggested
+    re-reading "with a more specific path" -- meaningless for one file, and
+    re-reading returned the identical prefix. Line numbers make the rest of
+    the file addressable.
+    """
+    out: list[str] = []
+    size = 0
+    for line in lines:
+        if out and size + len(line) > _FILE_READ_CHAR_LIMIT:
+            break
+        out.append(line)
+        size += len(line)
+    last = first + len(out) - 1
+    text = "".join(out)
+    if first == 1 and last == total:
+        return text
+    notice = f"[Showing lines {first}-{last} of {total} in {file_path}."
+    if last < total:
+        notice += (f" To read further, call get_file_contents with start_line/end_line"
+                   f" (e.g. start_line={last + 1}); grep_codebase finds line numbers.")
+    return text.rstrip("\n") + "\n\n" + notice + "]"
+
 
 _PASCAL_CASE_RE = re.compile(r"\b[A-Z][A-Za-z0-9]*\b")
 
@@ -618,14 +648,23 @@ class DiagnosisAgent(BaseAgent):
             scan_for_injection(raw, source="rag-codebase-search")
             return wrap_untrusted(raw, source="rag-codebase-search")
 
-        async def _get_file_contents(file_path: str) -> str:
-            """Fetch the full source of a file from the target repo.
+        async def _get_file_contents(file_path: str, start_line: int | None = None,
+                                     end_line: int | None = None) -> str:
+            """Fetch a file's source from the target repo, whole or as a line range.
 
             When self._local_repo is pinned to a historical SHA (replay/eval
             tooling), reads from that pinned worktree instead of the GitHub API —
             get_file_contents defaults to ref="main" (github.py), i.e. the live
             default branch, which is wrong for a pinned replay by construction.
             Same bug class as _symbol_exists_in_repo's pinned-mode fix.
+
+            Why a line range: whole-file reads are capped at _FILE_READ_CHAR_LIMIT,
+            and nothing past the cap was reachable. On matplotlib__matplotlib-22865
+            the bug sat ~line 650 of a colorbar.py far past the cut; the agent never
+            saw it, invented a method name, and burned its budget on grounding
+            rejections asking for an excerpt it could not read. grep_codebase gives
+            line numbers; a range read then returns that region verbatim, so the
+            snippet it copies matches the file.
             """
             try:
                 p = file_path.lstrip("/")
@@ -633,27 +672,35 @@ class DiagnosisAgent(BaseAgent):
                     content = self._local_repo.read_file(p)
                 else:
                     content, _ = await github.get_file_contents(owner, repo, p)
-                if len(content) > 12000:
-                    content = (
-                        content[:12000]
-                        + f"\n\n[TRUNCATED — file is {len(content)} chars, only first 12000 shown. "
-                        f"If the function you need is not visible, call get_file_contents again "
-                        f"with a more specific path or search for the function name via search_codebase.]"
-                    )
+                lines = content.splitlines(keepends=True)
+                total = len(lines)
+                if start_line is not None or end_line is not None:
+                    first = max(1, int(start_line or 1))
+                    last = min(total, int(end_line or total))
+                    if first > last:
+                        return (f"Invalid range {start_line}-{end_line} for {file_path} "
+                                f"({total} lines).")
+                    content = _cap_lines(lines[first - 1:last], first, total, file_path)
+                elif len(content) > _FILE_READ_CHAR_LIMIT:
+                    content = _cap_lines(lines, 1, total, file_path)
                 self._retrieved_file_paths.add(p)
                 scan_for_injection(content, source=f"github-file:{file_path}")
                 return wrap_untrusted(content, source=f"github-file:{file_path}")
             except Exception as exc:
                 return f"Could not fetch {file_path}: {exc}"
 
-        async def _grep_codebase(pattern: str, file_glob: str = "*.js") -> str:
+        async def _grep_codebase(pattern: str, file_glob: str = "*") -> str:
             """Exact-string search across every file in the local repo clone.
 
             Returns each matching line with its file path and line number.
             Use this when you need to find WHERE a specific function or string is
             called/defined — e.g. 'mongoose.connect' or 'require(\"mongoose\")'.
             Faster and more precise than search_codebase for exact patterns.
-            Input: {pattern: string, file_glob: string (default '**/*.js')}
+            Input: {pattern: string, file_glob: string (default '*', every file)}
+
+            The default was '*.js', a leftover from the JS-only target app: on
+            every Python repo an unscoped grep searched nothing and reported
+            "No matches", which reads as evidence the code doesn't exist.
             """
             local_repo = self._local_repo
             if not local_repo.ready:
@@ -770,13 +817,16 @@ class DiagnosisAgent(BaseAgent):
             "get_file_contents",
             _get_file_contents,
             (
-                "Fetch the complete source of a file from the target repository. "
+                "Fetch the source of a file from the target repository. "
                 "Use this after search_codebase identifies a candidate file — read the FULL file "
                 "to see every return statement and code path, not just RAG fragments. "
                 "If the file calls workers, helpers, or other modules relevant to the failure, "
                 "call this again on those files. Follow the code until you reach the failure site. "
-                "If a file is truncated, search for the specific function name via search_codebase. "
-                "Input: {file_path: string (e.g. 'constants/validationMain.js')}"
+                "Large files are cut off; the notice says which lines you got. To read any other "
+                "part, pass start_line/end_line (1-based, inclusive) — grep_codebase gives the "
+                "line numbers to aim for. "
+                "Input: {file_path: string (e.g. 'constants/validationMain.js'), "
+                "start_line: int (optional), end_line: int (optional)}"
             ),
         )
         self.register_tool(
@@ -788,7 +838,7 @@ class DiagnosisAgent(BaseAgent):
                 "Use this instead of search_codebase when you need to find WHERE a specific "
                 "string appears — e.g. 'mongoose.connect', 'require(\"mongoose\")', a function "
                 "call, or an import. search_codebase is semantic/fuzzy; grep_codebase is exact. "
-                "Input: {pattern: string, file_glob: string (default '*.js', matches all .js files at any depth)}"
+                "Input: {pattern: string, file_glob: string (optional, e.g. '*.py'; default '*', every file)}"
             ),
         )
         self.register_tool(
