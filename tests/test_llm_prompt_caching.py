@@ -60,3 +60,47 @@ def test_react_loop_asks_for_caching():
     agent = Agent(llm=llm)
     asyncio.run(agent.run("q"))
     assert llm.complete.await_args.kwargs["cache"] is True
+
+
+def test_gateway_llm_service_accepts_cache_and_forwards_it():
+    """Production agents run on GatewayLLMService (incident_loop swaps it in);
+    BaseAgent.run passing cache=True must not break it."""
+    from app.services.llm_gateway import GatewayLLMService, LLMResponse
+
+    gw = MagicMock()
+    gw.complete = AsyncMock(return_value=LLMResponse(
+        content="ok", input_tokens=1, output_tokens=1, provider="anthropic",
+        model="claude-sonnet-4-6", cost_usd=0.0))
+    svc = GatewayLLMService(gw, "diagnosis")
+    assert asyncio.run(svc.complete([{"role": "user", "content": "hi"}], system="s", cache=True)) == "ok"
+    assert gw.complete.await_args.kwargs["cache"] is True
+
+
+def test_litellm_path_marks_system_and_latest_message():
+    from app.services.llm_gateway import _mark_for_cache
+
+    history = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"},
+               {"role": "user", "content": "observation"}]
+    system, msgs = _mark_for_cache("instructions", history)
+    assert system[-1]["cache_control"] == EPHEMERAL
+    assert msgs[-1]["content"] == [{"type": "text", "text": "observation", "cache_control": EPHEMERAL}]
+    assert msgs[:-1] == history[:-1]
+    assert history[-1]["content"] == "observation"  # caller's history untouched
+
+
+def test_litellm_provider_sends_breakpoints_only_when_asked():
+    from unittest.mock import patch
+
+    from app.services.llm_gateway import LiteLLMProvider
+
+    resp = SimpleNamespace(usage=None, choices=[SimpleNamespace(message=SimpleNamespace(content="x"))])
+    with patch("litellm.acompletion", new=AsyncMock(return_value=resp)) as acomp:
+        asyncio.run(LiteLLMProvider().complete([{"role": "user", "content": "hi"}],
+                                               "claude-sonnet-4-6", system="s", cache=True))
+        sent = acomp.await_args.kwargs["messages"]
+        assert sent[0]["content"][-1]["cache_control"] == EPHEMERAL
+        assert sent[-1]["content"][-1]["cache_control"] == EPHEMERAL
+        asyncio.run(LiteLLMProvider().complete([{"role": "user", "content": "hi"}],
+                                               "claude-sonnet-4-6", system="s"))
+        sent = acomp.await_args.kwargs["messages"]
+        assert sent == [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}]
