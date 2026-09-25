@@ -296,8 +296,10 @@ def test_cli_config_and_critic_patterns_come_from_the_committed_split():
 
     split = json.loads(SPLIT.read_text())
     cfg = build_config(split, budget=50.0, rounds=3, trials=1)
-    assert cfg.evolve_cases == split["evolve"]["failing"] and cfg.guard_cases == split["evolve"]["guards"]
-    assert not set(cfg.evolve_cases) & set(split["heldout"]["failing"] + split["heldout"]["stable"])
+    assert cfg.evolve_cases == split["evolve"]["failing"] + split["evolve"]["hard"]
+    assert cfg.guard_cases == split["evolve"]["guards"]
+    heldout = split["heldout"]["failing"] + split["heldout"]["stable"] + split["heldout"]["hard"]
+    assert not set(cfg.evolve_cases) & set(heldout)
     pats = critic_patterns(split)
     # held-out repos, held-out case ids and true-fix paths are all denylisted
     diff = "+For xarray, look in lib/matplotlib/colorbar.py (see sphinx-doc__sphinx-11445)\n"
@@ -422,3 +424,39 @@ def test_a_finished_run_can_be_extended_with_more_rounds(tmp_path):
     final = asyncio.run(_opt(tmp_path, ev_, max_rounds=1).run_until_stopped())
     assert final.accepted == ["r1"]
     assert len(ev_.calls) == 4           # round 0 came from the cache; only the candidate's 4 cases ran
+
+
+def test_escalation_guard_uses_the_calibrated_noise_band(tmp_path):
+    """Round 0 calibrates delta_esc from trial pairs of 'never accepted'; the
+    veto threshold is max(fixed limit, delta_esc)."""
+    from app.harness_optimizer.acceptance import AcceptanceConfig, decide
+
+    inc = ev(a=(1, 2, 2.0, 1), b=(2, 2, 2.0))
+    cand = ev(a=(1, 2, 1.0, 2), b=(2, 2, 1.0))          # +1 escalation of 4 trials, cheaper
+    strict = AcceptanceConfig(delta=0.3, max_escalation_rise=0.05)
+    noise_aware = AcceptanceConfig(delta=0.3, max_escalation_rise=0.30)
+    assert "escalation rate rose" in decide(inc, cand, inc.S, strict).reason
+    assert decide(inc, cand, inc.S, noise_aware).accept
+
+
+def test_round0_calibrates_escalation_band_from_trajectories(tmp_path):
+    class WithTrials(FakeEvaluator):
+        async def evaluate(self, harness_dir, case_ids, trials):
+            out = await super().evaluate(harness_dir, case_ids, trials)
+            (case,) = case_ids
+            accepted = "Diagnosis accepted."
+            out.trajectories = [
+                {"instance_id": case, "trial": t + 1, "verdict": v, "llm_calls": [],
+                 "steps": [{"name": "submit_diagnosis", "input": "{}", "output": accepted if v == "PASS" else "REJECTED"}]}
+                for t, v in enumerate(out.result.per_case[case].verdicts)]
+            return out
+
+    state = asyncio.run(_opt(tmp_path, WithTrials(), max_rounds=0).run_until_stopped())
+    assert state.delta_esc is not None and state.delta_esc > 0     # c1's trials disagree
+
+
+def test_proposer_is_steered_to_cost_by_source_without_asking_for_brevity():
+    from app.harness_optimizer.proposer import SYSTEM
+
+    assert "Cost by prompt source" in SYSTEM
+    assert "Never instruct the agent to be brief" in SYSTEM

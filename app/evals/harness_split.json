@@ -25,6 +25,42 @@
    "django__django-11066",
    "psf__requests-1766",
    "pytest-dev__pytest-5809"
+  ],
+  "hard": [
+   "astropy__astropy-13398",
+   "astropy__astropy-13453",
+   "astropy__astropy-13977",
+   "astropy__astropy-14096",
+   "django__django-10999",
+   "matplotlib__matplotlib-13989",
+   "matplotlib__matplotlib-20488",
+   "matplotlib__matplotlib-20676",
+   "matplotlib__matplotlib-20826",
+   "matplotlib__matplotlib-20859",
+   "matplotlib__matplotlib-21568",
+   "matplotlib__matplotlib-22871",
+   "mwaskom__seaborn-3069",
+   "mwaskom__seaborn-3187",
+   "psf__requests-1142",
+   "psf__requests-1724",
+   "psf__requests-2317",
+   "psf__requests-5414",
+   "psf__requests-6028",
+   "pylint-dev__pylint-4604",
+   "pylint-dev__pylint-4661",
+   "pylint-dev__pylint-4970",
+   "pylint-dev__pylint-6386",
+   "pylint-dev__pylint-7080",
+   "pytest-dev__pytest-10356",
+   "pytest-dev__pytest-5262",
+   "pytest-dev__pytest-5840",
+   "scikit-learn__scikit-learn-13124",
+   "sympy__sympy-12419",
+   "sympy__sympy-12481",
+   "sympy__sympy-12489",
+   "sympy__sympy-13031",
+   "sympy__sympy-13372",
+   "sympy__sympy-13480"
   ]
  },
  "heldout": {
@@ -42,6 +78,18 @@
    "sphinx-doc__sphinx-10449",
    "sphinx-doc__sphinx-10466",
    "sphinx-doc__sphinx-7454"
+  ],
+  "hard": [
+   "pydata__xarray-3095",
+   "pydata__xarray-3151",
+   "pydata__xarray-3305",
+   "pydata__xarray-3677",
+   "pydata__xarray-3993",
+   "pydata__xarray-4094",
+   "sphinx-doc__sphinx-10435",
+   "sphinx-doc__sphinx-10614",
+   "sphinx-doc__sphinx-11510",
+   "sphinx-doc__sphinx-7440"
   ]
  },
  "ood": {
@@ -90,337 +138,701 @@
    "repo": "astropy/astropy",
    "agent_attempts": 5,
    "fails": 1,
-   "cost_usd_run4": 1.120587
+   "cost_usd_run4": 1.120587,
+   "source": "gate_history"
   },
   "astropy__astropy-13033": {
    "repo": "astropy/astropy",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 1.934982
+   "cost_usd_run4": 1.934982,
+   "source": "gate_history"
+  },
+  "astropy__astropy-13398": {
+   "repo": "astropy/astropy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "astropy__astropy-13453": {
+   "repo": "astropy/astropy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "astropy__astropy-13579": {
    "repo": "astropy/astropy",
    "agent_attempts": 4,
    "fails": 1,
-   "cost_usd_run4": 2.495856
+   "cost_usd_run4": 2.495856,
+   "source": "gate_history"
+  },
+  "astropy__astropy-13977": {
+   "repo": "astropy/astropy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "astropy__astropy-14096": {
+   "repo": "astropy/astropy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "astropy__astropy-14182": {
    "repo": "astropy/astropy",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.573762
+   "cost_usd_run4": 0.573762,
+   "source": "gate_history"
   },
   "astropy__astropy-14309": {
    "repo": "astropy/astropy",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.296142
+   "cost_usd_run4": 0.296142,
+   "source": "gate_history"
   },
   "django__django-10097": {
    "repo": "django/django",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 1.240857
+   "cost_usd_run4": 1.240857,
+   "source": "gate_history"
   },
   "django__django-10880": {
    "repo": "django/django",
    "agent_attempts": 5,
    "fails": 1,
-   "cost_usd_run4": 2.702256
+   "cost_usd_run4": 2.702256,
+   "source": "gate_history"
   },
   "django__django-10914": {
    "repo": "django/django",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.405051
+   "cost_usd_run4": 0.405051,
+   "source": "gate_history"
   },
   "django__django-10973": {
    "repo": "django/django",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.520437
+   "cost_usd_run4": 0.520437,
+   "source": "gate_history"
+  },
+  "django__django-10999": {
+   "repo": "django/django",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "django__django-11066": {
    "repo": "django/django",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.26691
+   "cost_usd_run4": 0.26691,
+   "source": "gate_history"
   },
   "django__django-11087": {
    "repo": "django/django",
    "agent_attempts": 4,
    "fails": 1,
-   "cost_usd_run4": 0.920412
+   "cost_usd_run4": 0.920412,
+   "source": "gate_history"
   },
   "django__django-11095": {
    "repo": "django/django",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 1.338204
+   "cost_usd_run4": 1.338204,
+   "source": "gate_history"
   },
   "django__django-11099": {
    "repo": "django/django",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 1.112124
+   "cost_usd_run4": 1.112124,
+   "source": "gate_history"
+  },
+  "matplotlib__matplotlib-13989": {
+   "repo": "matplotlib/matplotlib",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "matplotlib__matplotlib-14623": {
    "repo": "matplotlib/matplotlib",
    "agent_attempts": 6,
    "fails": 6,
-   "cost_usd_run4": 6.434802
+   "cost_usd_run4": 6.434802,
+   "source": "gate_history"
+  },
+  "matplotlib__matplotlib-20488": {
+   "repo": "matplotlib/matplotlib",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "matplotlib__matplotlib-20676": {
+   "repo": "matplotlib/matplotlib",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "matplotlib__matplotlib-20826": {
+   "repo": "matplotlib/matplotlib",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "matplotlib__matplotlib-20859": {
+   "repo": "matplotlib/matplotlib",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "matplotlib__matplotlib-21568": {
+   "repo": "matplotlib/matplotlib",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "matplotlib__matplotlib-22719": {
    "repo": "matplotlib/matplotlib",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.667746
+   "cost_usd_run4": 0.667746,
+   "source": "gate_history"
   },
   "matplotlib__matplotlib-22865": {
    "repo": "matplotlib/matplotlib",
    "agent_attempts": 4,
    "fails": 4,
-   "cost_usd_run4": 4.370226
+   "cost_usd_run4": 4.370226,
+   "source": "gate_history"
+  },
+  "matplotlib__matplotlib-22871": {
+   "repo": "matplotlib/matplotlib",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "mwaskom__seaborn-3069": {
+   "repo": "mwaskom/seaborn",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "mwaskom__seaborn-3187": {
+   "repo": "mwaskom/seaborn",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "pallets__flask-5014": {
    "repo": "pallets/flask",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.461619
+   "cost_usd_run4": 0.461619,
+   "source": "gate_history"
+  },
+  "psf__requests-1142": {
+   "repo": "psf/requests",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "psf__requests-1724": {
+   "repo": "psf/requests",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "psf__requests-1766": {
    "repo": "psf/requests",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.367437
+   "cost_usd_run4": 0.367437,
+   "source": "gate_history"
   },
   "psf__requests-1921": {
    "repo": "psf/requests",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.426537
+   "cost_usd_run4": 0.426537,
+   "source": "gate_history"
+  },
+  "psf__requests-2317": {
+   "repo": "psf/requests",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "psf__requests-2931": {
    "repo": "psf/requests",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 2.258631
+   "cost_usd_run4": 2.258631,
+   "source": "gate_history"
+  },
+  "psf__requests-5414": {
+   "repo": "psf/requests",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "psf__requests-6028": {
+   "repo": "psf/requests",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "pydata__xarray-2905": {
    "repo": "pydata/xarray",
    "agent_attempts": 5,
    "fails": 2,
-   "cost_usd_run4": 4.026603
+   "cost_usd_run4": 4.026603,
+   "source": "gate_history"
+  },
+  "pydata__xarray-3095": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "pydata__xarray-3151": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "pydata__xarray-3305": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "pydata__xarray-3677": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "pydata__xarray-3993": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "pydata__xarray-4075": {
    "repo": "pydata/xarray",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.47757
+   "cost_usd_run4": 0.47757,
+   "source": "gate_history"
+  },
+  "pydata__xarray-4094": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "pydata__xarray-4356": {
    "repo": "pydata/xarray",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.375171
+   "cost_usd_run4": 0.375171,
+   "source": "gate_history"
   },
   "pydata__xarray-4629": {
    "repo": "pydata/xarray",
    "agent_attempts": 5,
    "fails": 3,
-   "cost_usd_run4": 2.781246
+   "cost_usd_run4": 2.781246,
+   "source": "gate_history"
   },
   "pydata__xarray-4687": {
    "repo": "pydata/xarray",
    "agent_attempts": 2,
    "fails": 1,
-   "cost_usd_run4": 2.652492
+   "cost_usd_run4": 2.652492,
+   "source": "gate_history"
   },
   "pylint-dev__pylint-4551": {
    "repo": "pylint-dev/pylint",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 1.094421
+   "cost_usd_run4": 1.094421,
+   "source": "gate_history"
+  },
+  "pylint-dev__pylint-4604": {
+   "repo": "pylint-dev/pylint",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "pylint-dev__pylint-4661": {
+   "repo": "pylint-dev/pylint",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "pylint-dev__pylint-4970": {
+   "repo": "pylint-dev/pylint",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "pylint-dev__pylint-6386": {
+   "repo": "pylint-dev/pylint",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "pylint-dev__pylint-6528": {
    "repo": "pylint-dev/pylint",
    "agent_attempts": 5,
    "fails": 3,
-   "cost_usd_run4": 1.53033
+   "cost_usd_run4": 1.53033,
+   "source": "gate_history"
   },
   "pylint-dev__pylint-6903": {
    "repo": "pylint-dev/pylint",
    "agent_attempts": 4,
    "fails": 1,
-   "cost_usd_run4": 0.983175
+   "cost_usd_run4": 0.983175,
+   "source": "gate_history"
+  },
+  "pylint-dev__pylint-7080": {
+   "repo": "pylint-dev/pylint",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "pylint-dev__pylint-7277": {
    "repo": "pylint-dev/pylint",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.709494
+   "cost_usd_run4": 0.709494,
+   "source": "gate_history"
   },
   "pylint-dev__pylint-8898": {
    "repo": "pylint-dev/pylint",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.469875
+   "cost_usd_run4": 0.469875,
+   "source": "gate_history"
   },
   "pytest-dev__pytest-10081": {
    "repo": "pytest-dev/pytest",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 2.623899
+   "cost_usd_run4": 2.623899,
+   "source": "gate_history"
+  },
+  "pytest-dev__pytest-10356": {
+   "repo": "pytest-dev/pytest",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "pytest-dev__pytest-5262": {
+   "repo": "pytest-dev/pytest",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "pytest-dev__pytest-5631": {
    "repo": "pytest-dev/pytest",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.677616
+   "cost_usd_run4": 0.677616,
+   "source": "gate_history"
   },
   "pytest-dev__pytest-5787": {
    "repo": "pytest-dev/pytest",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 2.870586
+   "cost_usd_run4": 2.870586,
+   "source": "gate_history"
   },
   "pytest-dev__pytest-5809": {
    "repo": "pytest-dev/pytest",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 0.283908
+   "cost_usd_run4": 0.283908,
+   "source": "gate_history"
+  },
+  "pytest-dev__pytest-5840": {
+   "repo": "pytest-dev/pytest",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "pytest-dev__pytest-6197": {
    "repo": "pytest-dev/pytest",
    "agent_attempts": 3,
    "fails": 3,
-   "cost_usd_run4": 6.711084
+   "cost_usd_run4": 6.711084,
+   "source": "gate_history"
   },
   "pytest-dev__pytest-6202": {
    "repo": "pytest-dev/pytest",
    "agent_attempts": 3,
    "fails": 0,
-   "cost_usd_run4": 0.406107
+   "cost_usd_run4": 0.406107,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-10297": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.600552
+   "cost_usd_run4": 0.600552,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-10844": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 4,
    "fails": 0,
-   "cost_usd_run4": 0.523044
+   "cost_usd_run4": 0.523044,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-10908": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 3,
    "fails": 1,
-   "cost_usd_run4": 2.954844
+   "cost_usd_run4": 2.954844,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-11310": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 3,
    "fails": 1,
-   "cost_usd_run4": 0.476484
+   "cost_usd_run4": 0.476484,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-11578": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 0.988548
+   "cost_usd_run4": 0.988548,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-12585": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 0.370089
+   "cost_usd_run4": 0.370089,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-12682": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 1.129899
+   "cost_usd_run4": 1.129899,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-12973": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 3,
    "fails": 1,
-   "cost_usd_run4": 1.433796
+   "cost_usd_run4": 1.433796,
+   "source": "gate_history"
+  },
+  "scikit-learn__scikit-learn-13124": {
+   "repo": "scikit-learn/scikit-learn",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "scikit-learn__scikit-learn-13135": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 3,
    "fails": 0,
-   "cost_usd_run4": 1.298373
+   "cost_usd_run4": 1.298373,
+   "source": "gate_history"
   },
   "scikit-learn__scikit-learn-13142": {
    "repo": "scikit-learn/scikit-learn",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 1.40115
+   "cost_usd_run4": 1.40115,
+   "source": "gate_history"
   },
   "sphinx-doc__sphinx-10323": {
    "repo": "sphinx-doc/sphinx",
    "agent_attempts": 3,
    "fails": 1,
-   "cost_usd_run4": 1.512897
+   "cost_usd_run4": 1.512897,
+   "source": "gate_history"
+  },
+  "sphinx-doc__sphinx-10435": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "sphinx-doc__sphinx-10449": {
    "repo": "sphinx-doc/sphinx",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 1.709883
+   "cost_usd_run4": 1.709883,
+   "source": "gate_history"
   },
   "sphinx-doc__sphinx-10466": {
    "repo": "sphinx-doc/sphinx",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 0.749463
+   "cost_usd_run4": 0.749463,
+   "source": "gate_history"
+  },
+  "sphinx-doc__sphinx-10614": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "sphinx-doc__sphinx-10673": {
    "repo": "sphinx-doc/sphinx",
    "agent_attempts": 3,
    "fails": 2,
-   "cost_usd_run4": 4.004883
+   "cost_usd_run4": 4.004883,
+   "source": "gate_history"
   },
   "sphinx-doc__sphinx-11445": {
    "repo": "sphinx-doc/sphinx",
    "agent_attempts": 3,
    "fails": 3,
-   "cost_usd_run4": 5.414841
+   "cost_usd_run4": 5.414841,
+   "source": "gate_history"
+  },
+  "sphinx-doc__sphinx-11510": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "sphinx-doc__sphinx-7440": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "sphinx-doc__sphinx-7454": {
    "repo": "sphinx-doc/sphinx",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 2.223888
+   "cost_usd_run4": 2.223888,
+   "source": "gate_history"
   },
   "sympy__sympy-12096": {
    "repo": "sympy/sympy",
    "agent_attempts": 3,
    "fails": 2,
-   "cost_usd_run4": 1.43223
+   "cost_usd_run4": 1.43223,
+   "source": "gate_history"
+  },
+  "sympy__sympy-12419": {
+   "repo": "sympy/sympy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "sympy__sympy-12481": {
+   "repo": "sympy/sympy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "sympy__sympy-12489": {
+   "repo": "sympy/sympy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "sympy__sympy-13031": {
+   "repo": "sympy/sympy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "sympy__sympy-13091": {
    "repo": "sympy/sympy",
    "agent_attempts": 1,
    "fails": 0,
-   "cost_usd_run4": 1.389081
+   "cost_usd_run4": 1.389081,
+   "source": "gate_history"
+  },
+  "sympy__sympy-13372": {
+   "repo": "sympy/sympy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
+  },
+  "sympy__sympy-13480": {
+   "repo": "sympy/sympy",
+   "agent_attempts": 1,
+   "fails": 1,
+   "cost_usd_run4": null,
+   "source": "baseline_100_fail"
   },
   "sympy__sympy-13551": {
    "repo": "sympy/sympy",
    "agent_attempts": 3,
    "fails": 0,
-   "cost_usd_run4": 1.577241
+   "cost_usd_run4": 1.577241,
+   "source": "gate_history"
   },
   "sympy__sympy-13647": {
    "repo": "sympy/sympy",
    "agent_attempts": 2,
    "fails": 0,
-   "cost_usd_run4": 1.850301
+   "cost_usd_run4": 1.850301,
+   "source": "gate_history"
   }
  }
 }

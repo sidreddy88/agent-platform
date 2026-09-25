@@ -11,28 +11,29 @@ HISTORY = json.loads(b.HISTORY.read_text())
 def _all(split):
     e, h = split["evolve"], split["heldout"]
     return {
-        "evolve": set(e["failing"]) | set(e["guards"]),
-        "heldout": set(h["failing"]) | set(h["stable"]),
+        "evolve": set(e["failing"]) | set(e["guards"]) | set(e["hard"]),
+        "heldout": set(h["failing"]) | set(h["stable"]) | set(h["hard"]),
         "reserve": set(split["reserve"]),
         "excluded": set(split["excluded"]),
     }
 
 
+SAMPLE = [json.loads(line) for line in b.SAMPLE.read_text().splitlines() if line.strip()]
+
+
 def test_committed_split_matches_the_builder():
-    assert b.build(HISTORY) == SPLIT
+    assert b.build(HISTORY, SAMPLE) == SPLIT
 
 
 def test_sets_are_disjoint_and_cover_every_gate_case():
     s = _all(SPLIT)
     union = set().union(*s.values())
     assert sum(len(v) for v in s.values()) == len(union)
-    gold = {json.loads(line)["instance_id"]
-            for line in open("app/evals/swebench_diagnosis_regression.jsonl")}
-    assert union == gold
+    assert union == {inst["instance_id"] for inst in SAMPLE}      # all 100 sample cases
 
 
 def test_heldout_repos_never_appear_in_evolve():
-    repo = {c: v["repo"] for c, v in HISTORY["cases"].items()}
+    repo = {c: v["repo"] for c, v in SPLIT["case_stats"].items()}
     assert not {repo[c] for c in _all(SPLIT)["evolve"]} & set(SPLIT["heldout_repos"])
     assert {repo[c] for c in _all(SPLIT)["heldout"]} <= set(SPLIT["heldout_repos"])
 
@@ -42,7 +43,14 @@ def test_evolve_contains_every_evolve_repo_case_that_ever_failed():
     failing_outside_heldout = {c for c, s in stats.items()
                                if s["fails"] > 0 and s["repo"] not in SPLIT["heldout_repos"]
                                and c not in SPLIT["excluded"]}
-    assert failing_outside_heldout == set(SPLIT["evolve"]["failing"])
+    assert failing_outside_heldout == set(SPLIT["evolve"]["failing"]) | set(SPLIT["evolve"]["hard"])
+
+
+def test_hard_tier_is_exactly_the_sample_cases_outside_the_gate_set():
+    gate = set(HISTORY["cases"])
+    hard = set(SPLIT["evolve"]["hard"]) | set(SPLIT["heldout"]["hard"])
+    assert hard == {i["instance_id"] for i in SAMPLE} - gate
+    assert all(SPLIT["case_stats"][c]["source"] == "baseline_100_fail" for c in hard)
 
 
 def test_heldout_has_failing_cases_to_improve_on():

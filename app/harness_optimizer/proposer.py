@@ -42,7 +42,18 @@ Propose exactly ONE edit: one mechanism, one component, one hypothesis. Target a
 failure or waste you can point to in the evidence. Prefer changes that make the
 agent reach an accepted diagnosis in fewer turns or with less resent context, since
 the objective is lower cost per case at no loss of accuracy; score gains are hard
-to measure at this sample size. Describe how tools behave rather than adding
+to measure at this sample size. An edit that isn't cheaper is only accepted if its
+accuracy gain clears the measured noise band.
+
+Read "Cost by prompt source" in the evidence first: it says where the money goes,
+split into the model's own output and each part of the input (task prompt, system
+instructions, tool descriptions, each tool's results, history). Aim at the largest
+share you can plausibly shrink. If the model's output dominates, the lever is what
+the harness asks it to write (fields it must restate on every submission,
+resubmissions the validator forces, procedures that require narrating each step),
+not how briefly it writes. Never instruct the agent to be brief, to save tokens or
+to do less: that makes agents reluctant to do the work and lowers accuracy.
+Change what the harness asks for, not how hard the model tries. Describe how tools behave rather than adding
 commands; do not add emphasis (MUST, NEVER, CRITICAL). Removing text that isn't
 earning its place is a valid edit.
 

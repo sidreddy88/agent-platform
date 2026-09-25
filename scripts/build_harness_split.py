@@ -51,6 +51,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HISTORY = ROOT / "app" / "evals" / "diagnosis_gate_history.json"
+SAMPLE = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"
 SPLIT = ROOT / "app" / "evals" / "harness_split.json"
 
 HELDOUT_REPOS = ("pydata/xarray", "sphinx-doc/sphinx")
@@ -69,20 +70,33 @@ def _agent_attempts(case: dict) -> list[str]:
     return [v for attempts in case["attempts"].values() for v in attempts if v not in NOT_AGENT]
 
 
-def build(history: dict) -> dict:
+def build(history: dict, sample: list[dict] | None = None) -> dict:
+    """`sample`: the 100-instance SWE-bench Verified sample. Its cases outside
+    the 56-case gate set failed the original baseline (that's how the gate
+    set was chosen), so they're the "hard" tier: added 2026-09-25, when round
+    0 on Sonnet 5 showed only ~4 of the 17 original evolve cases still fail,
+    too little signal for the optimizer."""
     cases = history["cases"]
     stats = {}
     for cid, c in cases.items():
         att = _agent_attempts(c)
         fails = [v for v in att if v != "PASS"]
         stats[cid] = {"repo": c["repo"], "agent_attempts": len(att), "fails": len(fails),
-                      "cost_usd_run4": c.get("cost_usd_run4")}
+                      "cost_usd_run4": c.get("cost_usd_run4"), "source": "gate_history"}
+    hard = sorted(inst["instance_id"] for inst in (sample or []) if inst["instance_id"] not in cases)
+    for inst in sample or []:
+        if inst["instance_id"] in cases:
+            continue
+        stats[inst["instance_id"]] = {"repo": inst["repo"], "agent_attempts": 1, "fails": 1,
+                                      "cost_usd_run4": None, "source": "baseline_100_fail"}
 
     usable = {cid for cid in stats if cid not in EXCLUDE}
     heldout = sorted(cid for cid in usable if stats[cid]["repo"] in HELDOUT_REPOS)
     evolve_pool = sorted(cid for cid in usable if stats[cid]["repo"] not in HELDOUT_REPOS)
+    hard_set = set(hard)
 
-    evolve_failing = sorted(cid for cid in evolve_pool if stats[cid]["fails"] > 0)
+    evolve_failing = sorted(cid for cid in evolve_pool if stats[cid]["fails"] > 0 and cid not in hard_set)
+    evolve_hard = sorted(cid for cid in evolve_pool if cid in hard_set)
     stable = [cid for cid in evolve_pool if stats[cid]["fails"] == 0]
     guards, seen_repos = [], set()
     for cid in sorted(stable, key=lambda c: (stats[c]["cost_usd_run4"] or 1e9, c)):
@@ -102,17 +116,18 @@ def build(history: dict) -> dict:
                  "by scripts/build_harness_split.py from diagnosis_gate_history.json; do not "
                  "edit by hand. See the builder's docstring for the design."),
         "heldout_repos": list(HELDOUT_REPOS),
-        "evolve": {"failing": evolve_failing, "guards": sorted(guards)},
+        "evolve": {"failing": evolve_failing, "guards": sorted(guards), "hard": evolve_hard},
         "heldout": {
-            "failing": sorted(c for c in heldout if stats[c]["fails"] > 0),
+            "failing": sorted(c for c in heldout if stats[c]["fails"] > 0 and c not in hard_set),
             "stable": sorted(c for c in heldout if stats[c]["fails"] == 0),
+            "hard": sorted(c for c in heldout if c in hard_set),
         },
         "ood": {"source": "app/evals/diagnosis_regression.jsonl", "count": 6,
                 "note": "real production incidents; gitignored, run locally"},
         "reserve": reserve,
         "excluded": dict(sorted(EXCLUDE.items())),
         "estimated_cost_usd_uncached": {
-            "evolve_eval_k1": est(evolve_failing + guards),
+            "evolve_eval_k1": est(evolve_failing + guards),       # hard tier unmeasured
             "heldout_eval_k1": est(heldout),
         },
         "case_stats": dict(sorted(stats.items())),
@@ -124,7 +139,8 @@ def main() -> int:
     parser.add_argument("--check", action="store_true",
                         help="exit 1 if the committed split differs from a fresh build")
     args = parser.parse_args()
-    split = build(json.loads(HISTORY.read_text()))
+    sample = [json.loads(line) for line in SAMPLE.read_text().splitlines() if line.strip()]
+    split = build(json.loads(HISTORY.read_text()), sample)
     rendered = json.dumps(split, indent=1) + "\n"
     if args.check:
         if not SPLIT.exists() or SPLIT.read_text() != rendered:
@@ -134,9 +150,9 @@ def main() -> int:
         return 0
     SPLIT.write_text(rendered)
     e, h = split["evolve"], split["heldout"]
-    print(f"evolve: {len(e['failing'])} failing + {len(e['guards'])} guards "
+    print(f"evolve: {len(e['failing'])} failing + {len(e['guards'])} guards + {len(e['hard'])} hard "
           f"(~${split['estimated_cost_usd_uncached']['evolve_eval_k1']} per k=1 eval, uncached)")
-    print(f"heldout: {len(h['failing'])} failing + {len(h['stable'])} stable from {HELDOUT_REPOS} "
+    print(f"heldout: {len(h['failing'])} failing + {len(h['stable'])} stable + {len(h['hard'])} hard from {HELDOUT_REPOS} "
           f"(~${split['estimated_cost_usd_uncached']['heldout_eval_k1']} per k=1 eval, uncached)")
     print(f"ood: {split['ood']['count']} production incidents | reserve: {len(split['reserve'])} "
           f"| excluded: {len(split['excluded'])}")

@@ -43,6 +43,7 @@ class RunState:
     phase: str = "evaluate"
     S_star: float | None = None         # best evolve-set score accepted so far
     delta: float | None = None          # noise band; None until calibrated
+    delta_esc: float | None = None      # noise band of the escalation rate, same method
     incumbent_eval: str | None = None   # evals/<key> of the incumbent
     candidate: dict | None = None       # the in-flight candidate of this round
     accepted: list[str] = field(default_factory=list)   # candidate ids, in order

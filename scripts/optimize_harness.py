@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 SPLIT = ROOT / "app" / "evals" / "harness_split.json"
-CASES = ROOT / "app" / "evals" / "swebench_diagnosis_regression.jsonl"
+CASES = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"   # every split case, incl. the hard tier
 DEFAULT_LLM = "claude-opus-5"
 
 
@@ -61,7 +61,8 @@ def build_config(split: dict, budget: float, rounds: int, trials: int, parallel:
     from app.harness_optimizer.loop import OptimizerConfig
 
     return OptimizerConfig(
-        evolve_cases=split["evolve"]["failing"], guard_cases=split["evolve"]["guards"],
+        evolve_cases=split["evolve"]["failing"] + split["evolve"].get("hard", []),
+        guard_cases=split["evolve"]["guards"],
         budget_usd=budget, trials=trials, max_rounds=rounds,
         parallel_lanes=parallel, case_lanes=case_lanes(split),
         default_case_cost_usd=split["estimated_cost_usd_uncached"]["evolve_eval_k1"]

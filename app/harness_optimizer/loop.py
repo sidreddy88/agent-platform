@@ -288,11 +288,21 @@ class Optimizer:
     async def _round0(self, state: RunState, budget: Budget) -> None:
         cases = self.cfg.evolve_cases + self.cfg.guard_cases
         k = self.cfg.calibration_trials
-        result, _ = await self._evaluate(state, budget, self.run.incumbent_dir, cases, k)
+        result, trajs = await self._evaluate(state, budget, self.run.incumbent_dir, cases, k)
         pairs = {c: (r.verdicts[0] == "PASS", r.verdicts[1] == "PASS")
                  for c, r in result.per_case.items() if len(r.verdicts) >= 2}
         state.delta = (calibrate_delta(pairs, trials_per_eval=self.cfg.trials)
                        if len(pairs) >= 2 else self.cfg.default_delta)
+        # The escalation guard gets its own noise band, from the same trial
+        # pairs: did each trial ever reach an accepted submit_diagnosis? A
+        # fixed 5pp was 2 trials in 34 on rounds 1-2, close to pure noise.
+        from app.harness_optimizer import grader
+        never: dict[str, dict[int, bool]] = {}
+        for t in trajs:
+            never.setdefault(t["instance_id"], {})[t.get("trial")] = not grader.grade(t).accepted
+        esc_pairs = {c: (tr[1], tr[2]) for c, tr in never.items() if 1 in tr and 2 in tr}
+        state.delta_esc = (calibrate_delta(esc_pairs, trials_per_eval=self.cfg.trials)
+                           if len(esc_pairs) >= 2 else None)
         state.S_star = result.S
         state.incumbent_eval = json.dumps(self._eval_ref(self.run.incumbent_dir, k))
         logger.info("round 0: S=%.3f C=$%.3f delta=%.3f", result.S, result.C, state.delta)
@@ -358,8 +368,9 @@ class Optimizer:
         cand = state.candidate
         inc_result, _ = self._load_ref(json.loads(state.incumbent_eval))
         cand_result, _ = self._load_ref(json.loads(cand["eval"]))
-        acfg = replace(AcceptanceConfig(**self.cfg.acceptance), delta=state.delta,
-                       guard_cases=tuple(self.cfg.guard_cases))
+        base = AcceptanceConfig(**self.cfg.acceptance)
+        acfg = replace(base, delta=state.delta, guard_cases=tuple(self.cfg.guard_cases),
+                       max_escalation_rise=max(base.max_escalation_rise, state.delta_esc or 0.0))
         d = decide(inc_result, cand_result, state.S_star, acfg)
         cand_dir = Path(cand["dir"])
         diff = candidates.diff(self.run.incumbent_dir, cand_dir)

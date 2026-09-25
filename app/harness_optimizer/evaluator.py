@@ -23,7 +23,9 @@ from typing import Protocol
 from app.harness_optimizer.acceptance import CaseResult, EvalResult
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SWEBENCH_CASES = ROOT / "app" / "evals" / "swebench_diagnosis_regression.jsonl"
+# The 100-instance sample: a superset of the 56-case gate set that also has
+# the cases that failed the original baseline (the split's "hard" tier).
+SWEBENCH_CASES = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"
 
 
 class ProviderFailure(RuntimeError):
