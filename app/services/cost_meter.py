@@ -69,9 +69,16 @@ class _ModelUsage:
 @dataclass
 class CostMeter:
     by_model: dict[str, _ModelUsage] = field(default_factory=dict)
+    # One entry per LLM call, in order. Lets a caller attribute usage to the
+    # exact call that incurred it (see scripts/analyze_cost_by_source.py).
+    call_log: list[dict] = field(default_factory=list)
 
     def record(self, model: str, input_tokens: int, output_tokens: int,
                cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> None:
+        self.call_log.append({
+            "model": model, "input": input_tokens or 0, "output": output_tokens or 0,
+            "cache_read": cache_read_tokens or 0, "cache_write": cache_write_tokens or 0,
+        })
         u = self.by_model.setdefault(model, _ModelUsage())
         u.calls += 1
         u.input_tokens += input_tokens or 0
@@ -110,13 +117,15 @@ class CostMeter:
         }
 
 
-_current: ContextVar[CostMeter | None] = ContextVar("cost_meter", default=None)
+# A stack, so meters nest: an eval case metered across all its attempts can
+# contain a per-replay meter, and a call is recorded against both.
+_current: ContextVar[tuple[CostMeter, ...]] = ContextVar("cost_meter", default=())
 
 
 @contextlib.contextmanager
 def metered() -> Iterator[CostMeter]:
     meter = CostMeter()
-    token = _current.set(meter)
+    token = _current.set(_current.get() + (meter,))
     try:
         yield meter
     finally:
@@ -125,12 +134,10 @@ def metered() -> Iterator[CostMeter]:
 
 def record(model: str, input_tokens: int, output_tokens: int,
            cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> None:
-    """Record one LLM call against the active meter, if any. Never raises:
+    """Record one LLM call against every active meter. Never raises:
     metering must not be able to break an LLM call."""
-    meter = _current.get()
-    if meter is None:
-        return
-    try:
-        meter.record(model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-    except Exception:
-        pass
+    for meter in _current.get():
+        try:
+            meter.record(model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+        except Exception:
+            pass
