@@ -22,7 +22,9 @@ import re
 from dataclasses import dataclass
 
 from app.models.events import IncidentState
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import HAIKU_MODEL, LLMService
+from app.services.output_validator import check_leaked_markers
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,15 @@ class MergeDecisionAgent:
         severity = str(event.severity).split(".")[-1] if event.severity else "P2"
         occurrences = incident.occurrences_24h or 0
 
+        # event.title is raw CloudWatch text (same class DiagnosisAgent/TriageAgent
+        # scan); review_text is CodeReviewAgent's own free-text output, which can
+        # itself carry an unwrapped injection forward from an unsanitized PR diff
+        # (CodeReviewAgent doesn't guard diff content — see docs/blog-drafts notes).
+        # A manipulated review_text could flip merge_now vs refix_first here.
+        scan_for_injection(event.title or "", source="cloudwatch-logs")
+        scan_for_injection(review_text, source="code-review-output")
+        wrapped_review = wrap_untrusted(review_text[:3000], source="code-review-output")
+
         prompt = f"""A code review returned REQUEST_CHANGES on an AI-generated fix PR.
 Your job: decide whether to merge the PR now (core fix is correct, remaining issues are minor)
 or wait for a re-fix (fix is wrong or introduces meaningful risk).
@@ -88,7 +99,7 @@ INCIDENT:
   Fix file    : {incident.diagnosis_affected_file or '(unknown)'}
 
 CODE REVIEW (the review that returned REQUEST_CHANGES):
-{review_text[:3000]}
+{wrapped_review}
 
 CLASSIFICATION RULES:
   BLOCKING issues (always → refix_first):
@@ -135,6 +146,29 @@ Respond with ONLY a valid JSON object:
                 ),
             )
             result = _parse(raw)
+
+            # Leaked-marker check only. Unlike TriageAgent, this agent has a
+            # real fail-safe available: if the reasoning echoes an ipi_guard
+            # marker, don't trust the merge_now/refix_first verdict it's
+            # attached to — force the conservative branch. review_text (the
+            # most likely source of a leaked marker, since it's the untrusted
+            # content wrapped above) doesn't leak into `result`, so scanning
+            # `result.reasoning` is the right surface: it's the model's own
+            # words, and an echoed marker there means it copied wrapped
+            # content into its answer instead of reasoning about it.
+            leak_failures = check_leaked_markers(
+                result.reasoning, *result.blocking_issues, *result.non_blocking_issues,
+            )
+            if leak_failures:
+                logger.warning(
+                    "[MergeDecision] Output validation failed for %s — %s — forcing refix_first",
+                    incident.id, "; ".join(leak_failures),
+                )
+                result.decision = "refix_first"
+                result.reasoning = (
+                    f"OUTPUT VALIDATION WARNING — forced refix_first: {'; '.join(leak_failures)}"
+                )
+
             logger.info(
                 "[MergeDecision] %s — decision=%s (sev=%s, %d occ/24h): %s",
                 incident.id, result.decision, severity, occurrences, result.reasoning,

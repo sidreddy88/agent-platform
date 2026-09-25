@@ -13,7 +13,9 @@ from pathlib import Path
 
 from app.agents.base import AgentResult, BaseAgent
 from app.services.github import FileDiff, GitHubError, GitHubService, PRDetails
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import LLMService
+from app.services.output_validator import check_leaked_markers
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,9 @@ def _format_rag_context(chunks) -> str:
     lines = ["Related codebase context (files semantically related to this diff):"]
     for chunk in chunks:
         lines.append(f"\n--- {chunk.file_path} (lines {chunk.start_line}–{chunk.end_line}, score={chunk.score:.2f}) ---")
-        lines.append(chunk.content[:600])  # cap per chunk to avoid prompt bloat
+        content = chunk.content[:600]  # cap per chunk to avoid prompt bloat
+        scan_for_injection(content, source=f"rag-chunk:{chunk.file_path}")
+        lines.append(wrap_untrusted(content, source=f"rag-chunk:{chunk.file_path}"))
     return "\n".join(lines)
 
 def _format_pr(pr: PRDetails, files: list[FileDiff]) -> str:
@@ -49,17 +53,22 @@ def _format_pr(pr: PRDetails, files: list[FileDiff]) -> str:
         f"  - {f.filename} [{f.status}] +{f.additions}/-{f.deletions}"
         for f in files
     )
+    description = pr.description or "(none)"
+    scan_for_injection(pr.title or "", source="github-pr-title")
+    scan_for_injection(description, source="github-pr-description")
     return (
         f"PR #{pr.number}: {pr.title}\n"
         f"Author : {pr.author}\n"
         f"Branches: {pr.base_branch} ← {pr.head_branch}\n"
-        f"Description: {pr.description or '(none)'}\n\n"
+        f"Description: {wrap_untrusted(description, source='github-pr-description')}\n\n"
         f"Changed files ({len(files)}):\n{changed}"
     )
 
 
 def _format_file_diff(f: FileDiff) -> str:
     patch = f.patch or "(binary or oversized file — no patch available)"
+    scan_for_injection(patch, source=f"github-diff:{f.filename}")
+    patch = wrap_untrusted(patch, source=f"github-diff:{f.filename}")
     return (
         f"File   : {f.filename}\n"
         f"Status : {f.status}  +{f.additions}/-{f.deletions}\n\n"
@@ -260,12 +269,16 @@ async def generate_review(
         if review_kind == "clarity" else ""
     )
 
+    review_description = pr.description or "(none)"
+    scan_for_injection(pr.title or "", source="github-pr-title")
+    scan_for_injection(review_description, source="github-pr-description")
+
     prompt = f"""You are a staff engineer writing the final code review for a pull request.
 
 PR #{pr.number}: {pr.title}
 Author : {pr.author}
 Branches: {pr.base_branch} ← {pr.head_branch}
-Description: {pr.description or '(none)'}
+Description: {wrap_untrusted(review_description, source="github-pr-description")}
 {kind_context}
 
 Changed files:
@@ -320,6 +333,28 @@ IMPORTANT: Your review must be grounded solely in the per-file analysis above.
         messages=[{"role": "user", "content": prompt}],
         system="You are a staff engineer writing an actionable, fair code review.",
     )
+
+    # Leaked-marker check only, not full citation-provenance — every file in a
+    # review is inherently "in scope" already (a review's job is to discuss
+    # the diff it was given, not retrieve from a larger candidate pool the
+    # way DiagnosisAgent/ErrorClarityAgent do), so that check doesn't apply
+    # here. A leaked ipi_guard marker in the review's own text is still a
+    # real signal: the reviewer echoed wrapped diff/description content back
+    # out. This is the last agent-level check before merge, and its verdict
+    # feeds MergeDecisionAgent (which has its own leaked-marker check on this
+    # same review_text) — flag loudly here since a human reads this review
+    # directly as a GitHub comment.
+    leak_failures = check_leaked_markers(review_text)
+    if leak_failures:
+        logger.warning(
+            "[CodeReview] Output validation failed for PR #%d — %s",
+            pr_number, "; ".join(leak_failures),
+        )
+        review_text = (
+            "⚠️ OUTPUT VALIDATION WARNING: this review may have been influenced by "
+            "injected content in the diff or PR description — verify manually before trusting it.\n\n"
+            + review_text
+        )
 
     if post_to_github:
         try:

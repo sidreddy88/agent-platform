@@ -1,41 +1,58 @@
 name: DiagnosisAgent Regression
 
-# Hard regression gate for DiagnosisAgent: any PR touching diagnosis.py or
+# Regression gate for DiagnosisAgent: any PR touching diagnosis.py or
 # base.py (the shared ReAct loop DiagnosisAgent inherits from) must replay
-# the full 62-case golden dataset (6 real production incidents + 56
-# SWE-bench Verified instances known to pass today) and get every single
-# one right before merging. See scripts/eval_diagnosis_full_regression.py
-# for why 56, not the full 100-instance sample, and why PASS is the only
-# acceptable verdict here.
+# the golden dataset (6 real production incidents + 56 SWE-bench Verified
+# instances known to pass) and stay within the noise threshold
+# (MAX_NONPASS_RATE) before merging. See
+# scripts/eval_diagnosis_full_regression.py for why 56, why a threshold
+# rather than 100%, and why the threshold is still provisional.
 #
 # Unlike ci.yml, this makes real Anthropic + GitHub API calls -- real cost,
-# real runtime (expect over an hour for the full 62 cases). That's why the
-# expensive replay itself is still scoped to only the files that can
-# actually change DiagnosisAgent's behavior.
+# real runtime (~7.5 min per case). Run sequentially, that's ~8h, past
+# GitHub's 6h job limit, so the original single-job version was cancelled
+# on every real run and never once produced a verdict. The replay is now
+# sharded across a matrix of SHARDS parallel jobs (~7 cases, ~1h each) and a
+# final `gate` job merges their results. The gate job fails closed if any
+# shard is missing, so a crashed or cancelled shard can't turn into a pass.
 #
-# The path check is done INSIDE the job (via the "Check whether relevant
-# files changed" step below), not as a top-level `on.pull_request.paths`
-# filter. This job is marked as a required status check in main's branch
-# protection -- a trigger-level path filter means the workflow (and its
-# check) never runs at all on PRs that don't touch these files, which
-# leaves a required check permanently "Expected -- waiting for status to
-# be reported" and blocks merging forever. Running the job unconditionally
-# and skipping the expensive steps internally means the check always
-# reports (fast success when nothing relevant changed, real pass/fail when
-# it did), so requiring it doesn't strand unrelated PRs.
+# The changed-files check diffs against the merge-base with main, not the
+# PR's base branch. In a stacked PR the base is the parent branch, and
+# diffing against it hid diagnosis.py changes made lower in the stack --
+# which let #248 and #251 report a green gate while the stack under them
+# had never passed it.
+#
+# workflow_dispatch runs the full replay unconditionally -- use it on
+# unchanged main to measure the noise floor that calibrates the threshold.
+#
+# The path check is done INSIDE the workflow (the `changes` job), not as a
+# top-level `on.pull_request.paths` filter, so the check can be made
+# required in main's branch protection: a trigger-level path filter means
+# the check never reports at all on PRs that don't touch these files,
+# leaving a required check permanently "Expected -- waiting for status to be
+# reported". The `gate` job always runs and always reports (fast success
+# when nothing relevant changed, the real verdict when it did), and keeps
+# the original job name so the check name doesn't change. NOTE: as of
+# 2026-09-24 main's protection requires only `pytest`, not this check --
+# the earlier comment here claiming otherwise was wrong.
 
 on:
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: diagnosis-regression-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  SHARDS: 8
+
 jobs:
-  regression:
-    name: full golden-dataset replay (62 cases)
+  changes:
+    name: detect DiagnosisAgent changes
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,26 +62,43 @@ jobs:
       - name: Check whether relevant files changed
         id: filter
         run: |
-          if git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" \
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "${{ github.event.pull_request.head.sha }}")
+          if git diff --name-only "$base" "${{ github.event.pull_request.head.sha }}" \
               | grep -qE '^app/agents/(diagnosis|base)\.py$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
+  replay:
+    name: replay shard ${{ matrix.shard }}/8
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with env.SHARDS -- matrix values can't read env.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up Python
-        if: steps.filter.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: "pip"
 
       - name: Install dependencies
-        if: steps.filter.outputs.run == 'true'
         run: pip install -r requirements-dev.txt
 
-      - name: Run full DiagnosisAgent regression gate
-        if: steps.filter.outputs.run == 'true'
+      - name: Replay shard
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # NOT the built-in secrets.GITHUB_TOKEN -- that's scoped to this repo
@@ -74,8 +108,52 @@ jobs:
           # repos and would work with either token, or none at all.)
           GITHUB_TOKEN: ${{ secrets.DIAGNOSIS_REGRESSION_GITHUB_PAT }}
           FIX_TARGET_REPO: ${{ vars.FIX_TARGET_REPO }}
-        run: python scripts/eval_diagnosis_full_regression.py
+        run: >-
+          python scripts/eval_diagnosis_full_regression.py
+          --shard ${{ matrix.shard }}/${{ env.SHARDS }}
+          --results-out gate-results/shard-${{ matrix.shard }}.json
 
+      - name: Upload shard results
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnosis-gate-shard-${{ matrix.shard }}
+          path: gate-results/
+          if-no-files-found: ignore
+
+  gate:
+    name: full golden-dataset replay (62 cases)
+    needs: [changes, replay]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
       - name: Skipped -- no relevant files changed
-        if: steps.filter.outputs.run == 'false'
-        run: echo "No changes to diagnosis.py/base.py in this PR -- skipping the 62-case replay."
+        if: needs.changes.outputs.run == 'false'
+        run: echo "No changes to diagnosis.py/base.py since main -- skipping the replay."
+
+      - name: Fail if change detection didn't run
+        if: needs.changes.result != 'success'
+        run: |
+          echo "The changes job ended as '${{ needs.changes.result }}', so no verdict exists."
+          exit 1
+
+      - name: Checkout
+        if: needs.changes.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Download shard results
+        if: needs.changes.outputs.run == 'true'
+        # A missing shard is reported (and failed) by the aggregate step with
+        # a clearer message than download-artifact's own error.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: diagnosis-gate-shard-*
+          path: gate-results
+          merge-multiple: true
+
+      - name: Aggregate and apply threshold
+        if: needs.changes.outputs.run == 'true'
+        # Stdlib only: --aggregate imports none of the app, so no pip install.
+        run: >-
+          python3 scripts/eval_diagnosis_full_regression.py
+          --aggregate gate-results --expect-shards ${{ env.SHARDS }}

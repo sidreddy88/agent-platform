@@ -41,6 +41,7 @@ from app.services.dod_checker import dod_checker
 from app.services.event_queue import event_queue
 from app.services.incident_store import incident_store
 from app.services.llm_gateway import llm_gateway
+from app.services.output_validator import check_leaked_markers
 from app.services.rag_judge import judge_diagnosis_faithfulness, should_sample
 from app.services.schema_validator import HandoffValidationError, handoff_validator
 from app.services.session_logger import session_logger
@@ -322,6 +323,22 @@ class IncidentLoop:
                     "[IncidentLoop] FixGenerationAgent failed for %s — steps:\n%s",
                     incident.id, "\n".join(steps),
                 )
+            # Leaked-marker check only, not the full citation-provenance
+            # treatment DiagnosisAgent/ErrorClarityAgent get — FixGenerationAgent's
+            # agentic loop can only ever edit its one pre-verified target file, so
+            # there's no exploratory citation to check (see output_validator.py's
+            # module docstring for the full reasoning). fix_description leaking
+            # ipi_guard's wrap markers is still a real signal something went
+            # wrong (a raw file dump, or an injection echo), so force escalate
+            # the same way a low-confidence fix already routes to human review.
+            leak_failures = check_leaked_markers(fix.fix_description)
+            if leak_failures:
+                logger.warning(
+                    "[IncidentLoop] FixGenerationAgent output validation failed for %s — %s",
+                    incident.id, "; ".join(leak_failures),
+                )
+                fix.escalate = True
+                fix.escalate_reason = f"OUTPUT VALIDATION WARNING: {'; '.join(leak_failures)}"
             return fix
         except CircuitOpenError:
             logger.warning("[IncidentLoop] GitHub circuit breaker OPEN — skipping fix for %s", incident.id)

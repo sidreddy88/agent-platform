@@ -30,7 +30,9 @@ from app.core.config import settings
 from app.models.events import ErrorEvent
 from app.services.aws import AWSError, AWSService
 from app.services.incident_store import incident_store as _default_store
+from app.services.ipi_guard import scan_for_injection
 from app.services.llm import HAIKU_MODEL, LLMService
+from app.services.output_validator import check_leaked_markers
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +205,22 @@ class TriageAgent(BaseAgent):
         from datetime import date
         today = date.today().isoformat()
 
+        # event.title/description are raw, externally-sourced text (CloudWatch log/
+        # alarm messages) — the same content class DiagnosisAgent already scans/wraps
+        # as "cloudwatch-logs". Detection-only here, deliberately NOT wrapped:
+        # wrap_untrusted's multi-line block measurably destabilized this specific
+        # Haiku classification prompt in the real 80-case regression gate (7.5% ->
+        # 30% non-pass rate across two different placements tried, with a uniform
+        # P2->P3 severity-drift pattern far too consistent to be sampling noise).
+        # TriageAgent's prompt is small and tightly tuned; the structural-quoting
+        # defense's cost outweighs its benefit here specifically -- scan_for_injection
+        # still gives real visibility (a logged, traceable warning) without touching
+        # the prompt content at all. Contrast with DiagnosisAgent/ErrorClarityAgent,
+        # where the surrounding prompt has enough room that wrapping never showed
+        # this effect.
+        scan_for_injection(event.title or "", source="cloudwatch-logs")
+        scan_for_injection(event.description or "", source="cloudwatch-logs")
+
         prompt = f"""You are a triage agent. Classify this production error event.
 
 TODAY'S DATE: {today}  ← use this as the reference for "recent" / "current" / "future"
@@ -249,4 +267,18 @@ Answer with ONLY a valid JSON object, no other text:
 }}"""
 
         result = await self.run(prompt)
-        return _parse_triage_result(result.answer)
+        triage_result = _parse_triage_result(result.answer)
+
+        # Leaked-marker check only — TriageResult has no citations to check
+        # provenance on, and no safe way to force a corrected decision/severity
+        # here (unlike MergeDecisionAgent, which can fail-safe to refix_first).
+        # Log loudly so a leaked marker is at least visible, matching this
+        # check's role everywhere it's detection-only.
+        leak_failures = check_leaked_markers(triage_result.reasoning)
+        if leak_failures:
+            logger.warning(
+                "[Triage] Output validation failed for event %s — %s",
+                event.id, "; ".join(leak_failures),
+            )
+
+        return triage_result

@@ -142,3 +142,73 @@ def test_real_pipeline_regression_dataset_cases():
                 assert result and result[0]["file"] == expected_file, (
                     f"{incident_id}: expected first candidate {expected_file!r}, got {result}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# CPython tracebacks
+#
+# Added after a SWE-bench retrieval-path audit: the original regex required a
+# "/app/" prefix and a JS/TS extension, so it fired on exactly 1 of the 100
+# instances in app/evals/swebench_verified_sample.jsonl (and that one had no
+# JS extension, so it never actually matched). The sample is 100% Python —
+# this path was structurally dead for the entire 56% evaluation.
+# ---------------------------------------------------------------------------
+
+def test_extracts_python_frame_path_and_function():
+    """CPython puts the path first and the function last — inverted vs V8."""
+    text = (
+        "Traceback (most recent call last):\n"
+        '  File "/testbed/django/db/models/query.py", line 71, in __iter__\n'
+        "    self._fetch_all()\n"
+        "ValueError: bad\n"
+    )
+    result = extract_stack_trace_paths(text)
+    files = {r["file"] for r in result}
+    assert "django/db/models/query.py" in files
+    assert all(r["function"] == "__iter__" for r in result)
+
+
+def test_python_frame_without_function_suffix():
+    """The trailing ', in <name>' is absent for module-level frames."""
+    text = '  File "/testbed/sympy/core/expr.py", line 181\n'
+    result = extract_stack_trace_paths(text)
+    assert {r["file"] for r in result} >= {"sympy/core/expr.py"}
+    assert all(r["function"] is None for r in result)
+
+
+def test_python_vendor_frames_are_skipped():
+    """site-packages / stdlib are Python's node_modules — library, not the repo."""
+    text = (
+        '  File "/opt/conda/lib/python3.11/site-packages/numpy/core/_methods.py", line 9, in _sum\n'
+        '  File "/usr/lib/python3.11/json/decoder.py", line 355, in raw_decode\n'
+        '  File "/testbed/astropy/table/column.py", line 22, in value\n'
+    )
+    files = {r["file"] for r in extract_stack_trace_paths(text)}
+    assert "astropy/table/column.py" in files
+    assert not any("numpy" in f or "json/decoder" in f for f in files)
+
+
+def test_python_suffix_candidates_stop_before_bare_filename():
+    """A bare 'query.py' resolves against many packages — never emit it.
+
+    The extractor has no repo access, so it emits progressively shorter
+    suffixes and lets the caller's file_exists() check pick the one that
+    resolves. Bare filenames are excluded because file_exists() would happily
+    confirm a same-named file in an unrelated package.
+    """
+    text = '  File "/testbed/django/db/models/query.py", line 71, in __iter__\n'
+    files = {r["file"] for r in extract_stack_trace_paths(text)}
+    assert "query.py" not in files
+    assert "models/query.py" in files       # shortest allowed: two segments
+    assert "django/db/models/query.py" in files
+
+
+def test_mixed_v8_and_python_text_yields_both():
+    """A traceless-language mix must not break either branch."""
+    text = (
+        "    at checkPrank (/app/constants/prankCheckerMain.js:296:44)\n"
+        '  File "/testbed/flask/app.py", line 12, in dispatch\n'
+    )
+    files = {r["file"] for r in extract_stack_trace_paths(text)}
+    assert "constants/prankCheckerMain.js" in files
+    assert "flask/app.py" in files

@@ -372,34 +372,17 @@ class TestAnalyzePrDiff:
 # ---------------------------------------------------------------------------
 
 class TestGenerateMonitorsIntegration:
+    """generate_monitors() has no LLM call anywhere in it now -- confirmed
+    every step was already deterministic (scripts/audit_deterministic_tool_calls.py).
+    These tests exercise the real deterministic pipeline against real
+    GitHubService fixtures, not a mocked LLM answer."""
+
     @pytest.mark.asyncio
     async def test_success_returns_result(self):
-        """Mock the LLM to return a JSON answer on the first iteration."""
-        answer_json = json.dumps({
-            "monitors": [
-                {
-                    "monitor_type": "cloudwatch_alarm",
-                    "file": "src/routes/image.js",
-                    "name": "auto-image-errors",
-                    "config": {"AlarmName": "auto-image-errors"},
-                    "created": False,
-                }
-            ],
-            "files_analyzed": 2,
-            "monitors_created": 1,
-            "coverage_ratio": 0.93,
-        })
-
-        mock_llm = MagicMock()
-        # The ReAct loop calls llm.complete() — return "Answer: <json>"
-        mock_llm.complete = AsyncMock(return_value=f"Thought: done\nAnswer: {answer_json}")
-        mock_llm.last_input_tokens = 0
-
         mock_github = AsyncMock()
-        mock_github.get_pr.return_value = _make_pr_details()
         mock_github.get_pr_diff.return_value = _make_file_diffs()
 
-        agent = _make_agent(github=mock_github, llm=mock_llm)
+        agent = _make_agent(github=mock_github)
 
         result = await agent.generate_monitors(
             owner="org",
@@ -411,18 +394,26 @@ class TestGenerateMonitorsIntegration:
         assert isinstance(result, MonitorGenerationResult)
         assert result.pr_number == 42
         assert result.repo == "repo"
-        assert result.monitors_created == 1
-        assert result.coverage_ratio == 0.93
-        assert len(result.monitors) == 1
+        assert result.files_analyzed == 2
+        # src/routes/image.js (route file, +80) -> 1 cloudwatch alarm + 1 health
+        # check (route/handler in filename); src/utils/s3.js (+30) -> 1 alarm.
+        assert result.monitors_created == 3
+        alarm_files = {m.file for m in result.monitors if m.monitor_type == "cloudwatch_alarm"}
+        assert alarm_files == {"src/routes/image.js", "src/utils/s3.js"}
+        health_check_files = {m.file for m in result.monitors if m.monitor_type == "do_health_check"}
+        assert health_check_files == {"src/routes/image.js"}
+        # config is the tool's real returned dict, not a model transcription of it.
+        alarm = next(m for m in result.monitors if m.monitor_type == "cloudwatch_alarm" and m.file == "src/utils/s3.js")
+        assert alarm.config["Namespace"] == "AWS/Lambda"
 
     @pytest.mark.asyncio
-    async def test_non_json_answer_returns_empty_result(self):
-        """Non-JSON answer from LLM → empty result, not an exception."""
-        mock_llm = MagicMock()
-        mock_llm.complete = AsyncMock(return_value="Thought: done\nAnswer: I analyzed the PR.")
-        mock_llm.last_input_tokens = 0
+    async def test_github_error_returns_empty_result_not_an_exception(self):
+        from app.services.github import GitHubError
 
-        agent = _make_agent(llm=mock_llm)
+        mock_github = AsyncMock()
+        mock_github.get_pr_diff.side_effect = GitHubError(500, "boom")
+
+        agent = _make_agent(github=mock_github)
         result = await agent.generate_monitors("org", "repo", 1)
 
         assert isinstance(result, MonitorGenerationResult)
@@ -430,15 +421,23 @@ class TestGenerateMonitorsIntegration:
         assert result.files_analyzed == 0
 
     @pytest.mark.asyncio
+    async def test_no_changed_files_returns_empty_result(self):
+        mock_github = AsyncMock()
+        mock_github.get_pr_diff.return_value = []
+
+        agent = _make_agent(github=mock_github)
+        result = await agent.generate_monitors("org", "repo", 1)
+
+        assert result.monitors == []
+        assert result.files_analyzed == 0
+
+    @pytest.mark.asyncio
     async def test_dry_run_default(self):
         """Default settings.create_monitors = False → dry_run = True."""
-        mock_llm = MagicMock()
-        mock_llm.complete = AsyncMock(
-            return_value='Thought: x\nAnswer: {"monitors":[],"files_analyzed":0,"monitors_created":0,"coverage_ratio":0.0}'
-        )
-        mock_llm.last_input_tokens = 0
+        mock_github = AsyncMock()
+        mock_github.get_pr_diff.return_value = []
 
-        agent = _make_agent(llm=mock_llm)
+        agent = _make_agent(github=mock_github)
         result = await agent.generate_monitors("org", "repo", 1)
 
         assert result.dry_run is True

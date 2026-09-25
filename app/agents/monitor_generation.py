@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 
 from app.agents.base import BaseAgent
 from app.core.config import settings
+from app.services.ipi_guard import scan_for_injection, wrap_untrusted
+from app.services.output_validator import check_leaked_markers
 from app.services.github import GitHubError, GitHubService
 from app.services.llm import HAIKU_MODEL, LLMService
 
@@ -40,6 +42,28 @@ _FN_PATTERNS = [
     re.compile(r"(?:router|app)\.(?:get|post|put|delete|patch)\(['\"]([^'\"]+)['\"]"),
     re.compile(r"export (?:default |const |function |async function )(\w+)"),
 ]
+
+
+def _extract_new_symbols(patch: str | None) -> list[str]:
+    """New function/endpoint names added in a diff patch (deduplicated, capped
+    at 10). Shared by _analyze_pr_diff (the registered tool, kept for
+    testability) and generate_monitors()'s deterministic path below -- one
+    implementation, not two copies that could drift.
+    """
+    if not patch:
+        return []
+    added_text = "\n".join(ln[1:] for ln in patch.splitlines() if ln.startswith("+"))
+    scan_for_injection(added_text, source="github-diff")
+    new_syms: list[str] = []
+    for pat in _FN_PATTERNS:
+        new_syms.extend(pat.findall(added_text))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for s in new_syms:
+        if s not in seen:
+            seen.add(s)
+            deduped.append(s)
+    return deduped[:10]
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +178,11 @@ class MonitorGenerationAgent(BaseAgent):
             if not files:
                 return "No changed files found in this PR."
 
+            # pr.title and the regex-captured symbol names below both come straight
+            # out of attacker-controllable content (PR title, added diff lines) —
+            # scan before folding into the returned observation.
+            scan_for_injection(pr.title or "", source="github-pr-title")
+
             lines = [
                 f"PR #{pr.number}: {pr.title}",
                 f"Branch: {pr.head_branch} → {pr.base_branch}",
@@ -161,27 +190,12 @@ class MonitorGenerationAgent(BaseAgent):
                 "",
             ]
             for f in files:
-                new_syms: list[str] = []
-                if f.patch:
-                    added_text = "\n".join(
-                        ln[1:] for ln in f.patch.splitlines() if ln.startswith("+")
-                    )
-                    for pat in _FN_PATTERNS:
-                        new_syms.extend(pat.findall(added_text))
-                    # Deduplicate, cap at 10
-                    seen: set[str] = set()
-                    deduped: list[str] = []
-                    for s in new_syms:
-                        if s not in seen:
-                            seen.add(s)
-                            deduped.append(s)
-                    new_syms = deduped[:10]
-
+                new_syms = _extract_new_symbols(f.patch)
                 sym_str = f" | new: {', '.join(new_syms[:5])}" if new_syms else ""
                 lines.append(
                     f"  {f.filename} | +{f.additions} -{f.deletions} | status={f.status}{sym_str}"
                 )
-            return "\n".join(lines)
+            return wrap_untrusted("\n".join(lines), source="github-pr-diff-summary")
 
         async def _generate_cloudwatch_alarms(
             file: str,
@@ -327,52 +341,100 @@ class MonitorGenerationAgent(BaseAgent):
         """
         Generate monitoring coverage for a merged PR.
 
+        No LLM call anywhere in this method -- audited via
+        scripts/audit_deterministic_tool_calls.py and confirmed every step is
+        already rule-based: analyze_pr_diff's arguments were always fully
+        known up front (same anti-pattern as TriageAgent/DiagnosisAgent's
+        fixed findings), and generate_cloudwatch_alarms/
+        generate_do_health_checks turned out to have ZERO model judgment in
+        their own content either -- namespace/metric selection, alarm
+        thresholds, and health-check defaults are all fixed rules, not
+        something the model was ever actually deciding. The old design asked
+        the model to orchestrate a fully mechanical pipeline and then
+        transcribe real JSON configs into its own free-text JSON answer --
+        a second, unnecessary place for the output to drift from the real
+        generated config. Calling the tool functions directly here means
+        MonitorConfig.config is always the actual dict the tool produced,
+        not the model's transcription of it.
+
         Args:
             owner:          GitHub org or user
             repo:           Repository name (without owner)
             pr_number:      Merged PR number
-            pr_title:       PR title (used in prompt context)
-            pr_description: PR body / description (first 200 chars used)
+            pr_title:       PR title (kept for the injection-detection scan only)
+            pr_description: PR body / description (first 200 chars, same reason)
 
         Returns:
             MonitorGenerationResult with generated monitor configs and coverage metrics.
         """
-        desc_snippet = (pr_description or "")[:200]
-        prompt = f"""You are a monitoring coverage agent. A PR was just merged.
+        scan_for_injection(pr_title or "", source="github-pr-title")
+        scan_for_injection((pr_description or "")[:200], source="github-pr-description")
 
-Repo: {owner}/{repo}
-PR #{pr_number}: {pr_title}
-Description: {desc_snippet}
+        if self._github is None:
+            logger.warning("[MonitorGen] No GitHub client configured — skipping PR #%d", pr_number)
+            return MonitorGenerationResult(pr_number=pr_number, repo=repo, dry_run=self._dry_run)
 
-STEPS:
-1. Call analyze_pr_diff with owner="{owner}", repo="{repo}", pr_number={pr_number}
-2. For each file with additions > 0:
-   a. Call generate_cloudwatch_alarms with file, additions, any new_functions found, service_name="{repo}"
-   b. If the file name contains "route", "api", "handler", "endpoint", or "controller",
-      also call generate_do_health_checks with file, additions, any new endpoint paths found
-3. Answer with ONLY a valid JSON object (no other text):
+        try:
+            files = await self._github.get_pr_diff(owner, repo, pr_number)
+        except GitHubError as exc:
+            logger.warning("[MonitorGen] GitHub API error for PR #%d: %s", pr_number, exc)
+            return MonitorGenerationResult(pr_number=pr_number, repo=repo, dry_run=self._dry_run)
 
-MANDATORY CONSTRAINTS:
-- You MUST call analyze_pr_diff first, even if the PR title or description is empty.
-- Do not output an Answer until analyze_pr_diff has been called and its result observed.
-- If analyze_pr_diff returns an error or empty diff, output the JSON with monitors=[] and files_analyzed=0.
+        if not files:
+            return MonitorGenerationResult(pr_number=pr_number, repo=repo, dry_run=self._dry_run)
 
-{{
-  "monitors": [
-    {{
-      "monitor_type": "cloudwatch_alarm",
-      "file": "path/to/file.js",
-      "name": "auto-service-errors",
-      "config": {{}},
-      "created": false
-    }}
-  ],
-  "files_analyzed": <integer>,
-  "monitors_created": <integer>,
-  "coverage_ratio": <float between 0.0 and 1.0>
-}}
+        generate_cloudwatch_alarms_fn, _ = self._tools["generate_cloudwatch_alarms"]
+        generate_do_health_checks_fn, _ = self._tools["generate_do_health_checks"]
 
-coverage_ratio = monitors_generated / max(1, total_additions / 75)
-"""
-        result = await self.run(prompt)
-        return _parse_monitor_result(result.answer, pr_number, repo, self._dry_run)
+        monitors: list[MonitorConfig] = []
+        total_additions = 0
+        for f in files:
+            total_additions += f.additions
+            if f.additions <= 0:
+                continue
+
+            new_syms = _extract_new_symbols(f.patch)
+
+            alarms_raw = await generate_cloudwatch_alarms_fn(
+                file=f.filename, additions=f.additions, new_functions=new_syms, service_name=repo,
+            )
+            for alarm_cfg in json.loads(alarms_raw):
+                monitors.append(MonitorConfig(
+                    monitor_type="cloudwatch_alarm", file=f.filename,
+                    name=alarm_cfg.get("AlarmName", ""), config=alarm_cfg,
+                ))
+
+            if any(tok in f.filename.lower() for tok in ("route", "api", "handler", "endpoint", "controller")):
+                checks_raw = await generate_do_health_checks_fn(
+                    file=f.filename, additions=f.additions, new_endpoints=new_syms,
+                )
+                for check_cfg in json.loads(checks_raw):
+                    monitors.append(MonitorConfig(
+                        monitor_type="do_health_check", file=f.filename,
+                        name=check_cfg.get("path", ""), config=check_cfg,
+                    ))
+
+        result = MonitorGenerationResult(
+            pr_number=pr_number,
+            repo=repo,
+            monitors=monitors,
+            files_analyzed=len(files),
+            monitors_created=len(monitors),
+            # Same formula the old prompt specified: monitors_generated / max(1, total_additions / 75)
+            coverage_ratio=len(monitors) / max(1, total_additions / 75),
+            dry_run=self._dry_run,
+        )
+
+        # Leaked-marker check only, log only — this is already the
+        # lowest-consequence agent in the pipeline (dry-run by default, no
+        # executable side effects unless CREATE_MONITORS=true), so a logged
+        # warning is proportionate; no output here is trusted enough on its
+        # own to need a forced fail-safe the way MergeDecisionAgent's is.
+        leak_failures = check_leaked_markers(*(m.name for m in result.monitors))
+        if leak_failures:
+            logger.warning(
+                "[MonitorGen] Output validation failed for PR #%d — %s",
+                pr_number, "; ".join(leak_failures),
+            )
+
+        return result
