@@ -130,3 +130,41 @@ class TestCompleteStructured:
         )
 
         assert service._client.messages.create.call_args.kwargs["system"] == "You are a classifier."
+
+
+def test_gateway_llm_service_supports_complete_structured():
+    """Production TriageAgent runs on GatewayLLMService (incident_loop). If it
+    lacked complete_structured, TriageAgent would catch the AttributeError and
+    silently default every incident to real/P2."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.services.llm_gateway import GatewayLLMService
+
+    gw = MagicMock()
+    gw._get_routing.return_value = ("anthropic", "claude-haiku-4-5-20251001", 1024)
+    svc = GatewayLLMService(gw, "triage")
+    with patch("app.services.llm.LLMService.complete_structured",
+               new=AsyncMock(return_value={"decision": "noise"})) as cs:
+        out = asyncio.run(svc.complete_structured([{"role": "user", "content": "x"}],
+                                                  {"name": "submit_triage"}))
+    assert out == {"decision": "noise"}
+    assert svc._structured_llm._model == "claude-haiku-4-5-20251001"
+    assert cs.await_count == 1
+
+
+def test_triage_agent_on_gateway_does_not_fall_back_to_default():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app.agents.triage import TriageAgent
+    from app.services.llm_gateway import GatewayLLMService
+
+    gw = MagicMock()
+    gw._get_routing.return_value = ("anthropic", "claude-haiku-4-5-20251001", 1024)
+    agent = TriageAgent(llm=GatewayLLMService(gw, "triage"))
+    payload = {"decision": "noise", "severity": "P3", "blast_radius": "none",
+               "occurrences_24h": 1, "duplicate_pr": None, "reasoning": "known noise"}
+    with patch("app.services.llm.LLMService.complete_structured", new=AsyncMock(return_value=payload)):
+        result = asyncio.run(agent._submit_triage("prompt"))
+    assert result.decision == "noise" and "defaulting" not in result.reasoning

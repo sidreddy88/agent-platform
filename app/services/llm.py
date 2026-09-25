@@ -237,6 +237,13 @@ class LLMService:
             self.last_output_tokens = (
                 response.usage.output_tokens if response.usage else 0
             )
+            if response.usage:
+                from app.services import cost_meter
+                cost_meter.record(
+                    self._model, response.usage.input_tokens, response.usage.output_tokens,
+                    getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                    getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                )
             tool_use = next((b for b in response.content if b.type == "tool_use"), None)
             if tool_use is None:
                 # Only reachable via a truncated response (stop_reason ==
