@@ -52,6 +52,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HISTORY = ROOT / "app" / "evals" / "diagnosis_gate_history.json"
 SAMPLE = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"
+# Every other xarray/sphinx instance in the full 500-instance SWE-bench Verified
+# (not in SAMPLE). Held-out-repo cases only, so the file stays small; they
+# grow held-out from 21 to 66 cases, since held-out can only grow within
+# its own repos.
+HELDOUT_EXTRA = ROOT / "app" / "evals" / "swebench_heldout_extra.jsonl"
 SPLIT = ROOT / "app" / "evals" / "harness_split.json"
 
 HELDOUT_REPOS = ("pydata/xarray", "sphinx-doc/sphinx")
@@ -70,7 +75,8 @@ def _agent_attempts(case: dict) -> list[str]:
     return [v for attempts in case["attempts"].values() for v in attempts if v not in NOT_AGENT]
 
 
-def build(history: dict, sample: list[dict] | None = None) -> dict:
+def build(history: dict, sample: list[dict] | None = None,
+          heldout_extra: list[dict] | None = None) -> dict:
     """`sample`: the 100-instance SWE-bench Verified sample. Its cases outside
     the 56-case gate set failed the original baseline (that's how the gate
     set was chosen), so they're the "hard" tier: added 2026-09-25, when round
@@ -90,7 +96,16 @@ def build(history: dict, sample: list[dict] | None = None) -> dict:
         stats[inst["instance_id"]] = {"repo": inst["repo"], "agent_attempts": 1, "fails": 1,
                                       "cost_usd_run4": None, "source": "baseline_100_fail"}
 
-    usable = {cid for cid in stats if cid not in EXCLUDE}
+    extended = sorted(i["instance_id"] for i in heldout_extra or [] if i["instance_id"] not in stats)
+    for inst in heldout_extra or []:
+        if inst["instance_id"] in extended:
+            if inst["repo"] not in HELDOUT_REPOS:
+                raise ValueError(f"{inst['instance_id']}: heldout_extra must only hold held-out repos")
+            stats[inst["instance_id"]] = {"repo": inst["repo"], "agent_attempts": 0, "fails": 0,
+                                          "cost_usd_run4": None, "source": "full500_unmeasured"}
+    extended_set = set(extended)
+
+    usable = {cid for cid in stats if cid not in EXCLUDE and cid not in extended_set}
     heldout = sorted(cid for cid in usable if stats[cid]["repo"] in HELDOUT_REPOS)
     evolve_pool = sorted(cid for cid in usable if stats[cid]["repo"] not in HELDOUT_REPOS)
     hard_set = set(hard)
@@ -121,6 +136,8 @@ def build(history: dict, sample: list[dict] | None = None) -> dict:
             "failing": sorted(c for c in heldout if stats[c]["fails"] > 0 and c not in hard_set),
             "stable": sorted(c for c in heldout if stats[c]["fails"] == 0),
             "hard": sorted(c for c in heldout if c in hard_set),
+            # Never run by anything yet: no pass/fail history on any model.
+            "extended": extended,
         },
         "ood": {"source": "app/evals/diagnosis_regression.jsonl", "count": 6,
                 "note": "real production incidents; gitignored, run locally"},
@@ -140,7 +157,8 @@ def main() -> int:
                         help="exit 1 if the committed split differs from a fresh build")
     args = parser.parse_args()
     sample = [json.loads(line) for line in SAMPLE.read_text().splitlines() if line.strip()]
-    split = build(json.loads(HISTORY.read_text()), sample)
+    extra = [json.loads(line) for line in HELDOUT_EXTRA.read_text().splitlines() if line.strip()]
+    split = build(json.loads(HISTORY.read_text()), sample, extra)
     rendered = json.dumps(split, indent=1) + "\n"
     if args.check:
         if not SPLIT.exists() or SPLIT.read_text() != rendered:
@@ -152,7 +170,8 @@ def main() -> int:
     e, h = split["evolve"], split["heldout"]
     print(f"evolve: {len(e['failing'])} failing + {len(e['guards'])} guards + {len(e['hard'])} hard "
           f"(~${split['estimated_cost_usd_uncached']['evolve_eval_k1']} per k=1 eval, uncached)")
-    print(f"heldout: {len(h['failing'])} failing + {len(h['stable'])} stable + {len(h['hard'])} hard from {HELDOUT_REPOS} "
+    print(f"heldout: {len(h['failing'])} failing + {len(h['stable'])} stable + {len(h['hard'])} hard "
+          f"+ {len(h['extended'])} extended from {HELDOUT_REPOS} "
           f"(~${split['estimated_cost_usd_uncached']['heldout_eval_k1']} per k=1 eval, uncached)")
     print(f"ood: {split['ood']['count']} production incidents | reserve: {len(split['reserve'])} "
           f"| excluded: {len(split['excluded'])}")

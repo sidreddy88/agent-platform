@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 # The 100-instance sample: a superset of the 56-case gate set that also has
 # the cases that failed the original baseline (the split's "hard" tier).
 SWEBENCH_CASES = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"
+# The rest of the held-out repos' instances from the full 500 (held-out only).
+HELDOUT_EXTRA = ROOT / "app" / "evals" / "swebench_heldout_extra.jsonl"
 
 
 class ProviderFailure(RuntimeError):
@@ -62,9 +64,14 @@ def _is_escalation(verdict: str, detail: str) -> bool:
 
 
 class ReplayEvaluator:
-    def __init__(self, cases_path: Path = SWEBENCH_CASES):
-        self._instances = {json.loads(line)["instance_id"]: json.loads(line)
-                           for line in cases_path.read_text().splitlines() if line.strip()}
+    def __init__(self, cases_paths: tuple[Path, ...] = (SWEBENCH_CASES, HELDOUT_EXTRA)):
+        self._instances = {}
+        for path in cases_paths:
+            if path.exists():
+                for line in path.read_text().splitlines():
+                    if line.strip():
+                        inst = json.loads(line)
+                        self._instances[inst["instance_id"]] = inst
 
     async def evaluate(self, harness_dir: Path, case_ids: list[str], trials: int) -> EvalOutcome:
         from app.services import cost_meter

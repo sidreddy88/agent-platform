@@ -38,17 +38,25 @@ CASES = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"   # every spli
 DEFAULT_LLM = "claude-opus-5"
 
 
-def critic_patterns(split: dict, cases_path: Path = CASES) -> list[tuple[str, str]]:
+HELDOUT_EXTRA = ROOT / "app" / "evals" / "swebench_heldout_extra.jsonl"
+
+
+def critic_patterns(split: dict, cases_paths: tuple[Path, ...] = (CASES, HELDOUT_EXTRA)) -> list[tuple[str, str]]:
     from app.harness_optimizer.critic import domain_patterns
     from scripts.eval_swebench_diagnosis import _touched_files
 
     ids = sorted(split["case_stats"])
     repos = sorted({s["repo"] for s in split["case_stats"].values()})
     paths: set[str] = set()
-    for line in cases_path.read_text().splitlines():
-        inst = json.loads(line)
-        if inst["instance_id"] in split["case_stats"]:
-            paths |= _touched_files(inst["patch"])
+    for cases_path in cases_paths:
+        if not cases_path.exists():
+            continue
+        for line in cases_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            inst = json.loads(line)
+            if inst["instance_id"] in split["case_stats"]:
+                paths |= _touched_files(inst["patch"])
     return domain_patterns(ids, repos, sorted(paths))
 
 

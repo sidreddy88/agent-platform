@@ -12,24 +12,25 @@ def _all(split):
     e, h = split["evolve"], split["heldout"]
     return {
         "evolve": set(e["failing"]) | set(e["guards"]) | set(e["hard"]),
-        "heldout": set(h["failing"]) | set(h["stable"]) | set(h["hard"]),
+        "heldout": set(h["failing"]) | set(h["stable"]) | set(h["hard"]) | set(h["extended"]),
         "reserve": set(split["reserve"]),
         "excluded": set(split["excluded"]),
     }
 
 
 SAMPLE = [json.loads(line) for line in b.SAMPLE.read_text().splitlines() if line.strip()]
+EXTRA = [json.loads(line) for line in b.HELDOUT_EXTRA.read_text().splitlines() if line.strip()]
 
 
 def test_committed_split_matches_the_builder():
-    assert b.build(HISTORY, SAMPLE) == SPLIT
+    assert b.build(HISTORY, SAMPLE, EXTRA) == SPLIT
 
 
 def test_sets_are_disjoint_and_cover_every_gate_case():
     s = _all(SPLIT)
     union = set().union(*s.values())
     assert sum(len(v) for v in s.values()) == len(union)
-    assert union == {inst["instance_id"] for inst in SAMPLE}      # all 100 sample cases
+    assert union == {inst["instance_id"] for inst in SAMPLE + EXTRA}   # 100 sample + 45 held-out extras
 
 
 def test_heldout_repos_never_appear_in_evolve():
@@ -67,3 +68,10 @@ def test_guards_never_failed_and_come_from_distinct_repos():
 def test_billing_and_harness_hangs_are_not_counted_as_agent_failures():
     case = {"attempts": {"r": ["BILLING", "TIMEOUT", "INFRA", "PASS"]}}
     assert b._agent_attempts(case) == ["PASS"]
+
+
+def test_extended_heldout_is_only_held_out_repos_and_never_evolve():
+    ext = set(SPLIT["heldout"]["extended"])
+    assert len(ext) == 45
+    assert {SPLIT["case_stats"][c]["repo"] for c in ext} <= set(SPLIT["heldout_repos"])
+    assert not ext & (set(SPLIT["evolve"]["failing"]) | set(SPLIT["evolve"]["hard"]) | set(SPLIT["evolve"]["guards"]))

@@ -90,6 +90,53 @@
    "sphinx-doc__sphinx-10614",
    "sphinx-doc__sphinx-11510",
    "sphinx-doc__sphinx-7440"
+  ],
+  "extended": [
+   "pydata__xarray-4695",
+   "pydata__xarray-4966",
+   "pydata__xarray-6461",
+   "pydata__xarray-6599",
+   "pydata__xarray-6721",
+   "pydata__xarray-6744",
+   "pydata__xarray-6938",
+   "pydata__xarray-6992",
+   "pydata__xarray-7229",
+   "pydata__xarray-7233",
+   "pydata__xarray-7393",
+   "sphinx-doc__sphinx-7462",
+   "sphinx-doc__sphinx-7590",
+   "sphinx-doc__sphinx-7748",
+   "sphinx-doc__sphinx-7757",
+   "sphinx-doc__sphinx-7889",
+   "sphinx-doc__sphinx-7910",
+   "sphinx-doc__sphinx-7985",
+   "sphinx-doc__sphinx-8035",
+   "sphinx-doc__sphinx-8056",
+   "sphinx-doc__sphinx-8120",
+   "sphinx-doc__sphinx-8265",
+   "sphinx-doc__sphinx-8269",
+   "sphinx-doc__sphinx-8459",
+   "sphinx-doc__sphinx-8475",
+   "sphinx-doc__sphinx-8548",
+   "sphinx-doc__sphinx-8551",
+   "sphinx-doc__sphinx-8593",
+   "sphinx-doc__sphinx-8595",
+   "sphinx-doc__sphinx-8621",
+   "sphinx-doc__sphinx-8638",
+   "sphinx-doc__sphinx-8721",
+   "sphinx-doc__sphinx-9229",
+   "sphinx-doc__sphinx-9230",
+   "sphinx-doc__sphinx-9258",
+   "sphinx-doc__sphinx-9281",
+   "sphinx-doc__sphinx-9320",
+   "sphinx-doc__sphinx-9367",
+   "sphinx-doc__sphinx-9461",
+   "sphinx-doc__sphinx-9591",
+   "sphinx-doc__sphinx-9602",
+   "sphinx-doc__sphinx-9658",
+   "sphinx-doc__sphinx-9673",
+   "sphinx-doc__sphinx-9698",
+   "sphinx-doc__sphinx-9711"
   ]
  },
  "ood": {
@@ -484,6 +531,83 @@
    "cost_usd_run4": 2.652492,
    "source": "gate_history"
   },
+  "pydata__xarray-4695": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-4966": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-6461": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-6599": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-6721": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-6744": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-6938": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-6992": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-7229": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-7233": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "pydata__xarray-7393": {
+   "repo": "pydata/xarray",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
   "pylint-dev__pylint-4551": {
    "repo": "pylint-dev/pylint",
    "agent_attempts": 2,
@@ -763,6 +887,244 @@
    "fails": 0,
    "cost_usd_run4": 2.223888,
    "source": "gate_history"
+  },
+  "sphinx-doc__sphinx-7462": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-7590": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-7748": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-7757": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-7889": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-7910": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-7985": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8035": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8056": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8120": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8265": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8269": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8459": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8475": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8548": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8551": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8593": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8595": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8621": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8638": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-8721": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9229": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9230": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9258": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9281": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9320": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9367": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9461": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9591": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9602": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9658": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9673": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9698": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
+  },
+  "sphinx-doc__sphinx-9711": {
+   "repo": "sphinx-doc/sphinx",
+   "agent_attempts": 0,
+   "fails": 0,
+   "cost_usd_run4": null,
+   "source": "full500_unmeasured"
   },
   "sympy__sympy-12096": {
    "repo": "sympy/sympy",
