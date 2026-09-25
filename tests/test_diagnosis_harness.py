@@ -89,6 +89,8 @@ def test_dockerignore_does_not_drop_harness_files():
     patterns = [ln.strip() for ln in (root / ".dockerignore").read_text().splitlines()
                 if ln.strip() and not ln.strip().startswith(("#", "!"))]
     for f in (DEFAULT_ROOT / "diagnosis").iterdir():
+        if f.name == "README.md":        # documentation, never loaded; fine to drop
+            continue
         rel = f.relative_to(root).as_posix()
         hits = [p for p in patterns if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(f.name, p)
                 or rel.startswith(p.rstrip("/") + "/")]

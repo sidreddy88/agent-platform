@@ -229,12 +229,14 @@ def _capture_llm_calls(agent: Any, meter: Any, calls: list[dict]) -> None:
 async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = False,
                       steps_sink: list[dict] | None = None,
                       steps_max_chars: int = 20000,
-                      trajectory_sink: list[dict] | None = None) -> dict[str, Any]:
+                      trajectory_sink: list[dict] | None = None,
+                      harness_dir: str | None = None) -> dict[str, Any]:
     """trajectory_sink, if given, receives one record for this replay: every
     ReAct request's prompt composition and measured usage, the tool calls
     with their (capped) observations, and the replay's total cost. That's the
     input for scripts/analyze_cost_by_source.py and for the harness optimizer's
-    reflection step."""
+    reflection step. harness_dir runs DiagnosisAgent on a candidate harness
+    directory instead of the default (app/agents/harness/diagnosis/)."""
     from app.agents.diagnosis import DiagnosisAgent
     from app.models.events import ErrorEvent, EventSource, IncidentState
     from app.services.repo import LocalRepoService
@@ -277,7 +279,8 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
             instance["instance_id"], str(pinned_repo.local_path)
         )
 
-    agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=rag)
+    agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=rag,
+                           harness_dir=harness_dir)
     # DiagnosisAgent.__init__ hardcodes LLMService() -- Sonnet from
     # config/llm_routing.json's "defaults" section -- and has no llm= override,
     # so without this line "routing.diagnosis.model" (the per-task override,
