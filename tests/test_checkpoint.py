@@ -273,7 +273,7 @@ class TestBaseAgentCheckpointIntegration:
 
         call_count = 0
 
-        async def _fake_complete(messages, system=None, tracing_ctx=None):
+        async def _fake_complete(messages, system=None, tracing_ctx=None, **_kw):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -314,7 +314,7 @@ class TestBaseAgentCheckpointIntegration:
         cp.compress = _fake_compress
 
         # After first call, pretend tokens are above threshold
-        async def _complete_with_tokens(messages, system=None, tracing_ctx=None):
+        async def _complete_with_tokens(messages, system=None, tracing_ctx=None, **_kw):
             result = await _fake_complete(messages, system, tracing_ctx)
             mock_llm.last_input_tokens = 600  # above 500 limit
             return result
@@ -333,7 +333,7 @@ class TestBaseAgentCheckpointIntegration:
         from app.agents.base import BaseAgent
         from app.services.checkpoint import ContextCheckpointer
 
-        async def _fake_complete(messages, system=None, tracing_ctx=None):
+        async def _fake_complete(messages, system=None, tracing_ctx=None, **_kw):
             return "Thought: done\nAnswer: finished"
 
         agent = BaseAgent.__new__(BaseAgent)
