@@ -72,6 +72,9 @@ class _ProviderError(Exception):
 
 @pytest.mark.parametrize("exc,kind", [
     (_ProviderError(400, "Your credit balance is too low to access the Anthropic API."), "billing"),
+    (_ProviderError(None, "Together_aiException - Credit limit exceeded, please add credits"), "billing"),
+    (_ProviderError(500, "APIError: Together_aiException - Credit limit exceeded"), "billing"),
+    (_ProviderError(402, "payment required"), "billing"),
     (_ProviderError(401, "invalid x-api-key"), "auth"),
     (_ProviderError(429, "rate_limit_error"), "rate_limit"),
     (_ProviderError(529, "overloaded_error"), "provider_outage"),

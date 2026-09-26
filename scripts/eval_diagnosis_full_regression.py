@@ -90,9 +90,13 @@ def _provider_failure(exc: BaseException) -> str | None:
     types for the same HTTP status.
     """
     status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
     if status == 401:
         return "auth"
-    if status == 400 and "credit balance" in str(exc).lower():
+    # Anthropic: 400 "credit balance is too low". Together AI: "Credit limit
+    # exceeded", raised as a generic APIError, which the open-model scout
+    # scored as 17 ordinary replay errors, a model "passing 0%" on a billing stop.
+    if status == 402 or (status in (400, None) and "credit balance" in text) or "credit limit exceeded" in text:
         return "billing"
     if status == 429:
         return "rate_limit"
