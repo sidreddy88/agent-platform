@@ -105,3 +105,13 @@ async def test_gateway_records_uncached_input_separately():
             await gw.complete([{"role": "user", "content": "hi"}], "diagnosis")
     # LiteLLM's prompt_tokens includes reads AND writes (verified live)
     assert m.summary()["tokens"] == {"input": 200, "output": 10, "cache_write": 100, "cache_read": 700}
+
+
+def test_nested_meters_both_record_and_inner_is_scoped():
+    with cost_meter.metered() as outer:
+        cost_meter.record("claude-sonnet-4-6", 1, 1)
+        with cost_meter.metered() as inner:
+            cost_meter.record("claude-sonnet-4-6", 2, 2)
+        cost_meter.record("claude-sonnet-4-6", 3, 3)
+    assert [c["input"] for c in outer.call_log] == [1, 2, 3]
+    assert [c["input"] for c in inner.call_log] == [2]

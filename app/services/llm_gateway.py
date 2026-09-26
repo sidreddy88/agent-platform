@@ -82,11 +82,11 @@ class LiteLLMProvider(BaseProvider):
         if system:
             msgs = [{"role": "system", "content": system}] + msgs
 
-        response = await litellm.acompletion(
+        response = await _with_transient_retries(lambda: litellm.acompletion(
             model=model,
             messages=msgs,
             max_tokens=max_tokens,
-        )
+        ))
         usage = response.usage
         provider = _infer_provider(model)
 
@@ -134,6 +134,45 @@ def _mark_for_cache(system: str | list | None, messages: list[dict]) -> tuple:
         blocks[-1]["cache_control"] = {"type": "ephemeral"}
         last["content"] = blocks
     return system, messages[:-1] + [last]
+
+
+_TRANSIENT_RETRIES = 3
+_TRANSIENT_BASE_DELAY = 1.0
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Worth retrying: rate limits, 5xx/overloaded, timeouts, dropped connections.
+    Not auth, billing or bad requests (4xx other than 429), which fail the same
+    way every time."""
+    import litellm
+
+    if isinstance(exc, (litellm.RateLimitError, litellm.Timeout, litellm.APIConnectionError,
+                        litellm.ServiceUnavailableError, litellm.InternalServerError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and (status == 429 or status >= 500)
+
+
+async def _with_transient_retries(call):
+    """The gateway path had no retries at all, unlike LLMService's
+    _retry_with_backoff: one transient failure (an SSL "bad record mac" on
+    2026-09-25, mid-eval) failed the whole diagnosis. Production agents run on
+    this path. Up to 3 retries with exponential backoff and jitter; anything
+    non-transient is raised immediately."""
+    import asyncio
+    import random
+
+    for attempt in range(_TRANSIENT_RETRIES + 1):
+        try:
+            return await call()
+        except Exception as exc:
+            if attempt == _TRANSIENT_RETRIES or not _is_transient(exc):
+                raise
+            delay = _TRANSIENT_BASE_DELAY * (2 ** attempt)
+            delay += random.uniform(0, delay / 2)
+            logger.warning("[gateway] transient error on attempt %d/%d: %s; retrying in %.1fs",
+                           attempt + 1, _TRANSIENT_RETRIES + 1, exc, delay)
+            await asyncio.sleep(delay)
 
 
 def _infer_provider(model: str) -> str:
@@ -225,13 +264,13 @@ class GatewayLLMService:
         if system:
             msgs = [{"role": "system", "content": system}] + msgs
 
-        response = await litellm.acompletion(
+        response = await _with_transient_retries(lambda: litellm.acompletion(
             model=model,
             messages=msgs,  # type: ignore[arg-type]
             tools=litellm_tools,
             tool_choice="auto",
             max_tokens=max_tokens,
-        )
+        ))
 
         choice = response.choices[0]
         message = choice.message

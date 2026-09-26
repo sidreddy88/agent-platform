@@ -64,7 +64,7 @@ def _make_agent(search_code_side_effect, local_repo=None):
 
 @pytest.mark.asyncio
 async def test_submission_passes_when_function_exists():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "routes/services/image.js", "fragment": "function realFn() {}"}]
 
     agent = _make_agent(found)
@@ -81,7 +81,7 @@ async def test_submission_passes_when_function_exists():
 @pytest.mark.asyncio
 async def test_submission_rejects_fabricated_function():
     """Reproduces the processAndStoreImage failure: name doesn't exist → rejected."""
-    async def not_found(owner, repo, query):
+    async def not_found(owner, repo, query, **_kw):
         return []
 
     agent = _make_agent(not_found)
@@ -99,7 +99,7 @@ async def test_submission_rejects_fabricated_function():
 
 @pytest.mark.asyncio
 async def test_submission_rejects_fabricated_secondary_function():
-    async def selective(owner, repo, query):
+    async def selective(owner, repo, query, **_kw):
         if "primaryFn" in query:
             return [{"path": "a.js", "fragment": "primaryFn()"}]
         return []
@@ -120,7 +120,7 @@ async def test_submission_rejects_fabricated_secondary_function():
 @pytest.mark.asyncio
 async def test_submission_passes_when_no_function_named():
     """Low-confidence diagnosis with no function named has nothing to check here."""
-    async def never_called(owner, repo, query):  # pragma: no cover
+    async def never_called(owner, repo, query, **_kw):  # pragma: no cover
         raise AssertionError("search_code should not be called when no function is named")
 
     agent = _make_agent(never_called)
@@ -148,7 +148,7 @@ async def test_confidence_threshold_constant():
 
 @pytest.mark.asyncio
 async def test_submission_rejects_additional_fix_when_snippet_not_grounded():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     local_repo = MagicMock(ready=True)
@@ -180,7 +180,7 @@ async def test_submission_rejects_additional_fix_when_snippet_not_grounded():
 
 @pytest.mark.asyncio
 async def test_submission_passes_when_additional_fix_snippet_grounded():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     vulnerable_snippet = (
@@ -190,6 +190,7 @@ async def test_submission_passes_when_additional_fix_snippet_grounded():
         "});"
     )
     local_repo = MagicMock(ready=True)
+    local_repo.list_files.return_value = ['a.js', 'routes/api/brandBInterviewUsers.js']  # local-first symbol lookup scans these
     local_repo.read_file.side_effect = lambda p: (
         "function primaryFn() {}" if p == "a.js" else vulnerable_snippet
     )
@@ -211,7 +212,7 @@ async def test_submission_passes_when_additional_fix_snippet_grounded():
 @pytest.mark.asyncio
 async def test_submission_passes_when_cannot_verify_at_all():
     """Fail-open when _local_repo isn't ready — same policy as every check."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     agent = _make_agent(found)  # default local_repo: ready=False, fails open
@@ -233,7 +234,7 @@ async def test_submission_rejects_additional_fix_when_snippet_omitted_but_verifi
     which skipped verification completely and let an unverified "confirmed
     still-vulnerable" claim through. A missing snippet is no more trustworthy
     than a wrong one when we CAN verify."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     local_repo = MagicMock(ready=True)
@@ -258,7 +259,7 @@ async def test_submission_rejects_prose_naming_file_with_no_structured_backing()
     commit followed), but additional_fix prose still asserted specific files were
     'confirmed still-vulnerable' with nothing backing it — displayed verbatim on the
     incident dashboard as if it were checked."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     local_repo = MagicMock(ready=True)
@@ -283,10 +284,12 @@ async def test_submission_rejects_prose_naming_file_with_no_structured_backing()
 async def test_submission_passes_prose_without_file_mentions():
     """Prose that doesn't name a specific file (e.g. a pure conceptual description)
     isn't penalized — the check is specifically for unverifiable per-file claims."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     local_repo = MagicMock(ready=True)
+
+    local_repo.list_files.return_value = ['a.js']  # local-first symbol lookup scans these
     local_repo.read_file.return_value = "function primaryFn() {}"
     agent = _make_agent(found, local_repo=local_repo)
     data = {
@@ -312,12 +315,13 @@ async def test_submission_passes_prose_without_file_mentions():
 
 @pytest.mark.asyncio
 async def test_submission_passes_when_targets_grounded():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     vulnerable_snippet = "Model.find({ previewCode: id }).then(users => res.json(users));"
     sibling_content = f"router.get('/getPreviewUser/:id', (req, res) => {{ {vulnerable_snippet} }});"
     local_repo = MagicMock(ready=True)
+    local_repo.list_files.return_value = ['a.js', 'routes/api/brandBInterviewUsers.js', 'routes/api/inspiringInterviewUsers.js']  # local-first symbol lookup scans these
     local_repo.read_file.side_effect = lambda p: (
         "function primaryFn() {}" if p == "a.js" else sibling_content
     )
@@ -341,7 +345,7 @@ async def test_submission_passes_when_targets_grounded():
 async def test_submission_rejects_targets_without_grounded_snippet():
     """Real production bug: 1 of 3 named sibling files was already fixed (wrong
     claim) — each entry must be checked independently, not accepted as a batch."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     already_fixed_content = "if (!/^\\d+$/.test(id)) { return res.status(400).json({}); } Model.find({ previewCode: Number(id) })"
@@ -369,7 +373,7 @@ async def test_submission_rejects_targets_without_grounded_snippet():
 async def test_submission_rejects_targets_with_no_snippet_at_all():
     """Omitting the snippet is not a way around verification — same policy as
     additional_fix_file."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     local_repo = MagicMock(ready=True)
@@ -391,7 +395,7 @@ async def test_submission_rejects_targets_with_no_snippet_at_all():
 @pytest.mark.asyncio
 async def test_submission_passes_targets_when_cannot_verify_at_all():
     """Fail-open when _local_repo isn't ready — same policy as every other check."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     agent = _make_agent(found)  # default: ready=False
@@ -412,11 +416,12 @@ async def test_submission_passes_targets_when_cannot_verify_at_all():
 async def test_submission_passes_prose_when_targets_grounded():
     """additional_fix_file is None, but additional_fix_targets is genuinely
     grounded — the prose-mention check must not fire in this case."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     vulnerable_snippet = "Model.find({ previewCode: id })"
     local_repo = MagicMock(ready=True)
+    local_repo.list_files.return_value = ['a.js', 'models/MasterInspiring.js', 'routes/api/brandBInterviewUsers.js']  # local-first symbol lookup scans these
     local_repo.read_file.side_effect = lambda p: (
         "function primaryFn() {}" if p == "a.js" else vulnerable_snippet
     )
@@ -450,7 +455,7 @@ async def test_submission_passes_prose_when_targets_grounded():
 
 @pytest.mark.asyncio
 async def test_submission_passes_when_root_cause_snippet_grounded():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return []
 
     real_snippet = "errors: { type: Array },"
@@ -475,7 +480,7 @@ async def test_submission_passes_when_root_cause_snippet_grounded():
 @pytest.mark.asyncio
 async def test_submission_rejects_fabricated_root_cause_snippet():
     """The actual real-world bug: a snippet that matches nothing in the real file."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return []
 
     local_repo = MagicMock(ready=True)
@@ -500,7 +505,7 @@ async def test_submission_rejects_fabricated_root_cause_snippet():
 @pytest.mark.asyncio
 async def test_submission_rejects_root_cause_snippet_omitted_but_verifiable():
     """Omitting the snippet is not a way around verification."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return []
 
     local_repo = MagicMock(ready=True)
@@ -520,7 +525,7 @@ async def test_submission_rejects_root_cause_snippet_omitted_but_verifiable():
 @pytest.mark.asyncio
 async def test_submission_passes_when_cannot_verify_affected_file_at_all():
     """Fail-open when _local_repo isn't ready — same policy as every other check."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return []
 
     agent = _make_agent(found)  # default: ready=False
@@ -541,7 +546,7 @@ async def test_submission_rejects_function_not_paired_with_file():
     claimed a real symbol (found via search_code — just in a different file) was
     defined in a real file — just without that symbol. Both individual checks
     passed; the pairing was never verified."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "some/other/file.js", "fragment": "REFERRAL_MODEL_MAP"}]
 
     local_repo = MagicMock(ready=True)
@@ -561,7 +566,7 @@ async def test_submission_rejects_function_not_paired_with_file():
 
 @pytest.mark.asyncio
 async def test_submission_rejects_nonexistent_affected_file():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
 
     local_repo = MagicMock(ready=True)
@@ -586,7 +591,7 @@ async def test_submission_rejects_nonexistent_affected_file():
 @pytest.mark.asyncio
 async def test_prose_scan_catches_fabricated_name_in_root_cause():
     """The callVisionAPI failure mode: structured fields look clean, prose lies."""
-    async def not_found(owner, repo, query):
+    async def not_found(owner, repo, query, **_kw):
         return []
 
     agent = _make_agent(not_found)
@@ -619,7 +624,7 @@ async def test_prose_scan_skips_verified_structured_names():
     """A name already verified in affected_function shouldn't be re-checked in prose."""
     calls = []
 
-    async def found_once(owner, repo, query):
+    async def found_once(owner, repo, query, **_kw):
         calls.append(query)
         return [{"path": "a.js", "fragment": "realFn()"}]
 
@@ -642,7 +647,7 @@ async def test_prose_scan_skips_verified_structured_names():
 @pytest.mark.asyncio
 async def test_prose_scan_skips_builtins():
     """toString, forEach, etc. should never be verified — they're stdlib noise."""
-    async def fail_if_called(owner, repo, query):  # pragma: no cover
+    async def fail_if_called(owner, repo, query, **_kw):  # pragma: no cover
         raise AssertionError(f"should not query for builtin: {query}")
 
     agent = _make_agent(fail_if_called)
@@ -683,7 +688,7 @@ async def test_prose_scan_extraction_patterns():
 @pytest.mark.asyncio
 async def test_grounding_warns_when_blast_radius_empty_for_helper():
     """Empty blast_radius on a non-entry-point function adds an evidence note."""
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "src/x.js", "fragment": "function processOrder() {}"}]
 
     agent = _make_agent(found)
@@ -701,7 +706,7 @@ async def test_grounding_warns_when_blast_radius_empty_for_helper():
 
 @pytest.mark.asyncio
 async def test_grounding_skips_blast_radius_warning_for_entry_points():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "src/routes/api.js", "fragment": "function paymentHandler() {}"}]
 
     agent = _make_agent(found)
@@ -717,7 +722,7 @@ async def test_grounding_skips_blast_radius_warning_for_entry_points():
 
 @pytest.mark.asyncio
 async def test_grounding_skips_blast_radius_warning_when_evidence_explains():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "src/x.js", "fragment": "function processOrder() {}"}]
 
     agent = _make_agent(found)
@@ -734,7 +739,7 @@ async def test_grounding_skips_blast_radius_warning_when_evidence_explains():
 
 @pytest.mark.asyncio
 async def test_grounding_no_blast_radius_warning_when_callers_present():
-    async def found(owner, repo, query):
+    async def found(owner, repo, query, **_kw):
         return [{"path": "src/x.js", "fragment": "processOrder()"}]
 
     agent = _make_agent(found)

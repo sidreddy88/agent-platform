@@ -168,9 +168,75 @@ def _steps_records(instance_id: str, results: list[Any], max_chars: int) -> list
     return records
 
 
+def _message_text(message: dict) -> str:
+    content = message.get("content", "")
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return str(content)
+
+
+def _prompt_segments(messages: list[dict], system: Any, tool_desc_chars: int) -> list[list]:
+    """What one ReAct request is made of, in prompt order, as [label, chars].
+
+    Labels: tool_descriptions and system_instructions (the static prefix),
+    task_prompt (the first user message), assistant_history (every prior
+    model turn), observation:<tool> (each tool result, labelled by the action
+    in the assistant turn before it), and gate_feedback (a user turn that
+    follows an answer rather than an action, e.g. a grounding rejection).
+    Order matters: scripts/analyze_cost_by_source.py prices the prefix as
+    cache reads, then cache writes, then uncached input.
+    """
+    from app.agents.base import _parse
+
+    sys_text = system if isinstance(system, str) else "".join(
+        b.get("text", "") for b in (system or []) if isinstance(b, dict))
+    tools = min(tool_desc_chars, len(sys_text))
+    segments = [["tool_descriptions", tools], ["system_instructions", len(sys_text) - tools]]
+    prev_action = None
+    for i, m in enumerate(messages):
+        text = _message_text(m)
+        if m.get("role") == "assistant":
+            prev_action = _parse(text).get("action") or None
+            segments.append(["assistant_history", len(text)])
+        elif i == 0:
+            segments.append(["task_prompt", len(text)])
+        else:
+            segments.append([f"observation:{prev_action}" if prev_action else "gate_feedback", len(text)])
+    return segments
+
+
+def _capture_llm_calls(agent: Any, meter: Any, calls: list[dict]) -> None:
+    """Wrap agent._llm.complete so every ReAct request records what it sent
+    (prompt segments) next to what it cost (the meter entries it added).
+
+    Eval-only, like _capture_steps, and for the same reason: no base.py change.
+    """
+    llm = agent._llm
+    original = llm.complete
+    tool_desc_chars = sum(len(desc) for _, desc in agent._tools.values())
+
+    async def capturing(messages: list[dict], system: Any = None, *args: Any, **kwargs: Any) -> Any:
+        segments = _prompt_segments(messages, system, tool_desc_chars)
+        before = len(meter.call_log)
+        try:
+            return await original(messages, system, *args, **kwargs)
+        finally:
+            calls.append({"segments": segments, "usage": meter.call_log[before:]})
+
+    llm.complete = capturing
+
+
 async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = False,
                       steps_sink: list[dict] | None = None,
-                      steps_max_chars: int = 20000) -> dict[str, Any]:
+                      steps_max_chars: int = 20000,
+                      trajectory_sink: list[dict] | None = None,
+                      harness_dir: str | None = None) -> dict[str, Any]:
+    """trajectory_sink, if given, receives one record for this replay: every
+    ReAct request's prompt composition and measured usage, the tool calls
+    with their (capped) observations, and the replay's total cost. That's the
+    input for scripts/analyze_cost_by_source.py and for the harness optimizer's
+    reflection step. harness_dir runs DiagnosisAgent on a candidate harness
+    directory instead of the default (app/agents/harness/diagnosis/)."""
     from app.agents.diagnosis import DiagnosisAgent
     from app.models.events import ErrorEvent, EventSource, IncidentState
     from app.services.repo import LocalRepoService
@@ -213,7 +279,8 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
             instance["instance_id"], str(pinned_repo.local_path)
         )
 
-    agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=rag)
+    agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=rag,
+                           harness_dir=harness_dir)
     # DiagnosisAgent.__init__ hardcodes LLMService() -- Sonnet from
     # config/llm_routing.json's "defaults" section -- and has no llm= override,
     # so without this line "routing.diagnosis.model" (the per-task override,
@@ -226,15 +293,28 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
     from app.services.llm_gateway import llm_gateway
     agent._llm = llm_gateway.get_llm_service_for("diagnosis")
     captured: list[Any] = []
-    if steps_sink is not None:
+    if steps_sink is not None or trajectory_sink is not None:
         _capture_steps(agent, captured)
-    try:
-        result = await agent.diagnose(incident)
-    finally:
-        if steps_sink is not None:
-            steps_sink.extend(
-                _steps_records(instance["instance_id"], captured, steps_max_chars)
-            )
+    from app.services import cost_meter
+    llm_calls: list[dict] = []
+    with cost_meter.metered() as replay_meter:
+        if trajectory_sink is not None:
+            _capture_llm_calls(agent, replay_meter, llm_calls)
+        try:
+            result = await agent.diagnose(incident)
+        finally:
+            if steps_sink is not None:
+                steps_sink.extend(
+                    _steps_records(instance["instance_id"], captured, steps_max_chars)
+                )
+            if trajectory_sink is not None:
+                trajectory_sink.append({
+                    "instance_id": instance["instance_id"],
+                    "repo": instance["repo"],
+                    "llm_calls": llm_calls,
+                    "steps": _steps_records(instance["instance_id"], captured, steps_max_chars),
+                    "cost": replay_meter.summary(),
+                })
         await pinned_repo.remove_worktree()
         if rag is not None:
             # Throwaway collection -- one per instance would otherwise accumulate.

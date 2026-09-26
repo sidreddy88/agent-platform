@@ -45,8 +45,10 @@ import logging
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from app.agents.base import BaseAgent
+from app.agents.harness import Harness, load_harness
 from app.core.config import settings
 from app.models.events import IncidentState
 from app.services.aws import AWSError, AWSService
@@ -175,11 +177,17 @@ _MAX_PROSE_CANDIDATES = 8
 # Per-read cap on get_file_contents output, whole-file or ranged. The grounding
 # gate uses it too: when a snippet fails to match, whether the file is bigger
 # than one read decides what advice can actually work. See _snippet_problem().
-_FILE_READ_CHAR_LIMIT = 12000
+# The live value is the harness setting "file_read_char_limit" (an agent can
+# run a candidate harness with a different one); this is the default harness's
+# value, for callers with no agent at hand.
+_FILE_READ_CHAR_LIMIT = load_harness(
+    "diagnosis", Path(__file__).resolve().parent / "harness" / "diagnosis"
+).setting("file_read_char_limit")
 
 
-def _cap_lines(lines: list[str], first: int, total: int, file_path: str) -> str:
-    """Join lines (numbered from `first`) up to _FILE_READ_CHAR_LIMIT, cutting
+def _cap_lines(lines: list[str], first: int, total: int, file_path: str,
+               limit: int = _FILE_READ_CHAR_LIMIT) -> str:
+    """Join lines (numbered from `first`) up to `limit` chars, cutting
     only at a line boundary, and say exactly which lines were returned.
 
     The old notice said "only first 12000 chars shown" and suggested
@@ -190,7 +198,7 @@ def _cap_lines(lines: list[str], first: int, total: int, file_path: str) -> str:
     out: list[str] = []
     size = 0
     for line in lines:
-        if out and size + len(line) > _FILE_READ_CHAR_LIMIT:
+        if out and size + len(line) > limit:
             break
         out.append(line)
         size += len(line)
@@ -492,6 +500,21 @@ class DiagnosisAgent(BaseAgent):
             # proceed to Fix Generation Agent (Week 3)
     """
 
+    @property
+    def _harness(self) -> Harness:
+        """The loaded harness. Falls back to the default one when __init__ never
+        ran (tests build agents with DiagnosisAgent.__new__ and wire only what
+        they need), so every tool closure can rely on it."""
+        harness = self.__dict__.get("_harness_loaded")
+        if harness is None:
+            harness = self.__dict__["_harness_loaded"] = load_harness("diagnosis")
+        return harness
+
+    @_harness.setter
+    def _harness(self, value: Harness) -> None:
+        self.__dict__["_harness_loaded"] = value
+
+
     def __init__(
         self,
         aws: AWSService | None = None,
@@ -500,8 +523,15 @@ class DiagnosisAgent(BaseAgent):
         local_repo: LocalRepoService | None = None,
         owner: str | None = None,
         repo: str | None = None,
+        harness_dir: str | Path | None = None,
+        code_graph: CodeGraph | None = None,
     ) -> None:
         super().__init__(llm=LLMService())   # Sonnet — default model
+        # Prompt text, tool descriptions and settings live in a harness
+        # directory (app/agents/harness/diagnosis/ by default), not in string
+        # literals here: that directory is the harness optimizer's edit
+        # surface. harness_dir / HARNESS_DIR_DIAGNOSIS point at a candidate.
+        self._harness = load_harness("diagnosis", harness_dir)
         self._aws = aws or AWSService()
         self._rag = rag
         self._github = github or GitHubService()
@@ -518,6 +548,13 @@ class DiagnosisAgent(BaseAgent):
         # historical worktree instead of the live shared clone's current HEAD —
         # see LocalRepoService(pinned_sha=...).
         self._local_repo = local_repo or LocalRepoService(self._owner, self._repo)
+        # The call graph find_callers answers from. The module-level
+        # _code_graph is the TARGET APP's graph (loaded from the store at
+        # import); it is only right when diagnosing the target app. Every
+        # SWE-bench replay used to query it anyway, so find_callers searched
+        # a JS app's graph while diagnosing Python repos. None here means
+        # "resolve per repo in diagnose()" (_ensure_code_graph).
+        self._code_graph = code_graph
         self._register_tools()
         # Raised from BaseAgent's default of 10 -- a turn-by-turn trace + SWE-bench
         # spot checks found the correction-cycling phase (after the grounding gate
@@ -527,7 +564,7 @@ class DiagnosisAgent(BaseAgent):
         # the full 15; django-10554 still failed even at 15 -- its real fix spans
         # 2 files, a different problem more turns alone doesn't solve). Scoped to
         # this agent only: no evidence yet that any other agent needs more room.
-        self._max_iterations = 15
+        self._max_iterations = self._harness.setting("max_iterations")
         # A real production diagnosis once answered in a single LLM call
         # with zero tool calls, fabricating file/schema content it never
         # looked at (_enforce_grounding() catches some shapes of this
@@ -742,6 +779,7 @@ class DiagnosisAgent(BaseAgent):
                         content = None
                 if content is None:
                     content, _ = await github.get_file_contents(owner, repo, p)
+                read_limit = self._harness.setting("file_read_char_limit")
                 lines = content.splitlines(keepends=True)
                 total = len(lines)
                 if start_line is not None or end_line is not None:
@@ -750,16 +788,16 @@ class DiagnosisAgent(BaseAgent):
                     if first > last:
                         return (f"Invalid range {start_line}-{end_line} for {file_path} "
                                 f"({total} lines).")
-                    content = _cap_lines(lines[first - 1:last], first, total, file_path)
-                elif len(content) > _FILE_READ_CHAR_LIMIT:
-                    content = _cap_lines(lines, 1, total, file_path)
+                    content = _cap_lines(lines[first - 1:last], first, total, file_path, read_limit)
+                elif len(content) > read_limit:
+                    content = _cap_lines(lines, 1, total, file_path, read_limit)
                 self._retrieved_file_paths.add(p)
                 scan_for_injection(content, source=f"github-file:{file_path}")
                 return wrap_untrusted(content, source=f"github-file:{file_path}")
             except Exception as exc:
                 return f"Could not fetch {file_path}: {exc}"
 
-        async def _grep_codebase(pattern: str, file_glob: str = "*") -> str:
+        async def _grep_codebase(pattern: str, file_glob: str | None = None) -> str:
             """Exact-string search across every file in the local repo clone.
 
             Returns each matching line with its file path and line number.
@@ -776,6 +814,8 @@ class DiagnosisAgent(BaseAgent):
             if not local_repo.ready:
                 return "Local repo not available — use search_codebase instead."
             import fnmatch
+            file_glob = file_glob or self._harness.setting("grep_default_glob")
+            max_matches = self._harness.setting("grep_max_matches")
             matches: list[str] = []
             try:
                 for rel_path in sorted(local_repo.list_files()):
@@ -789,9 +829,9 @@ class DiagnosisAgent(BaseAgent):
                         if pattern in line:
                             matches.append(f"{rel_path}:{i}: {line.strip()[:120]}")
                             self._retrieved_file_paths.add(rel_path)
-                            if len(matches) >= 50:
+                            if len(matches) >= max_matches:
                                 break
-                    if len(matches) >= 50:
+                    if len(matches) >= max_matches:
                         break
             except Exception as exc:
                 return f"grep_codebase error: {exc}"
@@ -814,128 +854,109 @@ class DiagnosisAgent(BaseAgent):
             return "\n".join(lines)
 
         async def _verify_symbol_in_repo(symbol: str) -> str:
-            """Verify a function/symbol name actually exists in the target repo.
+            """Verify a function/symbol name actually exists in the repo being diagnosed.
 
-            Uses GitHub Code Search (authoritative for the default branch). Returns
-            matching file paths + matched fragments, or NOT_FOUND. Use this BEFORE
-            naming a function in affected_function / additional_fix_function so you
-            never invent a symbol that doesn't exist.
+            Checks the local checkout when one is ready (the pinned commit in a
+            replay, the live clone in production), falling back to GitHub Code
+            Search. It used to query GitHub only: default-branch-only, rate-limited,
+            and with an expired token it answered NOT_FOUND for 87 of 87 lookups in
+            one eval run (85 of them real symbols), each telling the agent to drop
+            the symbol and cap its confidence. A lookup that fails now says so;
+            only a lookup that ran and found nothing says NOT_FOUND.
             """
-            name = (symbol or "").strip()
-            if not name:
+            raw = (symbol or "").strip()
+            if not raw:
                 return "NOT_FOUND: empty symbol."
-            # Code Search supports bare-token queries. The trailing '(' nudges toward
-            # call/definition sites and away from prose mentions.
-            queries = [f'"{name}("', f'"{name}"']
-            for q in queries:
-                try:
-                    hits = await github.search_code(owner, repo, q)
-                except Exception as exc:
-                    return f"VERIFY_ERROR: {exc}"
+            name = self._bare_symbol(raw)
+            note = f" (checked the bare name '{name}' from '{raw}')" if name != raw else ""
+            if self._local_repo.ready:
+                hits = self._local_symbol_hits(name)
                 if hits:
-                    lines = [f"FOUND ({len(hits)} match(es)) for '{name}':"]
+                    lines = [f"FOUND ({len(hits)} match(es)) for '{name}' in this checkout{note}:"]
+                    for path, line, text in hits:
+                        lines.append(f"  - {path}:{line}  :: {text}")
+                        self._retrieved_file_paths.add(path)
+                    return "\n".join(lines)
+                return (
+                    f"NOT_FOUND: '{name}' is not defined, called or referenced anywhere in this "
+                    f"checkout of {owner}/{repo}{note}. Do not name it in affected_function or "
+                    f"additional_fix_function: set the field to null, lower confidence to ≤0.65, and "
+                    f"surface candidate file paths in evidence instead."
+                )
+            # No local checkout: GitHub Code Search (default branch only).
+            for q in (f'"{name}("', f'"{name}"'):
+                try:
+                    hits = await github.search_code(owner, repo, q, strict=True)
+                except Exception as exc:
+                    return (f"VERIFY_ERROR: the symbol lookup itself failed ({exc}); this says "
+                            f"nothing about whether '{name}' exists. Verify it by reading the file "
+                            f"with get_file_contents or grep_codebase instead.")
+                if hits:
+                    lines = [f"FOUND ({len(hits)} match(es)) for '{name}'{note}:"]
                     for h in hits[:5]:
                         frag = (h.get("fragment") or "").replace("\n", " ").strip()[:160]
                         lines.append(f"  - {h['path']}  :: {frag}")
                         self._retrieved_file_paths.add(h["path"])
                     return "\n".join(lines)
             return (
-                f"NOT_FOUND: '{name}' does not appear in repo {owner}/{repo} on the default branch. "
-                f"DO NOT name this symbol in affected_function or additional_fix_function. "
-                f"Set the function field to null, lower confidence to ≤0.65, and surface candidate "
-                f"file paths in evidence instead."
+                f"NOT_FOUND: '{name}' does not appear in repo {owner}/{repo} on the default branch{note}. "
+                f"Do not name it in affected_function or additional_fix_function: set the field to "
+                f"null, lower confidence to ≤0.65, and surface candidate file paths in evidence instead."
             )
 
         self.register_tool(
             "get_error_samples",
             _get_error_samples,
-            (
-                "Get recent error occurrences with full log messages. "
-                "Input: {log_group: string, pattern: string, minutes: int (default 60), limit: int (default 10)}"
-            ),
+            self._harness.tool_description("get_error_samples"),
         )
         self.register_tool(
             "check_still_occurring",
             _check_still_occurring,
-            (
-                "Check if the error is still happening in the last 10 minutes. "
-                "Use this for reproduction confirmation. "
-                "Input: {log_group: string, pattern: string}"
-            ),
+            self._harness.tool_description("check_still_occurring"),
         )
         self.register_tool(
             "get_occurrence_timeline",
             _get_occurrence_timeline,
-            (
-                "Get per-hour occurrence counts over the last N hours. "
-                "Tells you if the error is accelerating or stable. "
-                "Input: {log_group: string, pattern: string, hours: int (default 24)}"
-            ),
+            self._harness.tool_description("get_occurrence_timeline"),
         )
-        self.register_tool(
-            "search_codebase",
-            _search_codebase,
-            (
-                "Search the indexed codebase for code relevant to the incident. "
-                "Use specific terms from the stack trace (function names, file names) or "
-                "the operation that failed (e.g. 'insertMany appmasterreferrals', "
-                "'classifyFields OpenAI') — not just the raw error type. "
-                "Input: {query: string}"
-            ),
-        )
+        # Only offered when there is an index to search. Without one it can only
+        # answer "RAG not configured", and that has been every call in
+        # production (incident_loop constructs DiagnosisAgent() with no rag,
+        # since the agent was created) and in every eval replay. Offering it
+        # wasted turns, and would teach the harness optimizer to steer the
+        # agent away from a tool that does work wherever RAG exists. The task
+        # prompt gets retrieval_unavailable.prompt instead (see diagnose()).
+        if getattr(self, "_rag", None) is not None:
+            self.register_tool(
+                "search_codebase",
+                _search_codebase,
+                self._harness.tool_description("search_codebase"),
+            )
         self.register_tool(
             "get_file_contents",
             _get_file_contents,
-            (
-                "Fetch the source of a file from the target repository. "
-                "Use this after search_codebase identifies a candidate file — read the FULL file "
-                "to see every return statement and code path, not just RAG fragments. "
-                "If the file calls workers, helpers, or other modules relevant to the failure, "
-                "call this again on those files. Follow the code until you reach the failure site. "
-                "Large files are cut off; the notice says which lines you got. To read any other "
-                "part, pass start_line/end_line (1-based, inclusive) — grep_codebase gives the "
-                "line numbers to aim for. "
-                "Input: {file_path: string (e.g. 'constants/validationMain.js'), "
-                "start_line: int (optional), end_line: int (optional)}"
-            ),
+            self._harness.tool_description("get_file_contents"),
         )
         self.register_tool(
             "grep_codebase",
             _grep_codebase,
-            (
-                "Exact-string search across every file in the local repo clone. "
-                "Returns file paths and line numbers for every match. "
-                "Use this instead of search_codebase when you need to find WHERE a specific "
-                "string appears — e.g. 'mongoose.connect', 'require(\"mongoose\")', a function "
-                "call, or an import. search_codebase is semantic/fuzzy; grep_codebase is exact. "
-                "Input: {pattern: string, file_glob: string (optional, e.g. '*.py'; default '*', every file)}"
-            ),
+            self._harness.tool_description("grep_codebase"),
         )
         self.register_tool(
             "search_similar_incidents",
             _search_similar_incidents,
-            (
-                "Search the incident knowledge base for past incidents with similar symptoms. "
-                "Input: {symptoms: string (space-separated domain-specific keywords — "
-                "use operation names, error codes, and system components, not generic words like 'error' or 'null')}"
-            ),
+            self._harness.tool_description("search_similar_incidents"),
         )
         self.register_tool(
             "verify_symbol_in_repo",
             _verify_symbol_in_repo,
-            (
-                "Verify a function/symbol name actually exists in the target repo (GitHub Code "
-                "Search on the default branch). Returns matching file paths or NOT_FOUND. "
-                "MANDATORY: call this on every function name BEFORE writing it into "
-                "affected_function or additional_fix_function. If NOT_FOUND, the symbol does not "
-                "exist — do not name it; null the field and lower confidence. "
-                "Input: {symbol: string (e.g. 'processAndStoreImage')}"
-            ),
+            self._harness.tool_description("verify_symbol_in_repo"),
         )
 
         async def _find_callers(function_name: str) -> str:
             """Look up every caller of a function in the call graph index."""
-            callers = _code_graph.find_callers(function_name)
+            graph = getattr(self, "_code_graph", None) or _code_graph
+            callers = graph.find_callers(function_name)
             if not callers:
                 return (
                     f"No callers found for '{function_name}' in the call graph index. "
@@ -953,14 +974,7 @@ class DiagnosisAgent(BaseAgent):
         self.register_tool(
             "find_callers",
             _find_callers,
-            (
-                "Query the call graph index to find every function that calls the target function. "
-                "Returns file paths, caller function names, and line numbers. "
-                "Use this for blast radius analysis BEFORE deciding on a fix — it gives the complete "
-                "picture in one call, unlike search_codebase which only returns partial results. "
-                "If no results, fall back to search_codebase. "
-                "Input: {function_name: string (e.g. 'classifyFields')}"
-            ),
+            self._harness.tool_description("find_callers"),
         )
 
         async def _submit_diagnosis(**kwargs) -> str:
@@ -1022,24 +1036,7 @@ class DiagnosisAgent(BaseAgent):
         self.register_tool(
             "submit_diagnosis",
             _submit_diagnosis,
-            (
-                "Finalize your diagnosis. Every grounding-relevant field is checked before this "
-                "is accepted — root_cause_snippet must be verbatim from affected_file, every "
-                "additional_fix_targets entry needs its own real snippet, and any file named in "
-                "root_cause/additional_fix text must have a matching structured entry. A "
-                "rejection tells you exactly what's wrong — re-verify with your other tools and "
-                "call this again. This is the ONLY way to finalize; do not write the diagnosis "
-                "as JSON in your Answer. "
-                "Input: {root_cause: string, confidence: float, evidence: [string], "
-                "fix_approach: string, affected_function: string|null, affected_file: string|null, "
-                "root_cause_snippet: string|null, additional_fix: string|null, "
-                "additional_fix_function: string|null, additional_fix_file: string|null, "
-                "additional_fix_snippet: string|null, "
-                "additional_fix_targets: [{file, function, snippet}], "
-                "reproduction_confirmed: bool, blast_radius: [{file, function, snippet}], "
-                "contract_change: 'none'|'signature'|'return_type'|'side_effect', "
-                "contract_change_detail: string|null}"
-            ),
+            self._harness.tool_description("submit_diagnosis"),
         )
 
     async def _ensure_local_repo(self) -> bool:
@@ -1101,6 +1098,46 @@ class DiagnosisAgent(BaseAgent):
             return True  # too short to meaningfully verify — avoid false positives
         return skeleton in _snippet_skeleton(content)
 
+    @staticmethod
+    def _bare_symbol(symbol: str) -> str:
+        """'def foo(x)', 'class Foo(Bar)', 'Mod.Class.method' -> the bare identifier."""
+        name = (symbol or "").strip()
+        name = re.sub(r"^(?:async\s+)?(?:def|class|function)\s+", "", name)
+        name = name.split("(")[0].strip()
+        return name.rsplit(".", 1)[-1].strip()
+
+    def _local_symbol_hits(self, name: str, limit: int = 5) -> list[tuple[str, int, str]]:
+        """(path, line, text) where `name` is defined, called, quoted or assigned
+        in the local checkout, definitions first. The checkout is what's being
+        diagnosed: the pinned commit in a replay, the live clone in production."""
+        n = re.escape(name)
+        definition = re.compile(rf"\b(?:def|class|function)\s+{n}\b")
+        usage = re.compile(rf"\b{n}\s*\(|['\"]{n}['\"]|\b{n}\s*[:=][^=]")
+        defs: list[tuple[str, int, str]] = []
+        uses: list[tuple[str, int, str]] = []
+        for rel_path in sorted(self._local_repo.list_files()):
+            try:
+                content = self._local_repo.read_file(rel_path)
+            except Exception:
+                continue
+            if name not in content:
+                continue
+            for i, line in enumerate(content.splitlines(), 1):
+                if definition.search(line):
+                    defs.append((rel_path, i, line.strip()[:160]))
+                elif len(uses) < limit and usage.search(line):
+                    uses.append((rel_path, i, line.strip()[:160]))
+        # Source before tests: the definition to fix, not a test double of it.
+        def is_test(path: str) -> bool:
+            parts = path.lower().split("/")
+            name = parts[-1]
+            return (any(p in ("tests", "test", "testing") for p in parts[:-1])
+                    or name.startswith("test_") or name.endswith(("_test.py", ".test.js", ".spec.js"))
+                    or name == "conftest.py")
+        defs.sort(key=lambda h: is_test(h[0]))
+        uses.sort(key=lambda h: is_test(h[0]))
+        return (defs + uses)[:limit]
+
     async def _symbol_exists_in_repo(self, symbol: str) -> bool:
         """Check whether `symbol` appears in the target repo.
 
@@ -1121,26 +1158,26 @@ class DiagnosisAgent(BaseAgent):
         if not name:
             return False
 
-        if self._local_repo.pinned and self._local_repo.ready:
-            needles = (f"{name}(", f'"{name}"')
-            for rel_path in self._local_repo.list_files():
-                try:
-                    content = self._local_repo.read_file(rel_path)
-                except Exception:
-                    continue
-                if any(n in content for n in needles):
-                    return True
-            return False
+        # Local checkout first whenever one is ready, pinned or live: it is the
+        # code actually being diagnosed, and GitHub search is rate-limited and
+        # default-branch only. (This used to apply to pinned replays only, while
+        # the verify_symbol_in_repo tool never checked locally at all.)
+        if self._local_repo.ready:
+            return bool(self._local_symbol_hits(self._bare_symbol(name), limit=1))
 
+        errored = 0
         for q in (f'"{name}("', f'"{name}"'):
             try:
-                hits = await self._github.search_code(self._owner, self._repo, q)
-            except Exception:
-                # Treat transient lookup errors as "unknown" — fall through to next query.
+                hits = await self._github.search_code(self._owner, self._repo, q, strict=True)
+            except Exception as exc:
+                errored += 1
+                logger.warning("DiagnosisAgent: symbol lookup for %r failed: %s", name, exc)
                 continue
             if hits:
                 return True
-        return False
+        # Unknown is not "fabricated": if every lookup failed, don't let the
+        # grounding gate reject a symbol on the strength of an API error.
+        return errored == 2
 
     def _snippet_problem(
         self, field: str, file_path: str, symbol: str | None, snippet: str | None
@@ -1177,11 +1214,12 @@ class DiagnosisAgent(BaseAgent):
         except Exception:
             size = None
 
-        if size is not None and size > _FILE_READ_CHAR_LIMIT:
+        read_limit = self._harness.setting("file_read_char_limit")
+        if size is not None and size > read_limit:
             target = f"'{symbol}'" if symbol else "the relevant code"
             return (
                 f"{head}. NOTE: {file_path} is {size} chars and a plain get_file_contents "
-                f"call returns only the first {_FILE_READ_CHAR_LIMIT} — re-reading it the "
+                f"call returns only the first {read_limit} — re-reading it the "
                 f"same way returns the same partial content. Use grep_codebase to find the "
                 f"line number of {target}, then call get_file_contents with start_line/"
                 f"end_line around it and copy the snippet verbatim from that read. Do not "
@@ -1430,9 +1468,40 @@ class DiagnosisAgent(BaseAgent):
             ]
             result.escalate = True
 
+    def _is_target_repo(self) -> bool:
+        target = (settings.fix_target_repo or "").split("/", 1)
+        return len(target) == 2 and (self._owner, self._repo) == (target[0], target[1])
+
+    async def _ensure_code_graph(self) -> None:
+        """Make sure find_callers answers from THIS repo's call graph.
+
+        Target app: the stored graph (built by scripts/index_code_graph.py).
+        Any other repo (eval replays of SWE-bench, cross-repo tooling): build
+        from the local checkout, which for a pinned replay is the worktree at
+        the instance's base commit. Built once per agent, in a thread (parsing
+        a large repo takes seconds of CPU). With no checkout, an empty graph
+        rather than another repo's: "no callers" beats wrong callers.
+        """
+        if getattr(self, "_code_graph", None) is not None:
+            return
+        if self._is_target_repo():
+            self._code_graph = _code_graph
+            return
+        if self._local_repo.ready:
+            self._code_graph = await asyncio.to_thread(
+                CodeGraph.build_from_directory, str(self._local_repo.local_path))
+            logger.info("DiagnosisAgent: built call graph for %s/%s: %s",
+                        self._owner, self._repo, self._code_graph.stats())
+            return
+        logger.warning("DiagnosisAgent: no local checkout of %s/%s — find_callers has no "
+                       "call graph for it (not falling back to the target app's)",
+                       self._owner, self._repo)
+        self._code_graph = CodeGraph()
+
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
         await self._ensure_local_repo()
+        await self._ensure_code_graph()
         # Reset in case this agent instance is reused across diagnose() calls —
         # a stale value from a previous call must never leak into this one.
         self._diagnosis_submitted = None
@@ -1479,15 +1548,7 @@ class DiagnosisAgent(BaseAgent):
                 f"  - {p['file']}" + (f" (function: {p['function']})" if p["function"] else "")
                 for p in detected_paths
             ]
-            stack_trace_section = (
-                "\nSTACK TRACE FILE DETECTION (deterministic, extracted from the error text "
-                "and confirmed to exist in the repo — not a search result):\n"
-                + "\n".join(lines) + "\n"
-                "These are real, confirmed paths. In step 5, call get_file_contents on these "
-                "FIRST instead of search_codebase — do not spend a step searching for a file "
-                "you already have. Only fall back to search_codebase if none of these turn out "
-                "to contain the actual bug.\n"
-            )
+            stack_trace_section = self._harness.render("stack_trace", paths="\n".join(lines))
 
         # Steps 1-3 (get_error_samples, check_still_occurring, get_occurrence_timeline)
         # take arguments fully determined by the incident before the model ever sees a
@@ -1508,313 +1569,39 @@ class DiagnosisAgent(BaseAgent):
             error_samples = await get_error_samples_fn(log_group=log_group, pattern=pattern, minutes=120)
             still_occurring = await check_still_occurring_fn(log_group=log_group, pattern=pattern)
             occurrence_timeline = await get_occurrence_timeline_fn(log_group=log_group, pattern=pattern, hours=24)
-            log_group_warning = f"""
-STEPS 1-3 — LOG CONTEXT (already fetched, no tool call needed):
-
-1. ERROR SAMPLES (get_error_samples, minutes=120):
-{error_samples}
-   → Extract: exact error text, function names in stack trace, any file paths or line numbers.
-     These become your search terms for step 5.
-
-2. STILL OCCURRING (check_still_occurring):
-{still_occurring}
-
-3. OCCURRENCE TIMELINE (get_occurrence_timeline, hours=24):
-{occurrence_timeline}
-"""
+            log_group_warning = self._harness.render(
+                "log_context_fetched",
+                error_samples=error_samples,
+                still_occurring=still_occurring,
+                occurrence_timeline=occurrence_timeline,
+            )
         else:
             logger.warning("DiagnosisAgent: log_group missing from incident metadata — log-based steps will produce no results")
-            log_group_warning = (
-                "\nSTEPS 1-3 — LOG CONTEXT: log_group is not set for this incident, so log-based "
-                "steps could not be fetched (they would return no data) and were skipped. "
-                "Set reproduction_confirmed=false and cap confidence at 0.75.\n"
-            )
+            log_group_warning = self._harness.render("log_context_missing")
 
         prior_section = ""
         if prior_context:
-            prior_section = (
-                f"\nPRIOR KNOWLEDGE (from past incidents — a LEAD to investigate, not a "
-                f"citable fact):\n{prior_context}\n"
-                f"This match is keyed on error_type + service + description — not a "
-                f"guarantee the past incident is actually the same bug, especially for a "
-                f"service that crashes for many unrelated reasons under the same generic "
-                f"error_type. Real production bug: a past incident matched this way was for "
-                f"a completely different route/file, and the diagnosis cited its (wrong) PR "
-                f"as evidence that several sibling files were 'already fixed,' fabricating "
-                f"specifics (a file count) that weren't even IN this prior-knowledge text. "
-                f"Before citing anything from PRIOR KNOWLEDGE in root_cause: read the actual "
-                f"current file(s) yourself and confirm the SAME code shape and symptom match. "
-                f"Never state a specific fact (which files were fixed, how many, when) unless "
-                f"you verified it by reading real current code — not by inferring it from this "
-                f"summary or from a general pattern described elsewhere (e.g. AGENTS.md).\n"
-            )
+            prior_section = self._harness.render("prior_knowledge", prior_context=prior_context)
 
-        prompt = f"""You are a senior SRE diagnosing a production incident. A triage agent has already
-confirmed this is real. Your job is to find the root cause and a fix approach.
-
-INCIDENT:
-  error_type      : {event.error_type}
-  title           : {event.title}
-  description     : {event.description}
-  service         : {event.service}
-  log_group       : {log_group or '(not provided)'}
-  pattern         : {pattern}
-  task_id         : {event.task_id or '(not provided)'}
-  severity        : {event.severity}
-  occurrences_24h : {incident.occurrences_24h}
-  blast_radius    : {incident.blast_radius}
-  triage_reasoning: {incident.triage_reasoning}
-{log_group_warning}{prior_section}{stack_trace_section}
-STEPS — call tools in this exact order, starting from step 4 (steps 1-3 are the
-pre-fetched LOG CONTEXT above — already done, no tool call needed for them).
-Complete each step before moving to the next.
-
-4. search_similar_incidents — check knowledge base
-   symptoms = domain-specific keywords from the error: operation names, error codes, component names.
-   Do NOT use generic words like "error", "null", "undefined" — they match everything.
-   Good: "E11000 duplicate insertMany parallel workers"
-   Bad:  "TypeError undefined cannot read property"
-
-5. search_codebase — find candidate file paths
-   If STACK TRACE FILE DETECTION above listed any paths, skip search_codebase for
-   this step — call get_file_contents directly on each listed path instead. Only
-   fall back to the search below if none of those files turn out to be relevant.
-
-   Otherwise, use specific terms from the stack trace (function names, file paths)
-   found in step 1, NOT just the raw error type. If the stack trace shows
-   `insertMany appmasterreferrals`, query that. If it shows `classifyFields`,
-   query that function name.
-
-   If there is NO stack trace (e.g. a DeprecationWarning, startup warning, or config
-   warning), find the call site with an exact search:
-     a. Call grep_codebase with the exact string that triggers the warning
-        (e.g. "mongoose.connect" for a Mongoose warning). This returns EVERY file
-        and line number where the pattern appears — it is exact, not fuzzy.
-     b. Call get_file_contents on EACH matching file. Read them all.
-     c. Pick the service entry point — the file that is actually executed when the
-        process starts (typically server.js, index.js, or the "main" in package.json).
-     d. After reading the file, check if the call site is at TOP LEVEL (no enclosing
-        function). If so, set affected_function to null — do NOT invent "main" or "run".
-        This is the correct answer for module-level scripts and does NOT lower confidence.
-   CRITICAL: affected_file MUST be a file path that literally appeared in your
-   grep_codebase results. The service name (e.g. an ECS task name) is NOT a
-   filename — do not append ".js" to service names. If grep returned
-   "create-post-fargate.js" and "server.js", those are your only valid choices.
-
-   If grep_codebase returns matches across multiple files:
-     - Put the primary entry point in affected_file (the file most directly causing
-       the incident — e.g. the Fargate task file for a scheduled-task warning)
-     - After identifying the primary, explicitly check whether server.js, index.js,
-       or app.js ALSO contains the same issue (call get_file_contents on each if grep
-       returned them). If EXACTLY ONE other file needs the fix, put it in
-       additional_fix_file. If TWO OR MORE files need it (e.g. a copy-pasted-per-
-       brand/tenant/region duplication convention — check the target's own agent
-       guide/notes for this), use additional_fix_targets instead — a list, one
-       entry per file: {{"file": ..., "function": ... or null, "snippet": ...}}.
-       additional_fix_file can only ever carry ONE file; naming several files in its
-       prose description while leaving the structured field singular means the fix
-       agent structurally cannot act on any but (at most) one of them.
-     - Set additional_fix to a short description of the identical change needed
-       (e.g. "Add mongoose.set('strictQuery', true) before mongoose.connect in server.js")
-   Do NOT list worker files (routes/workers/**) as the primary or secondary unless
-   the incident is specifically about a worker. Focus on top-level entry points.
-   The fix agent will commit every file named in additional_fix_file /
-   additional_fix_targets in the same PR.
-
-   MANDATORY, for every entry in additional_fix_file/additional_fix_targets, not
-   only per-target duplication cases: naming a file requires PROOF, not a name-
-   pattern guess or a memory of an earlier incident. Call get_file_contents on that
-   EXACT file and copy a real excerpt of its CURRENT vulnerable code into the
-   matching snippet field — do NOT reuse or adapt the primary file's snippet with
-   names swapped; that is pattern-completion, not reading. This matters most when
-   the codebase has a copy-pasted-per-target duplication convention: a file
-   matching the naming convention is not automatically still broken. Siblings get
-   patched independently by earlier, separate incidents, so a file you "remember"
-   being vulnerable may already be fixed — confirm each one individually, don't
-   assume the whole family is still broken because one member was. Any entry with
-   no snippet, or a snippet that isn't verbatim from that specific file, is
-   discarded — not kept as an unverified guess. This applies even if you only
-   describe secondary files in additional_fix prose without setting
-   additional_fix_file/additional_fix_targets: prose naming specific files as
-   "confirmed" still vulnerable with nothing structured and grounded behind it gets
-   flagged as unverified too. You gain nothing by guessing instead of reading each
-   file — an omitted claim costs nothing; a wrong one wastes a review cycle.
-
-6. get_file_contents — fetch the FULL source of the file(s) identified in step 5.
-   RAG returns 400-char fragments — you MUST read the full file to understand the code.
-   Do not stop at one file. If that file spawns workers, calls helpers, or delegates to
-   other modules that are part of the failure path, read those too.
-
-   At each file, ask:
-     - What data enters this function and where does it come from?
-     - What assumptions does this code make that the error shows are violated?
-     - Does this function call something else that is part of the failure path?
-     - Are there naming clues (function names, variable names, comments) that reveal intent?
-     - For parallel/concurrent code: can two execution paths touch the same data simultaneously?
-   Keep reading until you can explain the failure completely from first principles.
-
-   If a file is truncated, search for the specific function name via search_codebase.
-
-   MANDATORY: before naming affected_file, copy a verbatim excerpt of the actual code
-   you just read — the specific lines that show the claimed bug — into
-   root_cause_snippet. Not a paraphrase, not a reconstruction from memory of what a
-   similar file elsewhere looked like: the literal text from THIS file, from a real
-   get_file_contents/read_file call in THIS diagnosis. Real production bug: a diagnosis
-   named a real file as affected_file and quoted a root_cause code snippet that existed
-   nowhere in the actual repo — not in that file, not in any file — while the real bug
-   (a different file entirely) was never found. affected_file with no root_cause_snippet,
-   or a snippet that isn't verbatim from that file, is discarded — the same policy
-   additional_fix_file already has, applied here because affected_file is the field that
-   actually gets edited, making it the most consequential one to get right.
-
-7. verify_symbol_in_repo — MANDATORY CODE-GROUNDING STEP (do not skip).
-   For EVERY function name you intend to put in affected_function or additional_fix_function,
-   call verify_symbol_in_repo with that exact name. This is not optional, even if the name
-   "obviously" should exist or "matches the naming convention".
-
-   MODULE-LEVEL EXCEPTION — skip this step entirely when the fix is in module-level code:
-   If you read the file in step 6 and the call site you need to fix is at the TOP LEVEL of
-   the script (not inside any named function — e.g. `mongoose.connect(...)` sitting directly
-   in the file body with no enclosing `function foo()` or arrow function), then:
-     - Set affected_function to null. This is the CORRECT answer, not a gap.
-     - Do NOT invent a name like "main", "run", "init", or "start" just to have a value.
-     - Do NOT call verify_symbol_in_repo for an invented name — skip step 7 entirely.
-     - null for module-level code does NOT lower confidence. It is honest and accurate.
-
-   Two valid outcomes for named functions:
-     a) FOUND  → the symbol is real; you may use it as affected_function and the file path
-                 reported by the tool as affected_file. Prefer that path over any guess.
-     b) NOT_FOUND → the symbol does not exist on the default branch. You MUST:
-                 - set affected_function (or additional_fix_function) to null,
-                 - cap confidence at 0.65,
-                 - in `evidence`, list candidate file paths you read (from steps 5–6) that
-                   most likely contain the real producer, plus the search terms a human
-                   should grep for (e.g. distinctive S3 key prefixes, MIME-type checks,
-                   library symbols from the stack trace),
-                 - in `fix_approach`, describe WHAT must change conceptually, not WHERE.
-   Naming a symbol you have not verified is a hallucination. Do not do it.
-
-   Only verify symbols you intend to put in affected_function or additional_fix_function.
-   Do NOT verify every function name that appears in a stack trace or as context — only
-   the PRIMARY function you are targeting for the fix. Verifying peripheral symbols wastes
-   tool calls and incorrectly lowers confidence when they are wrappers or test helpers
-   that may not exist on the default branch.
-
-8. Call submit_diagnosis with your findings. It validates every grounding-relevant
-   field before accepting — a rejection tells you exactly what's wrong; fix it and
-   call submit_diagnosis again. Do NOT write the diagnosis as JSON in your Answer;
-   submit_diagnosis is the only way to finalize.
-
-CRITICAL — NULL / UNDEFINED ERRORS:
-If the error is a TypeError (cannot read property, undefined, null) or NullPointerException:
-
-STEP 1 — identify the DIRECT producer of the crashing object:
-  The crash is `obj.field` or `obj.field.subfield`. Find the function whose RETURN VALUE
-  is assigned to `obj` at the crash site. That is the direct producer.
-  - It may be a wrapper/intermediate function (e.g. runValidationCheck), NOT the deep API call.
-  - The direct producer may already handle errors internally — but its error return paths
-    may omit the field callers expect. That IS the root cause.
-
-STEP 2 — check ALL return paths of that producer:
-  Read every `return` statement. Does every path include the field the caller accesses?
-  BAD pattern: happy path returns {{ ok: true, classification: {{...}} }}
-               error path returns {{ ok: false, error: "..." }}   ← missing `classification`
-  The missing field on the error path is the root cause, not the bottom-level API failure.
-
-STEP 3 — write root_cause and fix_approach based solely on what you read in the code.
-  root_cause MUST name the DIRECT PRODUCER function and which return path omits the field.
-  fix_approach MUST fix the upstream source — do NOT suggest null guards, optional chaining,
-  or try/catch at the crash site. Those hide the problem instead of fixing it.
-
-- affected_function and affected_file identify the PRIMARY root cause location (upstream, not crash site).
-- Both must be GROUNDED via verify_symbol_in_repo (step 7). If verification returned NOT_FOUND
-  for the function, set both affected_function AND affected_file to null rather than guessing.
-- If TWO changes are needed, put the upstream fix in affected_function/affected_file and
-  describe the secondary fix in additional_fix. additional_fix_function must also be grounded.
-
-PRE-FIX REASONING — populate `blast_radius` and `contract_change`:
-
-After identifying affected_function, find all callers using find_callers
-with the function name. This returns the complete caller list in one call.
-If find_callers returns no results, fall back to search_codebase. For each
-distinct caller you find, add an entry to `blast_radius`:
-
-  - `file`: path of the caller (must be a real file you observed)
-  - `function`: the calling function or "(top-level)" for module-scope calls
-  - `snippet`: ≤200-char excerpt showing how the caller uses the function
-
-Aim for 3–8 entries. If the function has no callers (it's a top-level
-handler / route / cron entry point), return an empty list and explain in
-evidence ("affected_function is a route handler — no callers"). Empty
-list is honest; fabricating callers is not.
-
-`contract_change` describes whether your proposed fix changes the
-function's external behaviour:
-  - "none": signature, return type, and side effects are unchanged
-  - "signature": parameter list / types change
-  - "return_type": return shape changes
-  - "side_effect": new I/O, new exceptions thrown, new mutations, etc.
-If non-"none", populate `contract_change_detail` with one short
-sentence describing what changes. The fix agent will surface this
-loudly so every caller is updated.
-
-`root_cause` MUST quote route paths, endpoint names, and other identifying
-strings VERBATIM from the code you actually read — never paraphrase or
-invent a "cleaner-looking" version. Real production bug: a diagnosis wrote
-"GET /get-preview/:previewCode route handler" when the real route (visible
-in the file it correctly diagnosed and fixed) was "/getPreviewUser/:id" —
-a fabricated path that never appeared anywhere in the codebase. The
-structured affected_file/affected_function fields were still correctly
-grounded, so the actual code change was right, but the self-critique step
-(which sees root_cause alongside the real diff) read the fabricated route
-name, couldn't find it anywhere near the diff, and flagged a false
-"targets the wrong route" failure on an otherwise-correct fix — wasting a
-review cycle on a problem that didn't exist. Copy the exact string as it
-appears in the file; if you're describing it from memory rather than
-something you just read, that's the signal to go re-read the file first.
-
-Call submit_diagnosis with these fields — NOT a JSON Answer:
-{{
-  "root_cause": "precise description of WHY the error occurs — name the upstream cause",
-  "confidence": 0.82,
-  "evidence": [
-    "specific fact from logs or code that supports root cause",
-    "another concrete observation"
-  ],
-  "fix_approach": "what must change at the upstream source",
-  "affected_function": "primaryFunctionToFix or null",
-  "affected_file": "path/to/primary/file.js or null",
-  "root_cause_snippet": "verbatim excerpt of the CURRENT code in affected_file that actually shows the claimed bug — copied from a real get_file_contents/read_file call, not from memory",
-  "additional_fix": "optional: describe any secondary change in a different function/file, or null",
-  "additional_fix_function": "secondaryFunctionName or null",
-  "additional_fix_file": "path/to/secondary/file.js or null",
-  "additional_fix_snippet": "verbatim excerpt of the CURRENT vulnerable code you actually read in additional_fix_file, or null",
-  "additional_fix_targets": [
-    {{"file": "path/to/sibling.js", "function": "handlerName or null", "snippet": "verbatim excerpt of the CURRENT vulnerable code you actually read in THIS file"}}
-  ],
-  "reproduction_confirmed": true,
-  "blast_radius": [
-    {{"file": "path/to/caller.js", "function": "callerFunction", "snippet": "const x = primaryFunctionToFix(...)"}}
-  ],
-  "contract_change": "none",
-  "contract_change_detail": null
-}}
-submit_diagnosis will reject anything ungrounded and tell you exactly what's wrong —
-fix it and call it again. Only after it returns "Diagnosis accepted" should you write
-a final Answer to end the turn.
-
-Confidence guide:
-  0.90+ → near certain, clear evidence in code + logs, AND affected_function verified FOUND
-  0.80-0.90 → direct code observation (saw the exact line) AND matching stack traces, even if peripheral symbols unverified
-  0.70-0.80 → probable, strong log evidence but limited code visibility
-  0.50-0.70 → possible, pattern matches but incomplete evidence
-  <0.50 → uncertain, escalate to human
-  If log_group was missing and steps 1–3 returned no data, cap confidence at 0.75.
-  If affected_function or additional_fix_function returned NOT_FOUND in step 7, cap confidence
-  at 0.65 and null those fields. Do NOT lower confidence for symbols mentioned only in evidence
-  prose — those are context references, not the fix target.
-  If affected_function is null because the fix is at MODULE LEVEL (no enclosing function exists),
-  this does NOT lower confidence — null is the correct answer for top-level script code."""
+        prompt = self._harness.render(
+            "task_prompt",
+            error_type=event.error_type,
+            title=event.title,
+            description=event.description,
+            service=event.service,
+            log_group=log_group or '(not provided)',
+            pattern=pattern,
+            task_id=event.task_id or '(not provided)',
+            severity=event.severity,
+            occurrences_24h=incident.occurrences_24h,
+            blast_radius=incident.blast_radius,
+            triage_reasoning=incident.triage_reasoning,
+            log_context=log_group_warning,
+            prior_knowledge=prior_section,
+            stack_trace=stack_trace_section,
+            retrieval_note=("" if "search_codebase" in self._tools
+                            else self._harness.render("retrieval_unavailable")),
+        )
 
         await self.run(prompt)
 

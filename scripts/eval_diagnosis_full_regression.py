@@ -196,7 +196,7 @@ async def _replay_attempt(replay, item, github, base: dict[str, Any]) -> dict[st
 
 
 async def _run_suite(suite: str, items: list[dict[str, Any]], replay,
-                     base_of, label_of) -> list[dict[str, Any]]:
+                     base_of, label_of, trajectory_dir: Path | None = None) -> list[dict[str, Any]]:
     """Replay each item, retrying a non-PASS once (see RETRIES).
 
     A case only counts as non-passing if every attempt fails. The verdict
@@ -225,8 +225,20 @@ async def _run_suite(suite: str, items: list[dict[str, Any]], replay,
             for attempt in range(1 + RETRIES):
                 if attempt:
                     print(f"    retrying ({attempt}/{RETRIES}) ...", flush=True)
-                result = await _replay_attempt(replay, item, github, base)
+                sink: list[dict] = []
+                attempt_replay = replay
+                if trajectory_dir is not None:
+                    async def attempt_replay(it, gh, _sink=sink):
+                        return await replay(it, gh, trajectory_sink=_sink)
+                result = await _replay_attempt(attempt_replay, item, github, base)
                 attempts.append(result["verdict"])
+                if trajectory_dir is not None and sink:
+                    trajectory_dir.mkdir(parents=True, exist_ok=True)
+                    record = {**sink[0], "attempt": attempt + 1,
+                              "verdict": result["verdict"], "detail": result["detail"]}
+                    name = f"{base_of(item).get('instance_id') or base_of(item).get('incident_id')}"
+                    (trajectory_dir / f"{name}__attempt{attempt + 1}.json").write_text(
+                        json.dumps(record, indent=1, default=str))
                 print(f"    -> {result['verdict']}: {result['detail']}", flush=True)
                 # TIMEOUT isn't retried: a hang tends to repeat, and a second
                 # 30-min wait would push the shard toward its job timeout.
@@ -252,13 +264,15 @@ async def _run_production_suite(cases: list[dict[str, Any]]) -> list[dict[str, A
     )
 
 
-async def _run_swebench_suite(instances: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def _run_swebench_suite(instances: list[dict[str, Any]],
+                              trajectory_dir: Path | None = None) -> list[dict[str, Any]]:
     from scripts.eval_swebench_diagnosis import _replay_one
 
     return await _run_suite(
         "swebench", instances, _replay_one,
         base_of=lambda x: {"instance_id": x.get("instance_id"), "repo": x.get("repo")},
         label_of=lambda x: f"{x['instance_id']} ({x['repo']})",
+        trajectory_dir=trajectory_dir,
     )
 
 
@@ -373,6 +387,10 @@ async def _main() -> int:
                         help="write this run's verdicts as JSON (for --aggregate)")
     parser.add_argument("--aggregate", type=Path, metavar="DIR",
                         help="merge shard result files in DIR and apply the threshold; runs no cases")
+    parser.add_argument("--trajectories-out", type=Path, metavar="DIR",
+                        help="write one trajectory record per SWE-bench case attempt to DIR "
+                             "(prompt composition + usage per LLM call, tool calls, cost); "
+                             "input for scripts/analyze_cost_by_source.py")
     parser.add_argument("--expect-shards", type=int, default=1,
                         help="with --aggregate: number of shard files that must be present")
     args = parser.parse_args()
@@ -396,7 +414,8 @@ async def _main() -> int:
     if of > 1:
         print(f"Shard {shard}/{of}: {len(production)} production + {len(swebench)} SWE-bench cases", flush=True)
 
-    results = await _run_production_suite(production) + await _run_swebench_suite(swebench)
+    results = (await _run_production_suite(production)
+               + await _run_swebench_suite(swebench, trajectory_dir=args.trajectories_out))
 
     if args.results_out:
         args.results_out.parent.mkdir(parents=True, exist_ok=True)

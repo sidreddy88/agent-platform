@@ -13,6 +13,7 @@ from app.api.routes import circuit_breaker as circuit_breaker_routes
 from app.api.routes import debug as debug_routes
 from app.api.routes import drift as drift_routes
 from app.api.routes import evals as evals_routes
+from app.api.routes import optimizer as optimizer_routes
 from app.api.routes import events as events_routes
 from app.api.routes import failures as failures_routes
 from app.api.routes import injection as injection_routes
@@ -74,6 +75,7 @@ app.include_router(circuit_breaker_routes.router)
 app.include_router(injection_routes.router)
 app.include_router(drift_routes.router)
 app.include_router(evals_routes.router)
+app.include_router(optimizer_routes.router)
 app.include_router(monitors_routes.router)
 app.include_router(agents_routes.router)
 app.include_router(debug_routes.router)

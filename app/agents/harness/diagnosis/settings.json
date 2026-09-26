@@ -1,0 +1,12 @@
+{
+ "_doc": {
+  "max_iterations": "ReAct turn budget for one diagnosis",
+  "file_read_char_limit": "per-read cap on get_file_contents output, whole-file or ranged",
+  "grep_default_glob": "file_glob grep_codebase uses when the model passes none",
+  "grep_max_matches": "grep_codebase stops after this many matching lines"
+ },
+ "max_iterations": 15,
+ "file_read_char_limit": 12000,
+ "grep_default_glob": "*",
+ "grep_max_matches": 50
+}

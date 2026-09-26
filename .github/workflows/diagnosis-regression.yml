@@ -31,13 +31,16 @@ name: DiagnosisAgent Regression
 # the check never reports at all on PRs that don't touch these files,
 # leaving a required check permanently "Expected -- waiting for status to be
 # reported". The `gate` job always runs and always reports (fast success
-# when nothing relevant changed, the real verdict when it did), and keeps
+# when nothing relevant changed or the PR is a draft, the real verdict when it did), and keeps
 # the original job name so the check name doesn't change. NOTE: as of
 # 2026-09-24 main's protection requires only `pytest`, not this check --
 # the earlier comment here claiming otherwise was wrong.
 
 on:
   pull_request:
+    # ready_for_review: a draft PR skips the paid replay (see the filter
+    # step), so marking it ready is what runs the gate.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:
@@ -64,6 +67,14 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Draft PRs never run the paid replay: long-running branches (the
+          # harness work) push often, and each run costs ~$50-90. Marking the
+          # PR "Ready for review" re-triggers this workflow and runs it.
+          if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
+            echo "Draft PR: skipping the replay until it is marked ready for review."
+            echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           base=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "${{ github.event.pull_request.head.sha }}")
