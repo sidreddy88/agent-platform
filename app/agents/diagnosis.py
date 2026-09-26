@@ -1278,7 +1278,13 @@ class DiagnosisAgent(BaseAgent):
                 content = self._local_repo.read_file(affected_file) if self._local_repo.ready else None
             except Exception:
                 content = None
-            if content is not None and affected_function not in content:
+            # Qualified names ("Aggregate.as_sql", from a stack trace) are checked
+            # by their bare name too, the way verify_symbol_in_repo already reduces
+            # them: the file declares `def as_sql`, never the string
+            # "Aggregate.as_sql". Found by the harness optimizer (r5 round 1): 3 of
+            # 162 submissions were rejected here for a function that was in the file.
+            if (content is not None and affected_function not in content
+                    and self._bare_symbol(affected_function) not in content):
                 file_ok = False
                 problems.append(
                     f"'{affected_function}' does not appear inside '{affected_file}' — both exist "

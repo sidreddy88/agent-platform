@@ -565,6 +565,29 @@ async def test_submission_rejects_function_not_paired_with_file():
 
 
 @pytest.mark.asyncio
+async def test_submission_accepts_a_qualified_function_by_its_bare_name():
+    """Stack traces name methods as Class.method; the file only declares
+    `def method`. verify_symbol_in_repo already checks the bare name, so the
+    pairing check must too (r5 round 1: 3/162 submissions rejected this way)."""
+    async def found(owner, repo, query, **_kw):
+        return [{"path": "django/db/models/aggregates.py", "fragment": "def as_sql"}]
+
+    local_repo = MagicMock(ready=True)
+    local_repo.read_file.return_value = "class Aggregate(Func):\n    def as_sql(self, compiler, connection):\n        pass\n"
+    agent = _make_agent(found, local_repo=local_repo)
+    data = {
+        "root_cause": "x", "confidence": 0.9,
+        "affected_function": "Aggregate.as_sql",
+        "affected_file": "django/db/models/aggregates.py",
+        "root_cause_snippet": "def as_sql(self, compiler, connection):",
+    }
+
+    problems = await agent._validate_diagnosis_submission(data)
+
+    assert not any("does not appear inside" in p for p in problems)
+
+
+@pytest.mark.asyncio
 async def test_submission_rejects_nonexistent_affected_file():
     async def found(owner, repo, query, **_kw):
         return [{"path": "a.js", "fragment": "primaryFn()"}]
