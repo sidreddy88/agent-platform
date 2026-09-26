@@ -217,6 +217,13 @@ class Optimizer:
             # Not done: the phase is kept, so a resume continues from here once
             # the provider problem (credits, keys) is fixed.
             state.stop_reason = f"provider failure, resume after fixing: {exc}"
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # Ctrl-C / SIGINT: record the session's end, keep the phase, re-raise.
+            state.stop_reason = "interrupted by operator; resume to continue"
+            state.spent_usd = budget.spent_usd
+            self._end_session(state)
+            self.run.save(state)
+            raise
         finally:
             watchdog.cancel()
         state.spent_usd = budget.spent_usd

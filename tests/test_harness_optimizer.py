@@ -694,3 +694,17 @@ def test_constrained_proposal_cannot_claim_one_component_and_edit_another(tmp_pa
                            "edits": [{"file": "task_prompt.prompt", "find": "x", "replace": "y"}]})
     with pytest.raises(candidates.InvalidCandidate, match="can't edit"):
         asyncio.run(proposer.propose(BASE, "ev", "hist", sneaky, allowed_components=("settings",)))
+
+
+def test_operator_interrupt_records_the_session_end(tmp_path):
+    class Interrupting(FakeEvaluator):
+        async def evaluate(self, harness_dir, case_ids, trials):
+            if len(self.calls) >= 2:
+                raise KeyboardInterrupt
+            return await super().evaluate(harness_dir, case_ids, trials)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(_opt(tmp_path, Interrupting()).run_until_stopped())
+    from app.harness_optimizer.state import RunDir
+    s = RunDir(tmp_path / "run").load()
+    assert s.phase != "done" and s.stop_reason.startswith("interrupted")
+    assert s.timing["sessions"][-1]["ended_because"].startswith("interrupted")
