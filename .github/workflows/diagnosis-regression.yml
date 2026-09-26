@@ -64,6 +64,8 @@ jobs:
 
       - name: Check whether relevant files changed
         id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -72,7 +74,13 @@ jobs:
           # Draft PRs never run the paid replay: long-running branches (the
           # harness work) push often, and each run costs ~$50-90. Marking the
           # PR "Ready for review" re-triggers this workflow and runs it.
-          if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
+          # The PR's live draft state, not the event payload's: a push made just
+          # before "Ready for review" queues a synchronize event that still says
+          # draft=true, and with cancel-in-progress it cancelled the
+          # ready_for_review run, so the gate silently skipped (PR #261).
+          draft=$(gh pr view "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
+                  --json isDraft --jq .isDraft 2>/dev/null || echo "${{ github.event.pull_request.draft }}")
+          if [ "$draft" = "true" ]; then
             echo "Draft PR: skipping the replay until it is marked ready for review."
             echo "run=false" >> "$GITHUB_OUTPUT"
             exit 0
