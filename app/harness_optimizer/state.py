@@ -32,7 +32,7 @@ from pathlib import Path
 
 # Where a round is in its life. A resume restarts the current phase from its
 # beginning; every phase is idempotent given the cached evals and files.
-PHASES = ("propose", "screen", "evaluate", "decide", "done")
+PHASES = ("smoke", "evaluate", "propose", "screen", "decide", "final", "done")
 
 
 @dataclass
@@ -50,6 +50,12 @@ class RunState:
     stalled_rounds: int = 0             # consecutive rounds with no acceptance
     spent_usd: float = 0.0              # measured spend so far (cost meter), survives resume
     stop_reason: str | None = None
+    rounds_stop_reason: str | None = None   # why the rounds ended, when a final phase follows
+    # Measured, not reconstructed: started_at, sessions (one per process, with
+    # start/end/why it ended), per-phase durations, replay counts. The resume
+    # line's "ran unattended for N hours" comes from here.
+    timing: dict = field(default_factory=dict)
+    health: dict = field(default_factory=dict)          # tripwire checks: count, last problems
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -80,6 +86,11 @@ class RunDir:
     @property
     def incumbent_dir(self) -> Path:
         return self.root / "incumbent"
+
+    @property
+    def original_dir(self) -> Path:
+        """The starting harness, frozen at run start: the held-out comparison's baseline."""
+        return self.root / "original"
 
     def candidate_dir(self, round_no: int) -> Path:
         return self.root / "candidates" / f"r{round_no}"

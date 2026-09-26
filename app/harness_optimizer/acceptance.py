@@ -31,7 +31,8 @@ What differs from RRSI, and why:
   k=2 trials (trial 1 vs trial 2 of the same harness), bootstrapped over
   cases: no extra run.
 - **Guard cases.** The evolve set's always-pass regression guards must keep
-  passing: a candidate that breaks the easy path is vetoed outright.
+  passing: a candidate that fails a guard on every trial (where the
+  incumbent passed it) is vetoed outright.
 - **No novelty term, pruning window or annealing.** Those need many rounds;
   we can afford a handful. See docs/blog-drafts/harness-evolution-v2.md §0.4.
 """
@@ -129,10 +130,17 @@ def decide(incumbent: EvalResult, candidate: EvalResult, S_star: float,
     dS, dC, improved, regressed = paired_deltas(incumbent, candidate)
     d = Decision(False, "", dS, dC, improved, regressed)
 
+    # A guard vetoes only when it fails EVERY trial of the candidate and the
+    # incumbent passed it at least once. The first rule (any failed trial)
+    # was noise at 2 trials a case: a guard that passes 80-95% of the time
+    # (astropy-14309 went PASS/FAIL on the unchanged harness) would have
+    # vetoed about a third of candidates by chance across 4 guards. Breaking
+    # the easy path shows up as all-fail, not one-in-two.
     for g in cfg.guard_cases:
         cr = candidate.per_case.get(g)
-        if cr is not None and cr.passes < cr.trials:
-            d.vetoes.append(f"guard case {g} failed {cr.trials - cr.passes}/{cr.trials}")
+        inc = incumbent.per_case.get(g)
+        if cr is not None and cr.trials and cr.passes == 0 and (inc is None or inc.passes > 0):
+            d.vetoes.append(f"guard case {g} failed {cr.trials}/{cr.trials}")
     rise = candidate.escalation_rate - incumbent.escalation_rate
     if rise > cfg.max_escalation_rise:
         d.vetoes.append(f"escalation rate rose {rise:+.3f} (limit {cfg.max_escalation_rise})")

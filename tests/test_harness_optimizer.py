@@ -57,9 +57,11 @@ def test_clear_gain_may_cost_more_within_the_rrsi_budget():
 
 def test_guard_and_escalation_vetoes():
     inc = ev(a=(1, 2, 2.0), g=(2, 2, 1.0))
-    broke_guard = ev(a=(1, 2, 1.0), g=(1, 2, 0.5))
+    broke_guard = ev(a=(1, 2, 1.0), g=(0, 2, 0.5))
     cfg = AcceptanceConfig(delta=0.3, guard_cases=("g",))
-    assert "guard case g" in decide(inc, broke_guard, inc.S, cfg).reason
+    assert "guard case g failed 2/2" in decide(inc, broke_guard, inc.S, cfg).reason
+    flaky_guard = ev(a=(1, 2, 1.0), g=(1, 2, 0.5))     # one failed trial is noise, not breakage
+    assert "guard" not in decide(inc, flaky_guard, inc.S, cfg).reason
     gives_up = ev(a=(1, 2, 0.5, 2), g=(2, 2, 0.5))    # cheaper by escalating
     assert "escalation rate rose" in decide(inc, gives_up, inc.S, cfg).reason
 
@@ -506,3 +508,137 @@ def test_resuming_clears_the_previous_stop_reason(tmp_path):
     state = asyncio.run(_opt(tmp_path, FakeEvaluator(), max_rounds=0).run_until_stopped())
     assert state.stop_reason.startswith("round 0 only")
     assert RunDir(tmp_path / "run").load().stop_reason.startswith("round 0 only")
+
+
+# ---- smoke, tripwires, watchdog, timing, final phase (r5) -----------------------
+
+class StepEvaluator(FakeEvaluator):
+    """FakeEvaluator whose trajectories have tool calls; verify_symbol can be
+    made to fail on every call, the way the invalid GitHub token broke it."""
+
+    def __init__(self, broken_verify=False, free=False, **kw):
+        super().__init__(**kw)
+        self.broken_verify, self.free = broken_verify, free
+
+    async def evaluate(self, harness_dir, case_ids, trials):
+        out = await super().evaluate(harness_dir, case_ids, trials)
+        verify = "NOT_FOUND: no match for 'foo'" if self.broken_verify else "FOUND (2 match(es)) for 'foo'"
+        steps = [{"name": "get_file_contents", "input": {"path": "a.py"}, "output": "<untrusted-content source=x>"},
+                 {"name": "verify_symbol_in_repo", "input": {"symbol": "foo"}, "output": verify},
+                 {"name": "verify_symbol_in_repo", "input": {"symbol": "foo"}, "output": verify}]
+        for t in out.trajectories:
+            t["steps"] = steps
+        if self.free:
+            for r in out.result.per_case.values():
+                r.cost_usd = 0.0
+            out = EvalOutcome(out.result, 0.0, out.trajectories)
+        return out
+
+
+def test_smoke_stage_gates_round_0_and_pauses_on_zero_cost(tmp_path):
+    ev_ = StepEvaluator(free=True)
+    state = asyncio.run(_opt(tmp_path, ev_, max_rounds=0, smoke_cases=["c2", "c3"]).run_until_stopped())
+    assert state.phase == "smoke" and "tripwire" in state.stop_reason and "$0" in state.stop_reason
+    assert len(ev_.calls) == 2                             # round 0 never started
+
+    ok = StepEvaluator()
+    state = asyncio.run(_opt(tmp_path / "b", ok, max_rounds=0, smoke_cases=["c2", "c3"]).run_until_stopped())
+    assert state.phase == "done" and state.health["smoke"]["problems"] == []
+    assert len(ok.calls) == 2 + 4                          # smoke, then round 0
+
+
+def test_tripwire_pauses_mid_evaluation_when_a_tool_fails_wholesale(tmp_path):
+    many = [f"c{i}" for i in range(12)]
+    cfg = dict(max_rounds=0, health_every=4, health_window=8)
+    opt = Optimizer(tmp_path / "run", BASE,
+                    OptimizerConfig(evolve_cases=many, guard_cases=[], budget_usd=100.0, **cfg),
+                    StepEvaluator(broken_verify=True), terse_proposer(), accept_all, PATTERNS)
+    ev_ = opt.evaluator
+    state = asyncio.run(opt.run_until_stopped())
+    assert state.phase == "evaluate" and state.stop_reason.startswith("tripwire")
+    assert "verify_symbol_in_repo failing on" in state.stop_reason
+    assert len(ev_.calls) == 8                  # tripped at the 2nd check, not after all 12 cases
+    assert state.health["trips"]
+
+
+def test_run_records_measured_timing_per_session(tmp_path):
+    state = asyncio.run(_opt(tmp_path, StepEvaluator(provider_fail_at=3), max_rounds=0).run_until_stopped())
+    state = asyncio.run(_opt(tmp_path, StepEvaluator(), max_rounds=0).run_until_stopped())
+    t = state.timing
+    assert len(t["sessions"]) == 2 and t["finished_at"]
+    assert t["sessions"][0]["ended_because"].startswith("provider failure")
+    assert t["sessions"][1]["ended_because"].startswith("round 0 only")
+    assert sum(s["replays"] for s in t["sessions"]) == 4 * 2
+    assert any(p["phase"] == "r0:evaluate" for p in t["phases"])
+
+
+def test_watchdog_dumps_stacks_and_exits_resumably(tmp_path, monkeypatch):
+    import os as os_mod
+    opt = _opt(tmp_path, StepEvaluator(), max_rounds=0)
+    state = opt._init_state()
+    opt._begin_session(state)
+
+    def fake_exit(code):
+        raise SystemExit(code)
+    monkeypatch.setattr(os_mod, "_exit", fake_exit)
+
+    async def go():
+        opt._last_progress = 0.0
+        opt._die_stalled(state, idle=1500)
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(go())
+    assert exc.value.code == 3
+    saved = json.loads((tmp_path / "run" / "state.json").read_text())
+    assert saved["stop_reason"].startswith("watchdog") and saved["phase"] != "done"
+    dump = next((tmp_path / "run").glob("watchdog-*.txt")).read_text()
+    assert "no progress for 25.0 min" in dump and "asyncio tasks" in dump
+
+
+def test_final_phase_writes_heldout_report_against_rerun_baseline(tmp_path):
+    ev_ = StepEvaluator()
+    opt = Optimizer(tmp_path / "run", BASE,
+                    OptimizerConfig(evolve_cases=CASES, guard_cases=GUARDS, budget_usd=100.0, max_rounds=1,
+                                    final_cases=["h1", "h2"], final_trials=3),
+                    ev_, terse_proposer(), accept_all, PATTERNS)
+    state = asyncio.run(opt.run_until_stopped())
+    assert state.phase == "done" and state.accepted == ["r1"]
+    assert state.stop_reason.startswith("completed 1 rounds; held-out report written")
+    rep = json.loads((tmp_path / "run" / "report" / "report.json").read_text())
+    assert rep["original"]["trials_per_case"] == 3 and rep["evolved"]["cases"] == 2
+    assert set(rep["comparisons"]) == {"vs_original_single_run", "vs_rerun_baseline_best_of_2"}
+    heldout = [c for _, c in ev_.calls if c.startswith("h")]
+    assert sorted(heldout) == ["h1", "h1", "h2", "h2"]     # original and evolved, once each
+
+
+def test_final_phase_without_an_acceptance_runs_the_original_once(tmp_path):
+    ev_ = StepEvaluator()
+    opt = Optimizer(tmp_path / "run", BASE,
+                    OptimizerConfig(evolve_cases=CASES, guard_cases=GUARDS, budget_usd=100.0, max_rounds=1,
+                                    final_cases=["h1"], final_trials=2),
+                    ev_, terse_proposer(), reject_all, PATTERNS)
+    state = asyncio.run(opt.run_until_stopped())
+    assert state.accepted == [] and state.phase == "done"
+    assert [c for _, c in ev_.calls if c.startswith("h")] == ["h1"]
+    rep = json.loads((tmp_path / "run" / "report" / "report.json").read_text())
+    assert rep["evolved"] is None and "No edit was accepted" in rep["verdict"]
+
+
+def test_lane_width_runs_cases_of_one_repo_concurrently_under_the_global_cap(tmp_path):
+    lanes = {c: "repoA" for c in CASES + GUARDS}
+    ev_ = SlowEvaluator(lanes)
+    state = asyncio.run(_opt(tmp_path, ev_, max_rounds=0, parallel_lanes=3, lane_width=2,
+                             case_lanes=lanes).run_until_stopped())
+    assert state.phase == "done"
+    assert ev_.max_per_lane == 2                  # one repo, two sub-lanes at once, never more
+
+
+def test_report_matched_budget_comparison_math():
+    from app.harness_optimizer.report import build
+    # original: each case passes 1 of 3 -> pass@1 1/3, pass@2 2/3; evolved: 3 of 3.
+    orig = {c: CaseResult(1, 3, 0, 0.3, ["PASS", "FAIL", "FAIL"]) for c in ("a", "b", "c", "d")}
+    evo = {c: CaseResult(3, 3, 0, 0.3, ["PASS"] * 3) for c in ("a", "b", "c", "d")}
+    r = build(orig, evo, 3, {})
+    assert r["original"]["pass@1"] == pytest.approx(1 / 3)
+    assert r["original"]["pass@2"] == pytest.approx(2 / 3)
+    assert r["comparisons"]["vs_rerun_baseline_best_of_2"]["diff"] == pytest.approx(1 / 3)
+    assert r["comparisons"]["vs_rerun_baseline_best_of_2"]["direction"] == "better"
