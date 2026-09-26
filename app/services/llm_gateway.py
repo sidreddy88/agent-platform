@@ -77,7 +77,9 @@ class LiteLLMProvider(BaseProvider):
         system: str | list | None = kwargs.pop("system", None)
         cache: bool = kwargs.pop("cache", False)
         msgs = list(messages)
-        if cache:
+        # cache_control blocks are Anthropic's prompt-caching markers; other
+        # providers either cache automatically or reject list-shaped content.
+        if cache and "claude" in model.lower():
             system, msgs = _mark_for_cache(system, msgs)
         if system:
             msgs = [{"role": "system", "content": system}] + msgs
@@ -344,7 +346,14 @@ class LLMGateway:
             return {}
 
     def _get_routing(self, task_type: str) -> tuple[str, str, int]:
-        entry = self._config.get("routing", {}).get(task_type, {})
+        entry = dict(self._config.get("routing", {}).get(task_type, {}))
+        # LLM_MODEL_<TASK> (e.g. LLM_MODEL_DIAGNOSIS=together_ai/...) overrides the
+        # routed model for one process: evals that compare models, without editing
+        # the production routing file.
+        override = os.environ.get(f"LLM_MODEL_{task_type.upper()}")
+        if override:
+            entry["model"] = override
+            entry.pop("provider", None)
         provider = entry.get("provider") or _infer_provider(entry.get("model", ""))
         # Fallback (routing entry missing/omits "model") reads from the same
         # config/llm_routing.json "defaults" section as llm.py's MODEL
