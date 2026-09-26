@@ -83,12 +83,21 @@ def smoke_cases(split: dict) -> list[str]:
 
 def build_config(split: dict, budget: float, rounds: int, trials: int, parallel: int = 1,
                  calibration_trials: int = 2, lane_width: int = 1, smoke: bool = False,
-                 final: bool = False, final_trials: int = 3):
+                 final: bool = False, final_trials: int = 3, cases: str = "evolve"):
     from app.harness_optimizer.loop import OptimizerConfig
 
+    if cases == "heldout":
+        # Measuring a harness on the held-out set (baseline only, --rounds 0):
+        # never for evolving, which would train on the test set.
+        if rounds > 0:
+            raise SystemExit("--cases heldout is for measurement only; use --rounds 0")
+        evolve, guards = heldout_cases(split), []
+    else:
+        evolve = split["evolve"]["failing"] + split["evolve"].get("hard", [])
+        guards = split["evolve"]["guards"]
     return OptimizerConfig(
-        evolve_cases=split["evolve"]["failing"] + split["evolve"].get("hard", []),
-        guard_cases=split["evolve"]["guards"],
+        evolve_cases=evolve,
+        guard_cases=guards,
         budget_usd=budget, trials=trials, max_rounds=rounds,
         calibration_trials=calibration_trials,
         parallel_lanes=parallel, case_lanes=case_lanes(split), lane_width=lane_width,
@@ -156,6 +165,10 @@ def main() -> int:
     parser.add_argument("--final", action="store_true",
                         help="after the rounds, run original vs final harness on the held-out set")
     parser.add_argument("--final-trials", type=int, default=3)
+    parser.add_argument("--cases", choices=("evolve", "heldout"), default="evolve",
+                        help="heldout: measure a harness on the held-out set (requires --rounds 0)")
+    parser.add_argument("--harness", type=Path, default=None,
+                        help="starting harness directory (default: app/agents/harness/diagnosis)")
     parser.add_argument("--seed-history", type=Path,
                         help="a pilot run's history.jsonl, given to the proposer as notes (new runs only)")
     parser.add_argument("--status", action="store_true")
@@ -211,10 +224,10 @@ def main() -> int:
             parser.error("--budget is required to start a new run")
         cfg = build_config(split, args.budget, args.rounds, args.trials, args.parallel or 1,
                            args.calibration_trials, args.lane_width, args.smoke, args.final,
-                           args.final_trials)
+                           args.final_trials, args.cases)
         if args.seed_history:
             seed_history(args.seed_history, args.run_dir)
-    opt = Optimizer(args.run_dir, DEFAULT_ROOT / "diagnosis", cfg, ReplayEvaluator(),
+    opt = Optimizer(args.run_dir, args.harness or DEFAULT_ROOT / "diagnosis", cfg, ReplayEvaluator(),
                     make_llm(args.model), make_llm(args.model), critic_patterns(split))
     state = asyncio.run(opt.run_until_stopped())
     print(f"\nstopped at round {state.round}, phase {state.phase}: {state.stop_reason}")

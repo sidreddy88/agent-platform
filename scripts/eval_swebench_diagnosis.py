@@ -316,6 +316,9 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
                     "cost": replay_meter.summary(),
                 })
         await pinned_repo.remove_worktree()
+        if trajectory_sink:
+            # Per-attempt outcome and cost when the retry policy re-ran it.
+            trajectory_sink[-1]["attempts"] = list(getattr(result, "attempts", None) or [])
         if rag is not None:
             # Throwaway collection -- one per instance would otherwise accumulate.
             try:

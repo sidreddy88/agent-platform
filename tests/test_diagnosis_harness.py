@@ -76,7 +76,7 @@ def test_settings_doc_keys_are_not_settings():
     h = load_harness("diagnosis")
     assert "_doc" not in h.settings
     assert set(h.settings) == {"max_iterations", "file_read_char_limit",
-                               "grep_default_glob", "grep_max_matches"}
+                               "grep_default_glob", "grep_max_matches", "retry_on_no_submission"}
 
 
 def test_dockerignore_does_not_drop_harness_files():

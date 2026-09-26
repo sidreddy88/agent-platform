@@ -24,6 +24,7 @@ IGNORED = {"README.md"}         # documentation, never loaded, never edited
 # starving the agent (max_iterations=1) or blowing the budget (a 1M-char read).
 SETTING_BOUNDS = {
     "max_iterations": (5, 25),
+    "retry_on_no_submission": (0, 2),
     "file_read_char_limit": (2000, 60000),
     "grep_max_matches": (10, 200),
 }

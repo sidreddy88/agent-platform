@@ -457,6 +457,12 @@ class DiagnosisResult:
     contract_change: str = "none"  # "none" | "signature" | "return_type" | "side_effect"
     contract_change_detail: str | None = None
     raw_llm: str = ""
+    no_submission: bool = False
+    # ^ the run ended without any accepted submit_diagnosis (budget exhausted):
+    # no diagnosis at all, as opposed to a low-confidence one. The only case
+    # the retry policy in diagnose() re-runs, since there's no answer to lose.
+    attempts: list[dict] = field(default_factory=list)
+    # ^ one entry per diagnosis attempt: {"no_submission", "cost_usd", "grounding_rejections"}
     grounding_rejections: int = 0
     # ^ how many submit_diagnosis attempts were rejected before this one succeeded
     # (or, on the fail-closed fallback, before the agent gave up entirely). Set in
@@ -1505,7 +1511,40 @@ class DiagnosisAgent(BaseAgent):
         self._code_graph = CodeGraph()
 
     async def diagnose(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
-        """Run diagnosis on a triaged incident. Returns a DiagnosisResult."""
+        """Run diagnosis on a triaged incident. Returns a DiagnosisResult.
+
+        Retry policy (harness setting retry_on_no_submission, 0 = off): an
+        attempt that ends with no accepted submit_diagnosis is run again from
+        scratch, up to that many times. Only that outcome is retried: it has no
+        answer to lose, so nothing needs choosing between attempts. A
+        low-confidence diagnosis is an answer and is returned as is. Why: the
+        dominant failure is running out of turns without submitting, and it is
+        mostly luck, the same case passing on another try. Simulated on the
+        harness optimizer's r5 trials, one retry took held-out localization
+        from 0.722 to 0.803 at 1.34x cost, against 0.808 at 2x for always
+        running twice (docs: harness-evolution-log §4.10).
+        """
+        from app.services import cost_meter
+
+        retries = max(0, int(self._harness.settings.get("retry_on_no_submission", 0)))
+        attempts: list[dict] = []
+        for attempt in range(1 + retries):
+            with cost_meter.metered() as meter:
+                result = await self._diagnose_once(incident, prior_context)
+            attempts.append({"no_submission": result.no_submission,
+                             "cost_usd": meter.summary()["cost_usd"] or 0.0,
+                             "grounding_rejections": result.grounding_rejections})
+            if not result.no_submission:
+                break
+            if attempt < retries:
+                logger.info("DiagnosisAgent: attempt %d for incident %s ended with no accepted "
+                            "submission; retrying (%d of %d)", attempt + 1, incident.id,
+                            attempt + 1, retries)
+        result.attempts = attempts
+        return result
+
+    async def _diagnose_once(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
+        """One diagnosis attempt."""
         await self._ensure_local_repo()
         await self._ensure_code_graph()
         # Reset in case this agent instance is reused across diagnose() calls —
@@ -1633,5 +1672,6 @@ class DiagnosisAgent(BaseAgent):
             root_cause="Diagnosis could not be grounded — manual review required",
             confidence=0.0,
             escalate=True,
+            no_submission=True,
             grounding_rejections=self._rejection_count,
         )
