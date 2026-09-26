@@ -169,6 +169,13 @@ def main() -> int:
                         help="heldout: measure a harness on the held-out set (requires --rounds 0)")
     parser.add_argument("--harness", type=Path, default=None,
                         help="starting harness directory (default: app/agents/harness/diagnosis)")
+    parser.add_argument("--diversity", type=int, default=0,
+                        help="after N rejected candidates in a row, the next must edit an untried "
+                             "component family (0 = off)")
+    parser.add_argument("--cost-band", action="store_true",
+                        help="in band, require a saving larger than calibrated cost noise")
+    parser.add_argument("--health-baseline", type=json.loads, default=None,
+                        help='tripwire baseline overrides as JSON, e.g. \'{"cost_per_trial_usd": 0.035}\'')
     parser.add_argument("--seed-history", type=Path,
                         help="a pilot run's history.jsonl, given to the proposer as notes (new runs only)")
     parser.add_argument("--status", action="store_true")
@@ -225,6 +232,9 @@ def main() -> int:
         cfg = build_config(split, args.budget, args.rounds, args.trials, args.parallel or 1,
                            args.calibration_trials, args.lane_width, args.smoke, args.final,
                            args.final_trials, args.cases)
+        cfg.diversity_after = args.diversity
+        cfg.cost_band = args.cost_band
+        cfg.health_baseline = args.health_baseline or {}
         if args.seed_history:
             seed_history(args.seed_history, args.run_dir)
     opt = Optimizer(args.run_dir, args.harness or DEFAULT_ROOT / "diagnosis", cfg, ReplayEvaluator(),

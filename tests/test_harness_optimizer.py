@@ -642,3 +642,55 @@ def test_report_matched_budget_comparison_math():
     assert r["original"]["pass@2"] == pytest.approx(2 / 3)
     assert r["comparisons"]["vs_rerun_baseline_best_of_2"]["diff"] == pytest.approx(1 / 3)
     assert r["comparisons"]["vs_rerun_baseline_best_of_2"]["direction"] == "better"
+
+
+# ---- exploration rule and cost noise band (after the known-answer test) ---------
+
+def test_cost_band_rejects_a_saving_inside_cost_noise():
+    inc = ev(a=(1, 2, 2.0), b=(2, 2, 2.0))
+    slightly_cheaper = ev(a=(1, 2, 1.96), b=(2, 2, 1.96))    # -2%, like r7's accepted r1
+    clearly_cheaper = ev(a=(1, 2, 1.8), b=(2, 2, 1.8))        # -10%
+    assert decide(inc, slightly_cheaper, inc.S, AcceptanceConfig(delta=0.3)).accept   # old rule
+    banded = AcceptanceConfig(delta=0.3, cost_delta=0.05)
+    d = decide(inc, slightly_cheaper, inc.S, banded)
+    assert not d.accept and "cost noise" in d.reason
+    assert decide(inc, clearly_cheaper, inc.S, banded).accept
+
+
+def test_calibrate_cost_delta_measures_trial_to_trial_cost_noise():
+    from app.harness_optimizer.acceptance import calibrate_cost_delta
+    steady = {f"c{i}": (1.0, 1.0) for i in range(20)}
+    noisy = {f"c{i}": (1.0, 1.4) if i % 2 else (1.4, 1.0) for i in range(20)}
+    assert calibrate_cost_delta(steady) == 0.0
+    assert calibrate_cost_delta(noisy) > 0.05
+    assert calibrate_cost_delta(noisy, trials_per_eval=4) == pytest.approx(calibrate_cost_delta(noisy) / 2)
+
+
+def test_exploration_rule_forces_a_new_component_family_after_rejections(tmp_path):
+    seen: list[str] = []
+
+    async def prompt_then_settings(system, prompt):
+        seen.append(prompt)
+        if "EXPLORATION CONSTRAINT" in prompt:
+            return json.dumps({"component": "settings", "hypothesis": "more turns",
+                               "edits": [{"file": "settings.json", "find": '"max_iterations": 15',
+                                          "replace": '"max_iterations": 18'}]})
+        return json.dumps({"component": "prompt_fragments", "hypothesis": f"wording {len(seen)}",
+                           "edits": [{"file": "log_context_missing.prompt", "find": "STEPS 1-3",
+                                      "replace": f"STEPS 1-3 v{len(seen)}"}]})
+
+    opt = _opt(tmp_path, FakeEvaluator(), proposer_llm=prompt_then_settings, max_rounds=3,
+               max_stall=5, diversity_after=2)
+    asyncio.run(opt.run_until_stopped())
+    comps = [e.component for e in opt.history.entries()]
+    assert comps == ["prompt_fragments", "prompt_fragments", "settings"]
+    assert "EXPLORATION CONSTRAINT" in seen[-1] and "'settings'" in seen[-1]
+    assert "EXPLORATION CONSTRAINT" not in seen[0]
+
+
+def test_constrained_proposal_cannot_claim_one_component_and_edit_another(tmp_path):
+    async def sneaky(system, prompt):
+        return json.dumps({"component": "settings", "hypothesis": "h",
+                           "edits": [{"file": "task_prompt.prompt", "find": "x", "replace": "y"}]})
+    with pytest.raises(candidates.InvalidCandidate, match="can't edit"):
+        asyncio.run(proposer.propose(BASE, "ev", "hist", sneaky, allowed_components=("settings",)))

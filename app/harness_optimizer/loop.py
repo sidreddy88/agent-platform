@@ -67,6 +67,7 @@ from app.harness_optimizer.acceptance import (
     AcceptanceConfig,
     CaseResult,
     EvalResult,
+    calibrate_cost_delta,
     calibrate_delta,
     decide,
 )
@@ -112,6 +113,15 @@ class OptimizerConfig:
     health_every: int = 10             # finished cases between tripwire checks
     health_window: int = 20            # most recent cases a check looks at
     stall_minutes: float = 20.0        # watchdog: no progress this long -> exit
+    # Exploration (RRSI's component-novelty idea, simplified): once the last
+    # `diversity_after` candidates were all rejected, the next must edit a
+    # component family none of them touched. 0 = off. Added after the
+    # known-answer test (r7): the proposer edited prompt text every round and
+    # never touched settings, even with a retry setting targeting the exact
+    # failure its own evidence named.
+    diversity_after: int = 0
+    cost_band: bool = False            # calibrate and apply a cost noise band (acceptance.cost_delta)
+    health_baseline: dict = field(default_factory=dict)   # overrides health.BASELINE (other models)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -411,7 +421,8 @@ class Optimizer:
                 w.costs.extend([cr["cost_usd"] / cr["trials"]] * cr["trials"])
             if c in guards:
                 w.guard_verdicts.extend(cr["verdicts"])
-        problems = health.check(w, round0=self._health_round0)
+        baseline = {**health.BASELINE, **self.cfg.health_baseline}
+        problems = health.check(w, round0=self._health_round0, baseline=baseline)
         h = state.health
         h["checks"] = h.get("checks", 0) + 1
         h["last_check"] = {"time": _now(), "round": state.round, "phase": state.phase,
@@ -514,6 +525,13 @@ class Optimizer:
         esc_pairs = {c: (tr[1], tr[2]) for c, tr in never.items() if 1 in tr and 2 in tr}
         state.delta_esc = (calibrate_delta(esc_pairs, trials_per_eval=self.cfg.trials)
                            if len(esc_pairs) >= 2 else None)
+        if self.cfg.cost_band:
+            costs: dict[str, dict[int, float]] = {}
+            for t in trajs:
+                costs.setdefault(t["instance_id"], {})[t.get("trial")] = (t.get("cost") or {}).get("cost_usd") or 0.0
+            cost_pairs = {c: (tr[1], tr[2]) for c, tr in costs.items() if 1 in tr and 2 in tr}
+            state.delta_cost = (calibrate_cost_delta(cost_pairs, trials_per_eval=self.cfg.trials)
+                                if len(cost_pairs) >= 2 else None)
         state.S_star = result.S
         state.incumbent_eval = json.dumps(self._eval_ref(self.run.incumbent_dir, k))
         logger.info("round 0: S=%.3f C=$%.3f delta=%.3f", result.S, result.C, state.delta)
@@ -560,12 +578,15 @@ class Optimizer:
         inc_result, inc_traj = self._load_ref(json.loads(state.incumbent_eval))
         cand = state.candidate or {"id": f"r{state.round}", "repairs": 0, "feedback": ""}
         cand_dir = self.run.candidate_dir(state.round)
+        allowed = self._allowed_components()
+        if allowed:
+            cand["allowed_components"] = list(allowed)
         try:
             prop, files = await proposer.propose(
                 self.run.incumbent_dir, evidence.build(inc_result, inc_traj),
                 self.history.summary(),
                 lambda sys_, prompt: self._llm_call(self.proposer_llm, budget, state, sys_, prompt),
-                cand.get("feedback", ""))
+                cand.get("feedback", ""), allowed)
             candidates.apply_edit(self.run.incumbent_dir, cand_dir, files)
             candidates.validate(self.run.incumbent_dir, cand_dir)
         except candidates.InvalidCandidate as exc:
@@ -582,6 +603,24 @@ class Optimizer:
                      "dir": str(cand_dir), "hash": candidates.content_hash(cand_dir)})
         state.candidate = cand
         state.phase = "screen"
+
+    _FAMILIES = {"task_prompt": "prompt", "prompt_fragments": "prompt",
+                 "tool_descriptions": "tools", "settings": "settings"}
+
+    def _allowed_components(self) -> tuple[str, ...] | None:
+        """Exploration rule: if this run's last `diversity_after` judged
+        candidates were all rejected, only component families none of them
+        touched are allowed. Pilot notes (seeded history) don't count."""
+        n = self.cfg.diversity_after
+        if n <= 0:
+            return None
+        mine = [e for e in self.history.entries() if not e.outcome.startswith("pilot_")]
+        recent = mine[-n:]
+        if len(recent) < n or any(e.outcome == "accepted" for e in recent):
+            return None
+        tried = {self._FAMILIES.get(e.component) for e in recent}
+        allowed = tuple(c for c, fam in self._FAMILIES.items() if fam not in tried)
+        return allowed or None
 
     async def _screen(self, state: RunState, budget: Budget) -> None:
         cand = state.candidate
@@ -616,7 +655,8 @@ class Optimizer:
         cand_result, _ = self._load_ref(json.loads(cand["eval"]))
         base = AcceptanceConfig(**self.cfg.acceptance)
         acfg = replace(base, delta=state.delta, guard_cases=tuple(self.cfg.guard_cases),
-                       max_escalation_rise=max(base.max_escalation_rise, state.delta_esc or 0.0))
+                       max_escalation_rise=max(base.max_escalation_rise, state.delta_esc or 0.0),
+                       cost_delta=(state.delta_cost or 0.0) if self.cfg.cost_band else 0.0)
         d = decide(inc_result, cand_result, state.S_star, acfg)
         cand_dir = Path(cand["dir"])
         diff = candidates.diff(self.run.incumbent_dir, cand_dir)

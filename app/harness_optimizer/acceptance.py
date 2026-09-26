@@ -95,6 +95,9 @@ class AcceptanceConfig:
     w_c: float = 15.0              # RRSI coding
     max_escalation_rise: float = 0.05
     guard_cases: tuple[str, ...] = ()
+    # Noise band on the relative cost change, calibrated like delta from round
+    # 0's trial pairs. 0 = the original rule (in band, any saving counts).
+    cost_delta: float = 0.0
 
 
 @dataclass
@@ -160,12 +163,35 @@ def decide(incumbent: EvalResult, candidate: EvalResult, S_star: float,
                     f"{dC:+.3f} {'<=' if d.accept else '>'} budget {budget:.3f}")
         return d
 
-    shaped = cfg.w_s * dS - cfg.w_c * dC
+    # In band a candidate must be cheaper, and with a cost band, cheaper by
+    # more than cost noise: the same "submit sooner" edit measured dC anywhere
+    # from -1.8% to +4.8% across evaluations, so comparing with 0 let noise decide.
+    shaped = cfg.w_s * dS - cfg.w_c * (dC + cfg.cost_delta)
     d.accept = shaped > 0
-    d.reason = (f"within noise band (dS {dS:+.3f}, delta {cfg.delta:.3f}); "
-                f"{cfg.w_s}*dS - {cfg.w_c}*dC = {shaped:+.3f} {'>' if d.accept else '<='} 0"
-                + ("" if d.accept else " (in band, a candidate must be cheaper)"))
+    band = f", cost band {cfg.cost_delta:.3f}" if cfg.cost_delta else ""
+    d.reason = (f"within noise band (dS {dS:+.3f}, delta {cfg.delta:.3f}{band}); "
+                f"{cfg.w_s}*dS - {cfg.w_c}*(dC{' + band' if cfg.cost_delta else ''}) = {shaped:+.3f} "
+                f"{'>' if d.accept else '<='} 0"
+                + ("" if d.accept else " (in band, a candidate must be cheaper"
+                   + (" by more than cost noise)" if cfg.cost_delta else ")")))
     return d
+
+
+def calibrate_cost_delta(trial_costs: dict[str, tuple[float, float]], z: float = 2.0,
+                         trials_per_eval: int = 1, reps: int = 2000, seed: int = 7) -> float:
+    """Noise band on the RELATIVE cost change, from two trials of the same
+    harness per case: the null dC is (sum trial1 - sum trial2) / mean total,
+    bootstrapped over cases, times z, shrunk by sqrt(trials_per_eval)."""
+    pairs = list(trial_costs.values())
+    if len(pairs) < 2:
+        raise ValueError("need at least 2 cases with two trials each")
+    rng = random.Random(seed)
+    boot = []
+    for _ in range(reps):
+        sample = [rng.choice(pairs) for _ in pairs]
+        a, b = sum(x for x, _ in sample), sum(y for _, y in sample)
+        boot.append((a - b) / ((a + b) / 2) if a + b else 0.0)
+    return z * statistics.pstdev(boot) / trials_per_eval ** 0.5
 
 
 def calibrate_delta(trial_pairs: dict[str, tuple[bool, bool]], z: float = 2.0,

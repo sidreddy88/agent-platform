@@ -82,13 +82,29 @@ class Proposal:
     edits: list[dict] = field(default_factory=list)
 
 
-def build_prompt(harness_dir: Path, evidence: str, history: str, feedback: str = "") -> str:
+# Which harness files each component may edit, so a proposal can't claim one
+# component (to satisfy an exploration constraint) while editing another.
+COMPONENT_FILES = {
+    "task_prompt": lambda f: f == "task_prompt.prompt",
+    "prompt_fragments": lambda f: f.endswith(".prompt") and f != "task_prompt.prompt",
+    "tool_descriptions": lambda f: f == "tool_descriptions.json",
+    "settings": lambda f: f == "settings.json",
+}
+
+
+def build_prompt(harness_dir: Path, evidence: str, history: str, feedback: str = "",
+                 allowed_components: tuple[str, ...] | None = None) -> str:
     files = harness_files(harness_dir)
     parts = ["=== CURRENT HARNESS FILES ==="]
     for name, text in files.items():
         parts.append(f"--- {name} ({len(text)} chars) ---\n{text}")
     parts.append(f"=== EVIDENCE FROM RECENT RUNS ===\n{evidence}")
     parts.append(f"=== EDIT HISTORY ===\n{history}")
+    if allowed_components:
+        parts.append("=== EXPLORATION CONSTRAINT FOR THIS ROUND ===\n"
+                     f"Recent candidates in this run all edited other components and none was "
+                     f"accepted. This round's edit must target one of: {list(allowed_components)}. "
+                     f"Read those files as behaviour you can change, not just wording.")
     if feedback:
         parts.append(f"=== YOUR PREVIOUS ATTEMPT THIS ROUND WAS REJECTED ===\n{feedback}\n"
                      f"Fix those problems, or propose a different edit.")
@@ -130,7 +146,16 @@ def apply_ops(harness_dir: Path, edits: list[dict]) -> dict[str, str]:
 
 
 async def propose(harness_dir: Path, evidence: str, history: str, llm: LLM,
-                  feedback: str = "") -> tuple[Proposal, dict[str, str]]:
-    text = await llm(SYSTEM, build_prompt(harness_dir, evidence, history, feedback))
+                  feedback: str = "", allowed_components: tuple[str, ...] | None = None,
+                  ) -> tuple[Proposal, dict[str, str]]:
+    text = await llm(SYSTEM, build_prompt(harness_dir, evidence, history, feedback, allowed_components))
     proposal = parse(text)
+    if allowed_components:
+        if proposal.component not in allowed_components:
+            raise InvalidCandidate(f"this round must edit one of {list(allowed_components)}, "
+                                   f"got {proposal.component!r}")
+        owns = COMPONENT_FILES[proposal.component]
+        stray = sorted({e["file"] for e in proposal.edits if not owns(e["file"])})
+        if stray:
+            raise InvalidCandidate(f"component {proposal.component!r} can't edit {stray}")
     return proposal, apply_ops(harness_dir, proposal.edits)
