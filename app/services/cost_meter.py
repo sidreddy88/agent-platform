@@ -56,6 +56,18 @@ def _price_key(model: str) -> str:
     return _DATE_SUFFIX.sub("", model.split("/")[-1])
 
 
+def rates_per_mtok(model: str) -> dict[str, float] | None:
+    """Per-million-token prices by billing type, or None if the model isn't priced.
+    The one place that reads PRICES_PER_MTOK's (input, output[, cache_read]) tuples."""
+    prices = PRICES_PER_MTOK.get(_price_key(model))
+    if prices is None:
+        return None
+    inp, out = prices[0], prices[1]
+    return {"input": inp, "output": out,
+            "cache_read": prices[2] if len(prices) > 2 else inp * CACHE_READ_MULTIPLIER,
+            "cache_write": inp * CACHE_WRITE_MULTIPLIER}
+
+
 @dataclass
 class _ModelUsage:
     calls: int = 0
@@ -65,16 +77,14 @@ class _ModelUsage:
     cache_write_tokens: int = 0
 
     def cost_by_billing_type(self, model: str) -> dict[str, float] | None:
-        prices = PRICES_PER_MTOK.get(_price_key(model))
-        if prices is None:
+        r = rates_per_mtok(model)
+        if r is None:
             return None
-        inp, out = prices[0], prices[1]
-        cache_read = prices[2] if len(prices) > 2 else inp * CACHE_READ_MULTIPLIER
         return {
-            "input": self.input_tokens * inp / 1e6,
-            "output": self.output_tokens * out / 1e6,
-            "cache_write": self.cache_write_tokens * inp * CACHE_WRITE_MULTIPLIER / 1e6,
-            "cache_read": self.cache_read_tokens * cache_read / 1e6,
+            "input": self.input_tokens * r["input"] / 1e6,
+            "output": self.output_tokens * r["output"] / 1e6,
+            "cache_write": self.cache_write_tokens * r["cache_write"] / 1e6,
+            "cache_read": self.cache_read_tokens * r["cache_read"] / 1e6,
         }
 
 
