@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import signal
+import uuid
 from pathlib import Path
 
 from app.core.config import settings
@@ -26,6 +27,19 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CLONE_ROOT = os.path.join(
     os.path.expanduser("~"), ".agent-platform", "repos"
 )
+
+# One lock per base clone, held around every git command that writes to it
+# (clone, fetch, worktree add, worktree prune). Pinned replays of the same repo
+# can then run concurrently: each gets its own worktree, and only the short git
+# bookkeeping on the shared clone is serialized. Without it, two replays racing
+# on one clone hit git's lock files, or one's prune ran mid-add of another.
+_BASE_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+
+
+def _base_lock(path: Path) -> asyncio.Lock:
+    # Keyed by event loop too: an asyncio.Lock is bound to the loop it first
+    # waits on, and tests (or scripts) may run several loops in one process.
+    return _BASE_LOCKS.setdefault((id(asyncio.get_running_loop()), str(path)), asyncio.Lock())
 
 
 class LocalRepoService:
@@ -49,7 +63,11 @@ class LocalRepoService:
             # the live shared clone (self._base_path, unpinned instances)
             # always tracks current HEAD, which by definition no longer has
             # the bug for any already-merged ground-truth case.
-            self._path = Path(clone_root) / "_eval_worktrees" / f"{owner}-{repo}-{pinned_sha[:12]}"
+            # The suffix makes each instance's worktree its own: two replays of
+            # the same case (trials running concurrently) must not share a
+            # directory that either one deletes when it finishes.
+            self._path = (Path(clone_root) / "_eval_worktrees"
+                          / f"{owner}-{repo}-{pinned_sha[:12]}-{uuid.uuid4().hex[:6]}")
         else:
             self._path = self._base_path
         self._ready = False
@@ -145,6 +163,10 @@ class LocalRepoService:
         """
         if self._path.exists():
             return  # already checked out (idempotent — reruns reuse it)
+        async with _base_lock(self._base_path):
+            await self._add_pinned_worktree()
+
+    async def _add_pinned_worktree(self) -> None:
         if not (self._base_path / ".git").exists():
             await self._clone(target=self._base_path)
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
@@ -189,9 +211,10 @@ class LocalRepoService:
         except Exception as exc:
             logger.warning("LocalRepo: could not delete worktree %s: %s", self._path, exc)
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
-        rc, _, stderr = await _run(
-            ["git", "-C", str(self._base_path), "worktree", "prune"], env=env, timeout=120,
-        )
+        async with _base_lock(self._base_path):
+            rc, _, stderr = await _run(
+                ["git", "-C", str(self._base_path), "worktree", "prune"], env=env, timeout=120,
+            )
         if rc != 0:
             logger.warning("LocalRepo: worktree prune failed for %s: %s", self._base_path, stderr.strip())
         self._ready = False
