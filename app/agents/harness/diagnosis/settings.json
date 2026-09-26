@@ -10,5 +10,5 @@
  "file_read_char_limit": 12000,
  "grep_default_glob": "*",
  "grep_max_matches": 50,
- "retry_on_no_submission": 0
+ "retry_on_no_submission": 1
 }
