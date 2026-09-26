@@ -150,7 +150,9 @@ class Optimizer:
                 await self._step(state, budget)
                 self.run.save(state)
         except BudgetExceeded as exc:
-            state.phase, state.stop_reason = "done", f"budget: {exc}"
+            # Not done either: the phase is kept, so raising the cap (--budget
+            # on resume) continues from here, with finished cases from the cache.
+            state.stop_reason = f"budget: {exc}"
         except ProviderFailure as exc:
             # Not done: the phase is kept, so a resume continues from here once
             # the provider problem (credits, keys) is fixed.

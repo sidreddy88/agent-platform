@@ -286,9 +286,20 @@ def test_provider_failure_stops_resumably_and_counts_partial_cost(tmp_path):
 def test_budget_cap_stops_before_an_evaluation_it_cannot_afford(tmp_path):
     ev_ = FakeEvaluator()
     state = asyncio.run(_opt(tmp_path, ev_, budget=9.0).run_until_stopped())
-    assert state.phase == "done" and state.stop_reason.startswith("budget:")
+    assert state.phase != "done" and state.stop_reason.startswith("budget:")
     assert state.spent_usd <= 9.0
     assert len(ev_.calls) < 8
+
+
+def test_budget_stop_resumes_where_it_stopped_when_the_cap_is_raised(tmp_path):
+    first = FakeEvaluator()
+    stopped = asyncio.run(_opt(tmp_path, first, budget=9.0).run_until_stopped())
+    assert stopped.stop_reason.startswith("budget:")
+    second = FakeEvaluator()
+    state = asyncio.run(_opt(tmp_path, second, budget=100.0, max_rounds=1).run_until_stopped())
+    assert state.phase == "done" and state.stop_reason == "completed 1 rounds"
+    paid_before = {(h, c) for h, c in first.calls}
+    assert not paid_before & {(h, c) for h, c in second.calls}    # nothing paid twice
 
 
 def test_cli_config_and_critic_patterns_come_from_the_committed_split():
@@ -479,7 +490,7 @@ def test_true_budget_exhaustion_still_stops(tmp_path):
     ev_ = SlowEvaluator(LANES)
     state = asyncio.run(_opt(tmp_path, ev_, budget=5.0, max_rounds=0, parallel_lanes=3,
                              case_lanes=LANES, default_case_cost_usd=1.0).run_until_stopped())
-    assert state.phase == "done" and state.stop_reason.startswith("budget:")
+    assert state.phase != "done" and state.stop_reason.startswith("budget:")
     assert state.spent_usd <= 5.0
 
 

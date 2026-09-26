@@ -113,7 +113,7 @@ def status(run_dir: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--budget", type=float, help="hard cap in USD for this run")
+    parser.add_argument("--budget", type=float, help="hard cap in USD for this run (on resume: raise the cap)")
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--trials", type=int, default=1, help="trials per case per candidate")
     parser.add_argument("--model", default=DEFAULT_LLM, help="proposer and critic model")
@@ -140,8 +140,9 @@ def main() -> int:
     if run.exists():
         from app.harness_optimizer.loop import OptimizerConfig
         cfg = OptimizerConfig(**run.load().config)
-        # Method settings (budget, rounds, trials, cases) come from the run and
-        # can't change mid-run; parallelism is operational and can.
+        # Method settings (trials, cases, acceptance) come from the run and
+        # can't change mid-run; parallelism is operational and can, and the
+        # budget and round limits can be raised.
         if args.parallel is not None:
             cfg.parallel_lanes = args.parallel
         # Extending a run: more rounds may be added on resume (never fewer,
@@ -155,6 +156,13 @@ def main() -> int:
                 state.phase, state.stop_reason = "propose", None
             run.save(state)
             print(f"extended to {args.rounds} rounds")
+        # The budget cap may be raised on resume (never lowered). A run stopped
+        # by the cap keeps its phase, so it continues where it stopped.
+        if args.budget is not None and args.budget > cfg.budget_usd:
+            print(f"budget raised from ${cfg.budget_usd:.2f} to ${args.budget:.2f}")
+            cfg.budget_usd = args.budget
+            state.config["budget_usd"] = args.budget
+            run.save(state)
         cfg.case_lanes = cfg.case_lanes or case_lanes(split)
         print(f"resuming {args.run_dir} (method config from the run's state; "
               f"parallel lanes = {cfg.parallel_lanes})")
