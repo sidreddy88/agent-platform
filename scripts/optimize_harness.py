@@ -67,9 +67,23 @@ def critic_patterns(split: dict, cases_paths: tuple[Path, ...] = (CASES, HELDOUT
     return domain_patterns(ids, repos, sorted(paths))
 
 
+FULL = ROOT / "app" / "evals" / "swebench_verified_full.jsonl"
+
+
+def full_cases() -> list[str]:
+    return [json.loads(line)["instance_id"] for line in FULL.read_text().splitlines() if line.strip()]
+
+
 def case_lanes(split: dict) -> dict[str, str]:
-    """One lane per repo: replays of the same repo share a base clone."""
-    return {cid: s["repo"] for cid, s in split["case_stats"].items()}
+    """One lane per repo: replays of the same repo share a base clone. Covers
+    the split's cases and, if fetched, all 500 SWE-bench Verified instances."""
+    lanes = {cid: s["repo"] for cid, s in split["case_stats"].items()}
+    if FULL.exists():
+        for line in FULL.read_text().splitlines():
+            if line.strip():
+                inst = json.loads(line)
+                lanes.setdefault(inst["instance_id"], inst["repo"])
+    return lanes
 
 
 def heldout_cases(split: dict) -> list[str]:
@@ -86,12 +100,13 @@ def build_config(split: dict, budget: float, rounds: int, trials: int, parallel:
                  final: bool = False, final_trials: int = 3, cases: str = "evolve"):
     from app.harness_optimizer.loop import OptimizerConfig
 
-    if cases == "heldout":
-        # Measuring a harness on the held-out set (baseline only, --rounds 0):
-        # never for evolving, which would train on the test set.
+    if cases in ("heldout", "full500"):
+        # Measuring a harness on the held-out set or the whole benchmark
+        # (baseline only, --rounds 0): never for evolving, which would train on
+        # the test set (the full 500 contains the held-out cases).
         if rounds > 0:
-            raise SystemExit("--cases heldout is for measurement only; use --rounds 0")
-        evolve, guards = heldout_cases(split), []
+            raise SystemExit(f"--cases {cases} is for measurement only; use --rounds 0")
+        evolve, guards = (heldout_cases(split) if cases == "heldout" else full_cases()), []
     else:
         evolve = split["evolve"]["failing"] + split["evolve"].get("hard", [])
         guards = split["evolve"]["guards"]
@@ -165,8 +180,8 @@ def main() -> int:
     parser.add_argument("--final", action="store_true",
                         help="after the rounds, run original vs final harness on the held-out set")
     parser.add_argument("--final-trials", type=int, default=3)
-    parser.add_argument("--cases", choices=("evolve", "heldout"), default="evolve",
-                        help="heldout: measure a harness on the held-out set (requires --rounds 0)")
+    parser.add_argument("--cases", choices=("evolve", "heldout", "full500"), default="evolve",
+                        help="heldout / full500: measure a harness (requires --rounds 0)")
     parser.add_argument("--harness", type=Path, default=None,
                         help="starting harness directory (default: app/agents/harness/diagnosis)")
     parser.add_argument("--diversity", type=int, default=0,

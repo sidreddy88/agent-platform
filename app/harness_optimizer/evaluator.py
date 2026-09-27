@@ -28,6 +28,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SWEBENCH_CASES = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"
 # The rest of the held-out repos' instances from the full 500 (held-out only).
 HELDOUT_EXTRA = ROOT / "app" / "evals" / "swebench_heldout_extra.jsonl"
+# All 500 SWE-bench Verified instances (scripts/fetch_swebench_sample.py --all).
+SWEBENCH_FULL = ROOT / "app" / "evals" / "swebench_verified_full.jsonl"
 
 
 class ProviderFailure(RuntimeError):
@@ -64,7 +66,7 @@ def _is_escalation(verdict: str, detail: str) -> bool:
 
 
 class ReplayEvaluator:
-    def __init__(self, cases_paths: tuple[Path, ...] = (SWEBENCH_CASES, HELDOUT_EXTRA)):
+    def __init__(self, cases_paths: tuple[Path, ...] = (SWEBENCH_CASES, HELDOUT_EXTRA, SWEBENCH_FULL)):
         self._instances = {}
         for path in cases_paths:
             if path.exists():

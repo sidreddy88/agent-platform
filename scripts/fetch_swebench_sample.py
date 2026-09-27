@@ -27,6 +27,7 @@ privacy concern, unlike app/evals/pipeline_regression.jsonl's real incident
 data) -- committed, not gitignored.
 
 Usage:
+    python scripts/fetch_swebench_sample.py --all --out app/evals/swebench_verified_full.jsonl
     python scripts/fetch_swebench_sample.py
     python scripts/fetch_swebench_sample.py --per-repo 3 --out /tmp/sample.jsonl
 """
@@ -95,6 +96,8 @@ def main() -> int:
     parser.add_argument("--per-repo", type=int, default=2,
                          help="Max instances to keep per repo (default 2 -- 12 repos -> ~24 instances)")
     parser.add_argument("--out", default=str(_DEFAULT_OUT))
+    parser.add_argument("--all", action="store_true",
+                        help="keep every instance (the full 500), not a stratified sample")
     args = parser.parse_args()
 
     print(f"Fetching all rows from {_DATASET} (test split)...")
@@ -102,7 +105,7 @@ def main() -> int:
     print(f"Fetched {len(rows)} total instances across "
           f"{len({r['repo'] for r in rows})} repos.")
 
-    sample = _stratified_sample(rows, args.per_repo)
+    sample = rows if args.all else _stratified_sample(rows, args.per_repo)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
