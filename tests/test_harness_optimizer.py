@@ -708,3 +708,64 @@ def test_operator_interrupt_records_the_session_end(tmp_path):
     s = RunDir(tmp_path / "run").load()
     assert s.phase != "done" and s.stop_reason.startswith("interrupted")
     assert s.timing["sessions"][-1]["ended_because"].startswith("interrupted")
+
+
+# ---- r9 proposer/critic changes ---------------------------------------------------
+
+def _two(preferred=1):
+    a = {"component": "prompt_fragments", "hypothesis": "A: wording",
+         "edits": [{"file": "log_context_missing.prompt", "find": "STEPS 1-3", "replace": "STEPS 1-3 A"}]}
+    b = {"component": "settings", "hypothesis": "B: retry once when no answer",
+         "edits": [{"file": "settings.json", "find": '"retry_on_no_submission": 1',
+                    "replace": '"retry_on_no_submission": 2'}]}
+    return json.dumps({"candidates": [a, b], "preferred": preferred, "why": "evidence"})
+
+
+def test_two_candidates_parse_preferred_first_and_single_shape_still_works():
+    props = proposer.parse_all(_two(preferred=1))
+    assert [p.component for p in props] == ["settings", "prompt_fragments"]
+    single = json.dumps({"component": "task_prompt", "hypothesis": "h",
+                         "edits": [{"file": "task_prompt.prompt", "find": "x", "replace": "y"}]})
+    assert [p.component for p in proposer.parse_all(single)] == ["task_prompt"]
+
+
+def test_prompt_shows_settings_as_behaviour_rules_and_rejected_ideas():
+    prompt = proposer.build_prompt(BASE, "ev", "hist", run_context={
+        "acceptance": "Noise band on pass rate: 0.093", "rejected": ["[task_prompt] submit sooner -> rejected"]})
+    assert "=== SETTINGS (behaviour you can change) ===" in prompt
+    assert "retry_on_no_submission = " in prompt and "allowed 0-2" in prompt
+    assert "Noise band on pass rate: 0.093" in prompt and "submit sooner" in prompt
+
+
+def test_critic_rejection_of_the_preferred_candidate_falls_back_to_the_alternate(tmp_path):
+    async def two(system, prompt):
+        return _two(preferred=0)                     # the prompt wording is preferred
+
+    reviews = []
+
+    async def reject_first(system, payload):
+        reviews.append(payload)
+        verdict = "reject" if "A: wording" in payload else "accept"
+        return json.dumps({"verdict": verdict, "reasons": ["near-duplicate"] if verdict == "reject" else []})
+
+    ev_ = FakeEvaluator()
+    opt = _opt(tmp_path, ev_, proposer_llm=two, critic_llm=reject_first, max_rounds=1)
+    asyncio.run(opt.run_until_stopped())
+    entry = opt.history.entries()[-1]
+    assert entry.component == "settings" and entry.outcome in ("accepted", "rejected")
+    assert len(reviews) == 2 and "ALREADY REJECTED" not in reviews[0]   # nothing rejected yet in round 1
+    assert "CURRENT TOOL DESCRIPTIONS" in reviews[0]
+
+
+def test_critic_is_told_what_was_already_rejected():
+    seen = {}
+
+    async def capture(system, payload):
+        seen["p"] = payload
+        seen["s"] = system
+        return '{"verdict": "accept", "reasons": []}'
+    asyncio.run(critic.review("--- a/x\n+++ b/x\n+new text\n", "task_prompt", "h", capture, [],
+                              rejected=["[task_prompt] submit sooner -> rejected"], tool_descriptions="{}"))
+    assert "ALREADY REJECTED IN THIS RUN" in seen["p"] and "submit sooner" in seen["p"]
+    assert "NEAR-DUPLICATE" in seen["s"] and "FALSE TOOL CLAIM" in seen["s"]
+    assert "NOT unbounded work" in seen["s"]

@@ -46,14 +46,20 @@ DEFAULT_LLM = "claude-opus-5"
 
 
 HELDOUT_EXTRA = ROOT / "app" / "evals" / "swebench_heldout_extra.jsonl"
+FULL = ROOT / "app" / "evals" / "swebench_verified_full.jsonl"
 
 
-def critic_patterns(split: dict, cases_paths: tuple[Path, ...] = (CASES, HELDOUT_EXTRA)) -> list[tuple[str, str]]:
+def critic_patterns(split: dict, cases_paths: tuple[Path, ...] | None = None) -> list[tuple[str, str]]:
+    """The leakage denylist: every benchmark case id, repo and true-fix path the
+    optimizer could ever see (the split's cases and, if fetched, all 500). The
+    first version covered only the split's cases; an evolve set drawn from the
+    full 500 (r9) would have let the proposer name its own cases unchecked."""
     from app.harness_optimizer.critic import domain_patterns
     from scripts.eval_swebench_diagnosis import _touched_files
 
-    ids = sorted(split["case_stats"])
-    repos = sorted({s["repo"] for s in split["case_stats"].values()})
+    cases_paths = cases_paths or (CASES, HELDOUT_EXTRA, FULL)
+    ids = set(split["case_stats"])
+    repos = {s["repo"] for s in split["case_stats"].values()}
     paths: set[str] = set()
     for cases_path in cases_paths:
         if not cases_path.exists():
@@ -62,12 +68,10 @@ def critic_patterns(split: dict, cases_paths: tuple[Path, ...] = (CASES, HELDOUT
             if not line.strip():
                 continue
             inst = json.loads(line)
-            if inst["instance_id"] in split["case_stats"]:
-                paths |= _touched_files(inst["patch"])
-    return domain_patterns(ids, repos, sorted(paths))
-
-
-FULL = ROOT / "app" / "evals" / "swebench_verified_full.jsonl"
+            ids.add(inst["instance_id"])
+            repos.add(inst["repo"])
+            paths |= _touched_files(inst["patch"])
+    return domain_patterns(sorted(ids), sorted(repos), sorted(paths))
 
 
 def full_cases() -> list[str]:
@@ -97,7 +101,8 @@ def smoke_cases(split: dict) -> list[str]:
 
 def build_config(split: dict, budget: float, rounds: int, trials: int, parallel: int = 1,
                  calibration_trials: int = 2, lane_width: int = 1, smoke: bool = False,
-                 final: bool = False, final_trials: int = 3, cases: str = "evolve"):
+                 final: bool = False, final_trials: int = 3, cases: str = "evolve",
+                 cases_file: Path | None = None):
     from app.harness_optimizer.loop import OptimizerConfig
 
     if cases in ("heldout", "full500"):
@@ -107,6 +112,14 @@ def build_config(split: dict, budget: float, rounds: int, trials: int, parallel:
         if rounds > 0:
             raise SystemExit(f"--cases {cases} is for measurement only; use --rounds 0")
         evolve, guards = (heldout_cases(split) if cases == "heldout" else full_cases()), []
+    elif cases_file is not None:
+        # An evolve set built from a measured run (e.g. app/evals/r9_evolve_deepseek.json).
+        # It must never overlap the held-out cases the final phase reports on.
+        spec = json.loads(Path(cases_file).read_text())
+        evolve, guards = spec["evolve"], spec.get("guards", [])
+        overlap = set(evolve + guards) & set(heldout_cases(split))
+        if overlap:
+            raise SystemExit(f"{cases_file} overlaps the held-out set: {sorted(overlap)[:5]}")
     else:
         evolve = split["evolve"]["failing"] + split["evolve"].get("hard", [])
         guards = split["evolve"]["guards"]
@@ -182,6 +195,8 @@ def main() -> int:
     parser.add_argument("--final-trials", type=int, default=3)
     parser.add_argument("--cases", choices=("evolve", "heldout", "full500"), default="evolve",
                         help="heldout / full500: measure a harness (requires --rounds 0)")
+    parser.add_argument("--cases-file", type=Path, default=None,
+                        help='JSON {"evolve": [...], "guards": [...]} to evolve on instead of the split')
     parser.add_argument("--harness", type=Path, default=None,
                         help="starting harness directory (default: app/agents/harness/diagnosis)")
     parser.add_argument("--diversity", type=int, default=0,
@@ -246,7 +261,7 @@ def main() -> int:
             parser.error("--budget is required to start a new run")
         cfg = build_config(split, args.budget, args.rounds, args.trials, args.parallel or 1,
                            args.calibration_trials, args.lane_width, args.smoke, args.final,
-                           args.final_trials, args.cases)
+                           args.final_trials, args.cases, args.cases_file)
         cfg.diversity_after = args.diversity
         cfg.cost_band = args.cost_band
         cfg.health_baseline = args.health_baseline or {}

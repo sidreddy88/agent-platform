@@ -589,13 +589,12 @@ class Optimizer:
         if allowed:
             cand["allowed_components"] = list(allowed)
         try:
-            prop, files = await proposer.propose(
+            options = await proposer.propose_all(
                 self.run.incumbent_dir, evidence.build(inc_result, inc_traj),
                 self.history.summary(),
                 lambda sys_, prompt: self._llm_call(self.proposer_llm, budget, state, sys_, prompt),
-                cand.get("feedback", ""), allowed)
-            candidates.apply_edit(self.run.incumbent_dir, cand_dir, files)
-            candidates.validate(self.run.incumbent_dir, cand_dir)
+                cand.get("feedback", ""), allowed, self._run_context(state))
+            prop, files = self._first_valid(options, cand_dir)
         except candidates.InvalidCandidate as exc:
             if cand["repairs"] < self.cfg.repair_attempts:
                 cand["repairs"] += 1
@@ -608,8 +607,47 @@ class Optimizer:
             return
         cand.update({"component": prop.component, "hypothesis": prop.hypothesis,
                      "dir": str(cand_dir), "hash": candidates.content_hash(cand_dir)})
+        # The proposer's second candidate, kept as a fallback if the critic
+        # rejects the preferred one (RRSI proposes two candidates per round).
+        rest = [(p_, f_) for p_, f_ in options if p_ is not prop]
+        cand["alternate"] = ({"component": rest[0][0].component, "hypothesis": rest[0][0].hypothesis,
+                              "files": rest[0][1]} if rest else None)
         state.candidate = cand
         state.phase = "screen"
+
+    def _first_valid(self, options, cand_dir: Path):
+        """Materialise the first option that validates; InvalidCandidate if none."""
+        errors = []
+        for prop, files in options:
+            try:
+                candidates.apply_edit(self.run.incumbent_dir, cand_dir, files)
+                candidates.validate(self.run.incumbent_dir, cand_dir)
+                return prop, files
+            except candidates.InvalidCandidate as exc:
+                errors.append(f"{prop.component}: {exc}")
+        raise candidates.InvalidCandidate("; ".join(errors))
+
+    def _rejected_ideas(self) -> list[str]:
+        out = []
+        for e in self.history.entries():
+            if e.outcome == "accepted":
+                continue
+            meas = f", dS {e.delta_S:+.3f} dC {e.delta_C:+.1%}" if e.delta_S is not None else ""
+            out.append(f"[{e.component}] {e.hypothesis[:220]} -> {e.outcome}{meas}")
+        return out[-12:]
+
+    def _run_context(self, state: RunState) -> dict:
+        band = f"{state.delta:.3f}" if state.delta is not None else "not calibrated"
+        cost = (f"{state.delta_cost:.1%}" if (self.cfg.cost_band and state.delta_cost) else "0 (any saving)")
+        return {
+            "acceptance": (f"Evolve set: {len(self.cfg.evolve_cases)} cases + {len(self.cfg.guard_cases)} guards, "
+                           f"{self.cfg.trials} trial(s) each. Best pass rate so far S* = "
+                           f"{(state.S_star or 0):.3f}. Noise band on pass rate: {band}. A candidate whose pass "
+                           f"rate rises by more than the band is accepted even if it costs more (within a "
+                           f"budget that grows with the gain). Inside the band it must be cheaper by more "
+                           f"than cost noise: {cost}. Vetoed if the no-answer (escalation) rate rises."),
+            "rejected": self._rejected_ideas(),
+        }
 
     _FAMILIES = {"task_prompt": "prompt", "prompt_fragments": "prompt",
                  "tool_descriptions": "tools", "settings": "settings"}
@@ -632,14 +670,31 @@ class Optimizer:
     async def _screen(self, state: RunState, budget: Budget) -> None:
         cand = state.candidate
         diff = candidates.diff(self.run.incumbent_dir, Path(cand["dir"]))
+        tools_file = self.run.incumbent_dir / "tool_descriptions.json"
         rev = await critic.review(
             diff, cand["component"], cand["hypothesis"],
             lambda sys_, prompt: self._llm_call(self.critic_llm, budget, state, sys_, prompt),
-            self.patterns)
+            self.patterns, rejected=self._rejected_ideas(),
+            tool_descriptions=tools_file.read_text() if tools_file.exists() else "")
         if rev.accept:
             state.phase = "evaluate"
             return
         objections = "; ".join(rev.reasons)
+        alt = cand.get("alternate")
+        if alt:
+            # Screen the proposer's second candidate before spending a repair.
+            cand.setdefault("screened_out", []).append(
+                {"component": cand["component"], "hypothesis": cand["hypothesis"], "reasons": rev.reasons})
+            cand["alternate"] = None
+            try:
+                cand_dir = Path(cand["dir"])
+                candidates.apply_edit(self.run.incumbent_dir, cand_dir, alt["files"])
+                candidates.validate(self.run.incumbent_dir, cand_dir)
+                cand.update({"component": alt["component"], "hypothesis": alt["hypothesis"],
+                             "hash": candidates.content_hash(cand_dir)})
+                return                                   # stay in screen, review the alternate
+            except candidates.InvalidCandidate:
+                pass
         if cand["repairs"] < self.cfg.repair_attempts:
             cand["repairs"] += 1
             cand["feedback"] = f"The leakage critic rejected it: {objections}"
