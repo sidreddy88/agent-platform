@@ -15,6 +15,8 @@ are what calibrates the noise band.
 """
 from __future__ import annotations
 
+import asyncio
+
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +63,15 @@ class Evaluator(Protocol):
     async def evaluate(self, harness_dir: Path, case_ids: list[str], trials: int) -> EvalOutcome: ...
 
 
+def _checkout_failed(res: dict) -> bool:
+    """The replay raised before diagnosing because its pinned checkout couldn't
+    be prepared (git fetch / worktree add), not because of the agent."""
+    detail = res.get("detail") or ""
+    return res.get("verdict") == "ERROR" and ("git fetch of pinned sha" in detail
+                                              or "git worktree add failed" in detail
+                                              or "git clone failed" in detail)
+
+
 def _is_escalation(verdict: str, detail: str) -> bool:
     return verdict == "FAIL" and "no affected_file" in (detail or "")
 
@@ -94,9 +105,18 @@ class ReplayEvaluator:
                 async def replay(item, gh, _sink=sink):
                     return await _replay_one(item, gh, trajectory_sink=_sink, harness_dir=str(harness_dir))
 
-                with cost_meter.metered() as meter:
-                    res = await _replay_attempt(replay, inst, github,
-                                                {"instance_id": cid, "repo": inst["repo"]})
+                for checkout_try in range(3):
+                    with cost_meter.metered() as meter:
+                        res = await _replay_attempt(replay, inst, github,
+                                                    {"instance_id": cid, "repo": inst["repo"]})
+                    if not _checkout_failed(res):
+                        break
+                    sink.clear()
+                    await asyncio.sleep(2 * (checkout_try + 1))
+                else:
+                    # Never scored: a replay with no checkout measures git, not the agent.
+                    raise ProviderFailure(f"{cid} trial {t + 1}: checkout failed 3 times: "
+                                          f"{res.get('detail', '')[:300]}", cost_usd=total)
                 summary = meter.summary()
                 if summary["unpriced_models"]:
                     raise UnpricedModel(f"{cid} trial {t + 1}: no price for "

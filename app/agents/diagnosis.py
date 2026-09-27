@@ -43,7 +43,7 @@ import hashlib
 import json
 import logging
 import re
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -491,6 +491,44 @@ def _parse_file_entries(raw: object) -> list[dict]:
 # DiagnosisAgent
 # ---------------------------------------------------------------------------
 
+
+def _candidate_files(local_repo, text: str) -> list[str]:
+    """Files to scan for `text`, sorted: every file in the checkout, narrowed by
+    a git-grep prefilter when the checkout can answer it (see
+    LocalRepoService.files_containing). Same files, same order, same matches as
+    scanning everything; the prefilter only skips files that can't contain `text`."""
+    candidates = getattr(local_repo, "files_containing", None)
+    found = candidates(text) if callable(candidates) else None
+    if not isinstance(found, set):
+        return sorted(local_repo.list_files())
+    return sorted(p for p in found if ".git" not in Path(p).parts)
+
+
+# Call graphs of pinned checkouts, keyed by (owner, repo, commit). A graph
+# holds relative paths, so every replay of a commit (trials, retries) can share
+# one instead of re-parsing the repo (~7s of CPU for Django, on one core).
+# LRU-bounded: a Django graph is ~77 MB.
+_GRAPH_CACHE: "OrderedDict[tuple[str, str, str], CodeGraph]" = OrderedDict()
+_GRAPH_CACHE_MAX = 24
+_GRAPH_LOCKS: dict[tuple, asyncio.Lock] = {}
+
+
+async def _pinned_graph(owner: str, repo: str, local_repo) -> "CodeGraph":
+    sha = getattr(local_repo, "_pinned_sha", None) if getattr(local_repo, "pinned", False) else None
+    if not isinstance(sha, str) or not sha:
+        return await asyncio.to_thread(CodeGraph.build_from_directory, str(local_repo.local_path))
+    key = (owner, repo, sha)
+    lock = _GRAPH_LOCKS.setdefault((id(asyncio.get_running_loop()), key), asyncio.Lock())
+    async with lock:
+        if key in _GRAPH_CACHE:
+            _GRAPH_CACHE.move_to_end(key)
+            return _GRAPH_CACHE[key]
+        graph = await asyncio.to_thread(CodeGraph.build_from_directory, str(local_repo.local_path))
+        _GRAPH_CACHE[key] = graph
+        while len(_GRAPH_CACHE) > _GRAPH_CACHE_MAX:
+            _GRAPH_CACHE.popitem(last=False)
+        return graph
+
 class DiagnosisAgent(BaseAgent):
     """
     Produces a root cause analysis with confidence score for a triaged incident.
@@ -824,7 +862,7 @@ class DiagnosisAgent(BaseAgent):
             max_matches = self._harness.setting("grep_max_matches")
             matches: list[str] = []
             try:
-                for rel_path in sorted(local_repo.list_files()):
+                for rel_path in _candidate_files(local_repo, pattern):
                     if not fnmatch.fnmatch(rel_path, file_glob):
                         continue
                     try:
@@ -1121,7 +1159,7 @@ class DiagnosisAgent(BaseAgent):
         usage = re.compile(rf"\b{n}\s*\(|['\"]{n}['\"]|\b{n}\s*[:=][^=]")
         defs: list[tuple[str, int, str]] = []
         uses: list[tuple[str, int, str]] = []
-        for rel_path in sorted(self._local_repo.list_files()):
+        for rel_path in _candidate_files(self._local_repo, name):
             try:
                 content = self._local_repo.read_file(rel_path)
             except Exception:
@@ -1500,8 +1538,7 @@ class DiagnosisAgent(BaseAgent):
             self._code_graph = _code_graph
             return
         if self._local_repo.ready:
-            self._code_graph = await asyncio.to_thread(
-                CodeGraph.build_from_directory, str(self._local_repo.local_path))
+            self._code_graph = await _pinned_graph(self._owner, self._repo, self._local_repo)
             logger.info("DiagnosisAgent: built call graph for %s/%s: %s",
                         self._owner, self._repo, self._code_graph.stats())
             return

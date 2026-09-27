@@ -42,6 +42,70 @@ def _base_lock(path: Path) -> asyncio.Lock:
     return _BASE_LOCKS.setdefault((id(asyncio.get_running_loop()), str(path)), asyncio.Lock())
 
 
+class _BaseCloneLock:
+    """Serializes git bookkeeping on one base clone across tasks AND processes:
+    the in-process asyncio lock, then an fcntl lock file beside the clone.
+    The asyncio lock alone let two processes (an eval run and a checker script)
+    collide on git's shallow.lock mid-fetch."""
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._fh = None
+
+    async def __aenter__(self):
+        import fcntl
+        await _base_lock(self._path).acquire()
+        try:
+            # Beside the clone, not inside it: creating <clone>/.git before the
+            # first clone made `git clone` refuse the non-empty directory.
+            lock_file = self._path.parent / f".{self._path.name}.agent-platform.lock"
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = open(lock_file, "w")
+            deadline = asyncio.get_running_loop().time() + GIT_TIMEOUT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    if asyncio.get_running_loop().time() > deadline:
+                        raise RuntimeError(f"timed out waiting for {lock_file}")
+                    await asyncio.sleep(0.2)
+        except BaseException:
+            if self._fh:
+                self._fh.close()
+                self._fh = None
+            _base_lock(self._path).release()
+            raise
+
+    async def __aexit__(self, *exc):
+        import fcntl
+        try:
+            if self._fh:
+                fcntl.flock(self._fh, fcntl.LOCK_UN)
+                self._fh.close()
+                self._fh = None
+        finally:
+            _base_lock(self._path).release()
+
+
+# git config for the shared base clones: no automatic gc/maintenance. git runs
+# `gc --auto` detached after enough fetches, and in a shallow clone it takes
+# shallow.lock, so the next fetch failed with "Unable to create ... shallow.lock:
+# File exists" (seen in the 500-case run: one replay lost its checkout).
+_NO_AUTO_GC = ["-c", "gc.auto=0", "-c", "maintenance.auto=false"]
+
+
+async def _run_git_retrying(cmd: list[str], env: dict, attempts: int = 4) -> tuple[int, str, str]:
+    """Run a git command, retrying when another git process holds a lock file."""
+    rc, out, err = 1, "", ""
+    for i in range(attempts):
+        rc, out, err = await _run(cmd, env=env)
+        if rc == 0 or ".lock" not in err or "File exists" not in err:
+            return rc, out, err
+        await asyncio.sleep(0.5 * (2 ** i))
+    return rc, out, err
+
+
 class LocalRepoService:
     def __init__(
         self,
@@ -118,6 +182,46 @@ class LocalRepoService:
         rather than tracking live HEAD — see pinned_sha in __init__."""
         return bool(self._pinned_sha)
 
+    def files_containing(self, text: str) -> set[str] | None:
+        """Relative paths of files that may contain `text` as a substring, or
+        None if that can't be answered quickly (caller then scans every file).
+
+        A prefilter, not a replacement: callers run their exact Python match on
+        the returned files only. `git grep -F -l` (fixed string, C, off the
+        GIL) returns every tracked file whose bytes contain `text` on some
+        line; Python's matches are all inside such lines, so the prefilter
+        never drops a file Python would match. Symlinks are always included
+        (git greps the link text, Python reads the target), as are untracked
+        files. Found necessary in the 500-case benchmark: grep_codebase read
+        and scanned all ~7k Django files ~6 times per diagnosis on one core.
+        """
+        if not text or not (self._path / ".git").exists():
+            return None
+        import subprocess
+        try:
+            hits = subprocess.run(
+                ["git", "-C", str(self._path), "grep", "-F", "-l", "-z", "-e", text],
+                capture_output=True, timeout=60)
+            # 0 = matches, 1 = none; anything else (bad repo, huge output) -> fall back.
+            if hits.returncode not in (0, 1):
+                return None
+            found = {p for p in hits.stdout.decode("utf-8", "surrogateescape").split("\0") if p}
+            tracked = subprocess.run(["git", "-C", str(self._path), "ls-files", "-z", "-s"],
+                                     capture_output=True, timeout=60)
+            untracked = subprocess.run(["git", "-C", str(self._path), "ls-files", "-z", "-o"],
+                                       capture_output=True, timeout=60)
+            if tracked.returncode != 0 or untracked.returncode != 0:
+                return None
+            for entry in tracked.stdout.decode("utf-8", "surrogateescape").split("\0"):
+                meta, _, path = entry.partition("\t")      # "mode sha stage\tpath"
+                if path and meta.startswith("120000"):     # symlink: Python reads the target
+                    found.add(path)
+            # Untracked files (ignored ones too): git grep doesn't search them, Python does.
+            found |= {p for p in untracked.stdout.decode("utf-8", "surrogateescape").split("\0") if p}
+            return found
+        except (OSError, subprocess.SubprocessError):
+            return None
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -163,7 +267,7 @@ class LocalRepoService:
         """
         if self._path.exists():
             return  # already checked out (idempotent — reruns reuse it)
-        async with _base_lock(self._base_path):
+        async with _BaseCloneLock(self._base_path):
             await self._add_pinned_worktree()
 
     async def _add_pinned_worktree(self) -> None:
@@ -174,15 +278,16 @@ class LocalRepoService:
             ["git", "-C", str(self._base_path), "remote", "set-url", "origin", self._clone_url()],
             env=env,
         )
-        rc, _, stderr = await _run(
-            ["git", "-C", str(self._base_path), "fetch", "--depth=1", "origin", self._pinned_sha],
+        rc, _, stderr = await _run_git_retrying(
+            ["git", *_NO_AUTO_GC, "-C", str(self._base_path), "fetch", "--depth=1", "origin", self._pinned_sha],
             env=env,
         )
         if rc != 0:
             raise RuntimeError(f"git fetch of pinned sha {self._pinned_sha} failed: {stderr.strip()}")
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        rc, _, stderr = await _run(
-            ["git", "-C", str(self._base_path), "worktree", "add", "--detach", str(self._path), self._pinned_sha],
+        rc, _, stderr = await _run_git_retrying(
+            ["git", *_NO_AUTO_GC, "-C", str(self._base_path), "worktree", "add", "--detach",
+             str(self._path), self._pinned_sha],
             env=env,
         )
         if rc != 0:
@@ -211,9 +316,9 @@ class LocalRepoService:
         except Exception as exc:
             logger.warning("LocalRepo: could not delete worktree %s: %s", self._path, exc)
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
-        async with _base_lock(self._base_path):
+        async with _BaseCloneLock(self._base_path):
             rc, _, stderr = await _run(
-                ["git", "-C", str(self._base_path), "worktree", "prune"], env=env, timeout=120,
+                ["git", *_NO_AUTO_GC, "-C", str(self._base_path), "worktree", "prune"], env=env, timeout=120,
             )
         if rc != 0:
             logger.warning("LocalRepo: worktree prune failed for %s: %s", self._base_path, stderr.strip())
