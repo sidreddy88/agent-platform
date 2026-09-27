@@ -138,8 +138,9 @@ def _mark_for_cache(system: str | list | None, messages: list[dict]) -> tuple:
     return system, messages[:-1] + [last]
 
 
-_TRANSIENT_RETRIES = 3
-_TRANSIENT_BASE_DELAY = 1.0
+_TRANSIENT_RETRIES = 6        # ~90s total: rides out a short provider outage (Together 503s, r9 round 6)
+_TRANSIENT_BASE_DELAY = 2.0
+_TRANSIENT_MAX_DELAY = 30.0
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -170,8 +171,8 @@ async def _with_transient_retries(call):
         except Exception as exc:
             if attempt == _TRANSIENT_RETRIES or not _is_transient(exc):
                 raise
-            delay = _TRANSIENT_BASE_DELAY * (2 ** attempt)
-            delay += random.uniform(0, delay / 2)
+            delay = min(_TRANSIENT_MAX_DELAY, _TRANSIENT_BASE_DELAY * (2 ** attempt))
+            delay += random.uniform(0, delay / 4)
             logger.warning("[gateway] transient error on attempt %d/%d: %s; retrying in %.1fs",
                            attempt + 1, _TRANSIENT_RETRIES + 1, exc, delay)
             await asyncio.sleep(delay)
