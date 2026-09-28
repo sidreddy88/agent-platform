@@ -118,6 +118,25 @@ async def _live_openai_ids() -> set[str] | None:
         return None
 
 
+# Providers whose key LiteLLM reads straight from the environment, with no
+# app setting in between. Checked at startup: a missing key doesn't crash
+# anything, it just makes every call fail, which is the quiet kind of broken.
+_ENV_KEYED_PROVIDERS = {"together_ai/": "TOGETHER_API_KEY"}
+
+
+def _missing_provider_keys() -> list[str]:
+    import os
+
+    missing = []
+    for entry in _load_routing_config().get("routing", {}).values():
+        for key in ("model", "fallback_model"):
+            model = entry.get(key) or ""
+            for prefix, env in _ENV_KEYED_PROVIDERS.items():
+                if model.startswith(prefix) and not os.environ.get(env):
+                    missing.append(f"{model} ({env})")
+    return sorted(set(missing))
+
+
 async def validate_models_live() -> None:
     """Startup check: confirm every configured model id still exists.
 
@@ -139,6 +158,14 @@ async def validate_models_live() -> None:
 
     if settings.environment == "test":
         return
+
+    missing_keys = _missing_provider_keys()
+    if missing_keys:
+        logger.error(
+            "[model_config] no API key in the environment for configured model(s) %s: "
+            "every call will fail and those agents will degrade (diagnosis escalates "
+            "every incident). Set the key(s) in SSM / .env.", missing_keys,
+        )
 
     anthropic_ids, openai_ids = _configured_models()
     checked = 0

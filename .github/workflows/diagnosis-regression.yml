@@ -123,6 +123,9 @@ jobs:
       - name: Replay shard
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # DiagnosisAgent's routed model is DeepSeek-V4.1-Flash on Together
+          # (config/llm_routing.json); LiteLLM reads this from the environment.
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
           # NOT the built-in secrets.GITHUB_TOKEN -- that's scoped to this repo
           # only, and the 6 production cases need to clone the actual target
           # app repo. Same fine-grained PAT already used in prod; see
