@@ -176,12 +176,12 @@ jobs:
 
       - name: Paired test against main's baseline
         if: needs.config.outputs.mode == 'gate'
-        run: python scripts/gate_v2.py aggregate --results gate-results/*.json
+        run: python scripts/gate_v2.py aggregate --results gate-results/shard-*.json
 
       - name: Write a new baseline
         if: needs.config.outputs.mode == 'baseline'
         run: >-
-          python scripts/gate_v2.py baseline --results gate-results/*.json
+          python scripts/gate_v2.py baseline --results gate-results/shard-*.json
           --main-sha ${{ github.event.pull_request.base.sha || github.sha }} --pr-trials 2 --out gate-v2-baseline.json
 
       - name: Upload the new baseline
