@@ -1,0 +1,128 @@
+name: Diagnosis gate v2
+
+# Gate v2: a paired statistical test over all 434 SWE-bench Verified cases
+# outside the held-out repos, each compared with main's own measured pass rate
+# on that case (app/evals/gate_v2.py has the design and the reasoning).
+#
+# Manual only for now (workflow_dispatch). It becomes the required diagnosis
+# check once it has been calibrated on main and validated with known-answer
+# runs (an unchanged harness passes, an injected regression fails); until
+# then the v1 gate (diagnosis-regression.yml) stays in charge.
+#
+#   mode=gate      replay the checked-out ref and compare it with
+#                  app/evals/gate_v2_baseline.json (fails the run on a
+#                  significant drop, or on any missing case)
+#   mode=baseline  replay the checked-out ref and upload a new baseline file
+#                  as an artifact (commit it through a PR)
+#
+# The replays run through the optimizer's round-0 runner, so each shard gets
+# its per-repo lanes, result cache, hard budget cap, tripwires and
+# provider-failure stops. Shards are contiguous slices of the repo-sorted
+# pool, so each clones one or two repos.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "gate or baseline"
+        type: choice
+        options: [gate, baseline]
+        default: gate
+      trials:
+        description: "trials per case"
+        default: "2"
+      shard_budget_usd:
+        description: "hard spending cap per shard (20 shards)"
+        default: "4"
+
+concurrency:
+  group: diagnosis-gate-v2-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SHARDS: 20
+
+jobs:
+  replay:
+    name: gate v2 shard ${{ matrix.shard }}/20
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with env.SHARDS -- matrix values can't read env.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Replay shard
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.DIAGNOSIS_REGRESSION_GITHUB_PAT }}
+        run: |
+          set -euo pipefail
+          python scripts/gate_v2.py shard-file --index ${{ matrix.shard }} --of $SHARDS --out shard.json
+          python scripts/optimize_harness.py --run-dir runs/gate/shard-${{ matrix.shard }} \
+            --cases-file shard.json --rounds 0 --calibration-trials ${{ inputs.trials }} \
+            --budget ${{ inputs.shard_budget_usd }} --parallel 2 --lane-width 3
+          python scripts/gate_v2.py collect --run-dir runs/gate/shard-${{ matrix.shard }} \
+            --trials ${{ inputs.trials }} --out gate-results/shard-${{ matrix.shard }}.json
+
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-v2-shard-${{ matrix.shard }}
+          path: gate-results/
+          if-no-files-found: ignore
+
+  aggregate:
+    name: gate v2 (434 cases, paired)
+    needs: replay
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Download shard results
+        # A missing shard shows up as missing cases, which fail the gate closed.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gate-v2-shard-*
+          path: gate-results
+          merge-multiple: true
+
+      - name: Paired test against main's baseline
+        if: inputs.mode == 'gate'
+        run: python scripts/gate_v2.py aggregate --results gate-results/*.json
+
+      - name: Write a new baseline
+        if: inputs.mode == 'baseline'
+        run: >-
+          python scripts/gate_v2.py baseline --results gate-results/*.json
+          --main-sha ${{ github.sha }} --pr-trials 2 --out gate-v2-baseline.json
+
+      - name: Upload the new baseline
+        if: inputs.mode == 'baseline'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-v2-baseline
+          path: gate-v2-baseline.json
