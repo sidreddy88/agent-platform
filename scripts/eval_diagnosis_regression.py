@@ -217,6 +217,11 @@ def main() -> int:
     parser.add_argument("--dataset", default=str(_DEFAULT_DATASET), help="Path to the regression JSONL")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a report")
     args = parser.parse_args()
+    # Provider keys into the process environment: app settings read .env, but
+    # LiteLLM reads os.environ, so a non-Anthropic model (LLM_MODEL_DIAGNOSIS)
+    # failed with a 401 here without this.
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
     cases = _load_cases(Path(args.dataset))
     results = asyncio.run(_run(cases, verbose=not args.json))

@@ -42,23 +42,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.services.cost_meter import (  # noqa: E402
-    CACHE_READ_MULTIPLIER,
-    CACHE_WRITE_MULTIPLIER,
-    PRICES_PER_MTOK,
-    _price_key,
-)
+from app.services.cost_meter import rates_per_mtok  # noqa: E402
 
 BILLING = ("cache_read", "cache_write", "uncached", "output")
 
 
 def _rates(model: str) -> dict[str, float] | None:
-    prices = PRICES_PER_MTOK.get(_price_key(model))
-    if prices is None:
+    r = rates_per_mtok(model)
+    if r is None:
         return None
-    inp, out = prices
-    return {"uncached": inp / 1e6, "cache_write": inp * CACHE_WRITE_MULTIPLIER / 1e6,
-            "cache_read": inp * CACHE_READ_MULTIPLIER / 1e6, "output": out / 1e6}
+    return {"uncached": r["input"] / 1e6, "cache_write": r["cache_write"] / 1e6,
+            "cache_read": r["cache_read"] / 1e6, "output": r["output"] / 1e6}
 
 
 def attribute_call(segments: list, usage: list[dict]) -> dict[str, dict[str, float]]:

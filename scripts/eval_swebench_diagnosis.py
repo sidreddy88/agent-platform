@@ -279,6 +279,11 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
             instance["instance_id"], str(pinned_repo.local_path)
         )
 
+    # The checkout first, and let it fail loudly: DiagnosisAgent swallows a
+    # failed checkout ("grounding checks will be skipped") and diagnoses with
+    # no local repo, which an eval would then score as the model's failure.
+    # Idempotent: diagnose()'s own ensure_fresh() is then a no-op.
+    await pinned_repo.ensure_fresh()
     agent = DiagnosisAgent(github=github, local_repo=pinned_repo, owner=owner, repo=repo, rag=rag,
                            harness_dir=harness_dir)
     # DiagnosisAgent.__init__ hardcodes LLMService() -- Sonnet from

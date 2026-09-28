@@ -74,6 +74,13 @@ REJECT if ANY of:
    repo layouts, names) into the prompt as if it were general guidance.
 6. UNBOUNDED WORK: an added check, retry or "keep verifying" instruction with no
    exit, or anything that could spend the whole turn budget without finishing.
+   (A numeric setting changed within its allowed range, e.g. a retry count, is
+   bounded by code and is NOT unbounded work.)
+7. NEAR-DUPLICATE: the change re-proposes an idea listed under ALREADY REJECTED
+   (the same mechanism in different words) without citing evidence that is new.
+8. FALSE TOOL CLAIM: added text states how a tool behaves in a way that contradicts
+   the tool's own description (shown under CURRENT TOOL DESCRIPTIONS), e.g. that a
+   tool fails on inputs it actually handles.
 
 Otherwise ACCEPT. Review intent and content, not style or wording quality.
 Return STRICT JSON only:
@@ -111,7 +118,8 @@ def precheck(diff: str, patterns: list[tuple[str, str]]) -> list[str]:
 
 
 async def review(diff: str, component: str, hypothesis: str, llm: LLM,
-                 patterns: list[tuple[str, str]], attempts: int = 3) -> Review:
+                 patterns: list[tuple[str, str]], attempts: int = 3,
+                 rejected: list[str] | tuple = (), tool_descriptions: str = "") -> Review:
     hard = precheck(diff, patterns)
     if hard:
         return Review(False, [f"precheck: {h}" for h in hard])
@@ -119,6 +127,10 @@ async def review(diff: str, component: str, hypothesis: str, llm: LLM,
         return Review(False, ["empty diff"])
     payload = (f"DECLARED COMPONENT: {component}\nHYPOTHESIS: {hypothesis}\n\n"
                f"=== DIFF ===\n{diff[:60_000]}")
+    if rejected:
+        payload += "\n\n=== ALREADY REJECTED IN THIS RUN ===\n" + "\n".join(f"- {r}" for r in rejected)
+    if tool_descriptions:
+        payload += f"\n\n=== CURRENT TOOL DESCRIPTIONS ===\n{tool_descriptions[:12_000]}"
     last = ""
     for _ in range(attempts):
         last = await llm(SYSTEM, payload)

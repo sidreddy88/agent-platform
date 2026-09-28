@@ -38,12 +38,13 @@ You will see the current harness files, evidence from the agent's recent runs (w
 it did, where it failed or wasted turns, what it cost), and the history of edits
 already tried and how they scored.
 
-Propose exactly ONE edit: one mechanism, one component, one hypothesis. Target a
-failure or waste you can point to in the evidence. Prefer changes that make the
-agent reach an accepted diagnosis in fewer turns or with less resent context, since
-the objective is lower cost per case at no loss of accuracy; score gains are hard
-to measure at this sample size. An edit that isn't cheaper is only accepted if its
-accuracy gain clears the measured noise band.
+Propose TWO alternative edits, each exactly one mechanism, one component and one
+hypothesis, with different mechanisms (ideally different components), and say which
+you expect to help more. Target failures or waste you can point to in the evidence.
+The ACCEPTANCE RULES section says exactly what this run can detect: an edit is
+accepted if it raises the pass rate by more than the noise band (it may then cost
+more), or if it is cheaper by more than cost noise at an unchanged pass rate. Both
+levers count; pick the one the evidence supports.
 
 Read "Cost by prompt source" in the evidence first: it says where the money goes,
 split into the model's own output and each part of the input (task prompt, system
@@ -67,11 +68,19 @@ returns nothing here (no past-incident knowledge base for these repositories) an
 CloudWatch log tools have no data. Both carry real information in production, so don't
 discourage or remove them.
 
+Settings are behaviour, not just numbers: read the SETTINGS section for what each one
+does and its allowed range. Do not re-propose an idea from REJECTED IDEAS unless the
+evidence shows something new, and then say what.
+
 Return STRICT JSON only:
-{"component": one of %s,
- "hypothesis": "what failure/waste this fixes and why the edit should fix it",
- "edits": [{"file": "<harness file name>", "find": "<exact text currently in the file>",
-            "replace": "<new text>"}]}
+{"candidates": [
+   {"component": one of %s,
+    "hypothesis": "what failure/waste this fixes and why the edit should fix it",
+    "edits": [{"file": "<harness file name>", "find": "<exact text currently in the file>",
+               "replace": "<new text>"}]},
+   {... a second, different candidate ...}],
+ "preferred": 0 or 1,
+ "why": "why the preferred one should help more"}
 Each "find" must occur exactly once in its file.""" % (list(COMPONENTS),)
 
 
@@ -82,20 +91,65 @@ class Proposal:
     edits: list[dict] = field(default_factory=list)
 
 
-def build_prompt(harness_dir: Path, evidence: str, history: str, feedback: str = "") -> str:
+# Which harness files each component may edit, so a proposal can't claim one
+# component (to satisfy an exploration constraint) while editing another.
+COMPONENT_FILES = {
+    "task_prompt": lambda f: f == "task_prompt.prompt",
+    "prompt_fragments": lambda f: f.endswith(".prompt") and f != "task_prompt.prompt",
+    "tool_descriptions": lambda f: f == "tool_descriptions.json",
+    "settings": lambda f: f == "settings.json",
+}
+
+
+def settings_table(harness_dir: Path) -> str:
+    """Each setting with its current value, allowed range and what it does, so the
+    proposer reads settings as behaviour. r7's proposer never touched settings,
+    even one that targeted the exact failure its evidence named."""
+    import json as _json
+    from app.harness_optimizer.candidates import SETTING_BOUNDS
+    raw = _json.loads((Path(harness_dir) / "settings.json").read_text())
+    docs = raw.get("_doc", {})
+    lines = []
+    for key, value in raw.items():
+        if key.startswith("_"):
+            continue
+        bounds = SETTING_BOUNDS.get(key)
+        rng = f", allowed {bounds[0]}-{bounds[1]}" if bounds else ""
+        lines.append(f"- {key} = {value!r}{rng}: {docs.get(key, '(undocumented)')}")
+    return "\n".join(lines)
+
+
+def build_prompt(harness_dir: Path, evidence: str, history: str, feedback: str = "",
+                 allowed_components: tuple[str, ...] | None = None,
+                 run_context: dict | None = None) -> str:
     files = harness_files(harness_dir)
     parts = ["=== CURRENT HARNESS FILES ==="]
     for name, text in files.items():
         parts.append(f"--- {name} ({len(text)} chars) ---\n{text}")
+    parts.append(f"=== SETTINGS (behaviour you can change) ===\n{settings_table(harness_dir)}")
+    ctx = run_context or {}
+    if ctx.get("acceptance"):
+        parts.append(f"=== ACCEPTANCE RULES FOR THIS RUN ===\n{ctx['acceptance']}")
+    if ctx.get("rejected"):
+        parts.append("=== REJECTED IDEAS (measured; don't repeat without new evidence) ===\n"
+                     + "\n".join(f"- {r}" for r in ctx["rejected"]))
     parts.append(f"=== EVIDENCE FROM RECENT RUNS ===\n{evidence}")
     parts.append(f"=== EDIT HISTORY ===\n{history}")
+    if allowed_components:
+        parts.append("=== EXPLORATION CONSTRAINT FOR THIS ROUND ===\n"
+                     f"Recent candidates in this run all edited other components and none was "
+                     f"accepted. This round's edit must target one of: {list(allowed_components)}. "
+                     f"Read those files as behaviour you can change, not just wording.")
     if feedback:
         parts.append(f"=== YOUR PREVIOUS ATTEMPT THIS ROUND WAS REJECTED ===\n{feedback}\n"
                      f"Fix those problems, or propose a different edit.")
     return "\n\n".join(parts)
 
 
-def parse(text: str) -> Proposal:
+def parse_all(text: str) -> list[Proposal]:
+    """Both output shapes: {"candidates": [...], "preferred": i} (preferred first)
+    or a single {"component", "hypothesis", "edits"}. Invalid entries are dropped;
+    raises only if none is valid."""
     t = text.strip()
     if t.startswith("```"):
         t = t.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -103,6 +157,28 @@ def parse(text: str) -> Proposal:
         data = json.loads(t)
     except json.JSONDecodeError as exc:
         raise InvalidCandidate(f"proposer did not return valid JSON: {exc}") from exc
+    if not isinstance(data, dict) or "candidates" not in data:
+        return [_one(data)]
+    raw = [c for c in data.get("candidates") or [] if isinstance(c, dict)]
+    pref = data.get("preferred", 0)
+    if isinstance(pref, int) and 0 <= pref < len(raw):
+        raw = [raw[pref]] + [c for i, c in enumerate(raw) if i != pref]
+    out, errors = [], []
+    for c in raw:
+        try:
+            out.append(_one(c))
+        except InvalidCandidate as exc:
+            errors.append(str(exc))
+    if not out:
+        raise InvalidCandidate("; ".join(errors) or "no candidates")
+    return out
+
+
+def parse(text: str) -> Proposal:
+    return parse_all(text)[0]
+
+
+def _one(data: dict) -> Proposal:
     comp = data.get("component")
     if comp not in COMPONENTS:
         raise InvalidCandidate(f"component must be one of {COMPONENTS}, got {comp!r}")
@@ -129,8 +205,38 @@ def apply_ops(harness_dir: Path, edits: list[dict]) -> dict[str, str]:
     return out
 
 
+def _check(harness_dir: Path, proposal: Proposal,
+           allowed_components: tuple[str, ...] | None) -> dict[str, str]:
+    if allowed_components and proposal.component not in allowed_components:
+        raise InvalidCandidate(f"this round must edit one of {list(allowed_components)}, "
+                               f"got {proposal.component!r}")
+    if allowed_components:
+        owns = COMPONENT_FILES[proposal.component]
+        stray = sorted({e["file"] for e in proposal.edits if not owns(e["file"])})
+        if stray:
+            raise InvalidCandidate(f"component {proposal.component!r} can't edit {stray}")
+    return apply_ops(harness_dir, proposal.edits)
+
+
+async def propose_all(harness_dir: Path, evidence: str, history: str, llm: LLM,
+                      feedback: str = "", allowed_components: tuple[str, ...] | None = None,
+                      run_context: dict | None = None) -> list[tuple[Proposal, dict[str, str]]]:
+    """Every valid candidate from one proposer call, preferred first."""
+    text = await llm(SYSTEM, build_prompt(harness_dir, evidence, history, feedback,
+                                          allowed_components, run_context))
+    out, errors = [], []
+    for proposal in parse_all(text):
+        try:
+            out.append((proposal, _check(harness_dir, proposal, allowed_components)))
+        except InvalidCandidate as exc:
+            errors.append(f"{proposal.component}: {exc}")
+    if not out:
+        raise InvalidCandidate("; ".join(errors))
+    return out
+
+
 async def propose(harness_dir: Path, evidence: str, history: str, llm: LLM,
-                  feedback: str = "") -> tuple[Proposal, dict[str, str]]:
-    text = await llm(SYSTEM, build_prompt(harness_dir, evidence, history, feedback))
-    proposal = parse(text)
-    return proposal, apply_ops(harness_dir, proposal.edits)
+                  feedback: str = "", allowed_components: tuple[str, ...] | None = None,
+                  run_context: dict | None = None) -> tuple[Proposal, dict[str, str]]:
+    return (await propose_all(harness_dir, evidence, history, llm, feedback,
+                              allowed_components, run_context))[0]

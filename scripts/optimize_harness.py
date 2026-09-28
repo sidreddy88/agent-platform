@@ -46,14 +46,20 @@ DEFAULT_LLM = "claude-opus-5"
 
 
 HELDOUT_EXTRA = ROOT / "app" / "evals" / "swebench_heldout_extra.jsonl"
+FULL = ROOT / "app" / "evals" / "swebench_verified_full.jsonl"
 
 
-def critic_patterns(split: dict, cases_paths: tuple[Path, ...] = (CASES, HELDOUT_EXTRA)) -> list[tuple[str, str]]:
+def critic_patterns(split: dict, cases_paths: tuple[Path, ...] | None = None) -> list[tuple[str, str]]:
+    """The leakage denylist: every benchmark case id, repo and true-fix path the
+    optimizer could ever see (the split's cases and, if fetched, all 500). The
+    first version covered only the split's cases; an evolve set drawn from the
+    full 500 (r9) would have let the proposer name its own cases unchecked."""
     from app.harness_optimizer.critic import domain_patterns
     from scripts.eval_swebench_diagnosis import _touched_files
 
-    ids = sorted(split["case_stats"])
-    repos = sorted({s["repo"] for s in split["case_stats"].values()})
+    cases_paths = cases_paths or (CASES, HELDOUT_EXTRA, FULL)
+    ids = set(split["case_stats"])
+    repos = {s["repo"] for s in split["case_stats"].values()}
     paths: set[str] = set()
     for cases_path in cases_paths:
         if not cases_path.exists():
@@ -62,14 +68,26 @@ def critic_patterns(split: dict, cases_paths: tuple[Path, ...] = (CASES, HELDOUT
             if not line.strip():
                 continue
             inst = json.loads(line)
-            if inst["instance_id"] in split["case_stats"]:
-                paths |= _touched_files(inst["patch"])
-    return domain_patterns(ids, repos, sorted(paths))
+            ids.add(inst["instance_id"])
+            repos.add(inst["repo"])
+            paths |= _touched_files(inst["patch"])
+    return domain_patterns(sorted(ids), sorted(repos), sorted(paths))
+
+
+def full_cases() -> list[str]:
+    return [json.loads(line)["instance_id"] for line in FULL.read_text().splitlines() if line.strip()]
 
 
 def case_lanes(split: dict) -> dict[str, str]:
-    """One lane per repo: replays of the same repo share a base clone."""
-    return {cid: s["repo"] for cid, s in split["case_stats"].items()}
+    """One lane per repo: replays of the same repo share a base clone. Covers
+    the split's cases and, if fetched, all 500 SWE-bench Verified instances."""
+    lanes = {cid: s["repo"] for cid, s in split["case_stats"].items()}
+    if FULL.exists():
+        for line in FULL.read_text().splitlines():
+            if line.strip():
+                inst = json.loads(line)
+                lanes.setdefault(inst["instance_id"], inst["repo"])
+    return lanes
 
 
 def heldout_cases(split: dict) -> list[str]:
@@ -83,15 +101,25 @@ def smoke_cases(split: dict) -> list[str]:
 
 def build_config(split: dict, budget: float, rounds: int, trials: int, parallel: int = 1,
                  calibration_trials: int = 2, lane_width: int = 1, smoke: bool = False,
-                 final: bool = False, final_trials: int = 3, cases: str = "evolve"):
+                 final: bool = False, final_trials: int = 3, cases: str = "evolve",
+                 cases_file: Path | None = None):
     from app.harness_optimizer.loop import OptimizerConfig
 
-    if cases == "heldout":
-        # Measuring a harness on the held-out set (baseline only, --rounds 0):
-        # never for evolving, which would train on the test set.
+    if cases in ("heldout", "full500"):
+        # Measuring a harness on the held-out set or the whole benchmark
+        # (baseline only, --rounds 0): never for evolving, which would train on
+        # the test set (the full 500 contains the held-out cases).
         if rounds > 0:
-            raise SystemExit("--cases heldout is for measurement only; use --rounds 0")
-        evolve, guards = heldout_cases(split), []
+            raise SystemExit(f"--cases {cases} is for measurement only; use --rounds 0")
+        evolve, guards = (heldout_cases(split) if cases == "heldout" else full_cases()), []
+    elif cases_file is not None:
+        # An evolve set built from a measured run (e.g. app/evals/r9_evolve_deepseek.json).
+        # It must never overlap the held-out cases the final phase reports on.
+        spec = json.loads(Path(cases_file).read_text())
+        evolve, guards = spec["evolve"], spec.get("guards", [])
+        overlap = set(evolve + guards) & set(heldout_cases(split))
+        if overlap:
+            raise SystemExit(f"{cases_file} overlaps the held-out set: {sorted(overlap)[:5]}")
     else:
         evolve = split["evolve"]["failing"] + split["evolve"].get("hard", [])
         guards = split["evolve"]["guards"]
@@ -165,10 +193,19 @@ def main() -> int:
     parser.add_argument("--final", action="store_true",
                         help="after the rounds, run original vs final harness on the held-out set")
     parser.add_argument("--final-trials", type=int, default=3)
-    parser.add_argument("--cases", choices=("evolve", "heldout"), default="evolve",
-                        help="heldout: measure a harness on the held-out set (requires --rounds 0)")
+    parser.add_argument("--cases", choices=("evolve", "heldout", "full500"), default="evolve",
+                        help="heldout / full500: measure a harness (requires --rounds 0)")
+    parser.add_argument("--cases-file", type=Path, default=None,
+                        help='JSON {"evolve": [...], "guards": [...]} to evolve on instead of the split')
     parser.add_argument("--harness", type=Path, default=None,
                         help="starting harness directory (default: app/agents/harness/diagnosis)")
+    parser.add_argument("--diversity", type=int, default=0,
+                        help="after N rejected candidates in a row, the next must edit an untried "
+                             "component family (0 = off)")
+    parser.add_argument("--cost-band", action="store_true",
+                        help="in band, require a saving larger than calibrated cost noise")
+    parser.add_argument("--health-baseline", type=json.loads, default=None,
+                        help='tripwire baseline overrides as JSON, e.g. \'{"cost_per_trial_usd": 0.035}\'')
     parser.add_argument("--seed-history", type=Path,
                         help="a pilot run's history.jsonl, given to the proposer as notes (new runs only)")
     parser.add_argument("--status", action="store_true")
@@ -224,7 +261,10 @@ def main() -> int:
             parser.error("--budget is required to start a new run")
         cfg = build_config(split, args.budget, args.rounds, args.trials, args.parallel or 1,
                            args.calibration_trials, args.lane_width, args.smoke, args.final,
-                           args.final_trials, args.cases)
+                           args.final_trials, args.cases, args.cases_file)
+        cfg.diversity_after = args.diversity
+        cfg.cost_band = args.cost_band
+        cfg.health_baseline = args.health_baseline or {}
         if args.seed_history:
             seed_history(args.seed_history, args.run_dir)
     opt = Optimizer(args.run_dir, args.harness or DEFAULT_ROOT / "diagnosis", cfg, ReplayEvaluator(),

@@ -24,3 +24,13 @@ def test_provider_specific_cache_read_price():
     u = _ModelUsage(cache_read_tokens=1_000_000)
     assert u.cost_by_billing_type("together_ai/deepseek-ai/DeepSeek-V4.1-Flash")["cache_read"] == pytest.approx(0.006)
     assert u.cost_by_billing_type("claude-sonnet-5")["cache_read"] == pytest.approx(0.20)
+
+
+def test_cost_by_source_handles_models_with_their_own_cache_price():
+    """r8 crashed here: the analysis unpacked (input, output) and Together
+    prices carry a third, cached-input price."""
+    from scripts.analyze_cost_by_source import attribute_call
+    usage = [{"model": "together_ai/deepseek-ai/DeepSeek-V4.1-Flash", "input": 100,
+              "cache_read": 1000, "cache_write": 0, "output": 50}]
+    out = attribute_call([("task_prompt", 400), ("history", 700)], usage)
+    assert "_unpriced" not in out and out["model_output"]
