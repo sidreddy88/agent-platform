@@ -165,9 +165,13 @@ Complete each step before moving to the next.
    that may not exist on the default branch.
 
 8. Call submit_diagnosis with your findings. It validates every grounding-relevant
-   field before accepting — a rejection tells you exactly what's wrong; fix it and
-   call submit_diagnosis again. Do NOT write the diagnosis as JSON in your Answer;
-   submit_diagnosis is the only way to finalize.
+   field before accepting and a rejection names the exact field that is wrong, so a
+   submission is the start of a correction loop: re-read or re-verify what it points
+   at and call it again. The run ends when the turn budget is spent, so the first
+   attempt made as soon as you have an affected_file plus a verbatim snippet copied
+   from it leaves turns available for those corrections; an investigation that never
+   reaches submit_diagnosis delivers nothing, however thorough it was. Do NOT write
+   the diagnosis as JSON in your Answer; submit_diagnosis is the only way to finalize.
 
 CRITICAL — NULL / UNDEFINED ERRORS:
 If the error is a TypeError (cannot read property, undefined, null) or NullPointerException:

@@ -1,7 +1,10 @@
 name: DiagnosisAgent Regression
 
-# Regression gate for DiagnosisAgent: any PR touching diagnosis.py or
-# base.py (the shared ReAct loop DiagnosisAgent inherits from) must replay
+# Regression gate for DiagnosisAgent: any PR touching diagnosis.py,
+# base.py (the shared ReAct loop DiagnosisAgent inherits from) or the
+# harness files under app/agents/harness/diagnosis/ (prompts, tool
+# descriptions, settings -- moved out of diagnosis.py, which let a harness
+# edit skip this gate entirely) must replay
 # the golden dataset (6 real production incidents + 56 SWE-bench Verified
 # instances known to pass) and stay within the noise threshold
 # (MAX_NONPASS_RATE) before merging. See
@@ -87,7 +90,7 @@ jobs:
           fi
           base=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "${{ github.event.pull_request.head.sha }}")
           if git diff --name-only "$base" "${{ github.event.pull_request.head.sha }}" \
-              | grep -qE '^app/agents/(diagnosis|base)\.py$'; then
+              | grep -qE '^app/agents/((diagnosis|base)\.py$|harness/)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -147,7 +150,7 @@ jobs:
     steps:
       - name: Skipped -- no relevant files changed
         if: needs.changes.outputs.run == 'false'
-        run: echo "No changes to diagnosis.py/base.py since main -- skipping the replay."
+        run: echo "No changes to diagnosis.py/base.py or the diagnosis harness since main -- skipping the replay."
 
       - name: Fail if change detection didn't run
         if: needs.changes.result != 'success'
