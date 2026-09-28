@@ -65,6 +65,44 @@ def cmd_collect(args) -> int:
     return 0
 
 
+def cmd_timing(args) -> int:
+    """One shard's wall clock, replay count and cost, for sizing the full run."""
+    cases = trials = 0
+    cost = 0.0
+    for f in (Path(args.run_dir) / "evals").rglob("*.json"):
+        c = json.loads(f.read_text())["case"]
+        cases += 1
+        trials += c["trials"]
+        cost += c.get("cost_usd") or 0.0
+    out = {"shard": args.shard, "seconds": args.seconds, "cases": cases, "replays": trials, "cost_usd": cost}
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(json.dumps(out))
+    print(out)
+    return 0
+
+
+def cmd_timing_report(args) -> int:
+    rows = [json.loads(Path(p).read_text()) for p in args.results]
+    if not rows:
+        print("no timing results")
+        return 1
+    lines = ["## Gate v2 probe", "", "| Shard | Cases | Replays | Minutes | Cost |", "|---|---|---|---|---|"]
+    for r in sorted(rows, key=lambda r: r["shard"]):
+        lines.append(f"| {r['shard']} | {r['cases']} | {r['replays']} | {r['seconds'] / 60:.1f} | ${r['cost_usd']:.2f} |")
+    replays = sum(r["replays"] for r in rows)
+    cost = sum(r["cost_usd"] for r in rows)
+    worst = max(r["seconds"] for r in rows) / 60
+    full = len(gate_v2.load_pool()["cases"]) * (replays / max(1, sum(r["cases"] for r in rows)))
+    lines += ["", f"Cost per replay ${cost / replays:.4f}; a full run ({full:.0f} replays) ≈ "
+                  f"${cost / replays * full:.0f}. Slowest shard {worst:.1f} min (20 shards run in parallel)."]
+    text = "\n".join(lines)
+    print(text)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write(text + "\n")
+    return 0
+
+
 def cmd_aggregate(args) -> int:
     pool = gate_v2.load_pool()
     base = gate_v2.load_baseline(Path(args.baseline))
@@ -148,6 +186,13 @@ def main() -> int:
     s.add_argument("--trials", type=int, required=True)
     s.add_argument("--harness", default=str(HARNESS))
     s.add_argument("--out", required=True)
+    s = sub.add_parser("timing")
+    s.add_argument("--run-dir", required=True)
+    s.add_argument("--shard", type=int, required=True)
+    s.add_argument("--seconds", type=int, required=True)
+    s.add_argument("--out", required=True)
+    s = sub.add_parser("timing-report")
+    s.add_argument("--results", nargs="+", required=True)
     s = sub.add_parser("aggregate")
     s.add_argument("--results", nargs="+", required=True)
     s.add_argument("--baseline", default=str(gate_v2.BASELINE))
@@ -162,7 +207,7 @@ def main() -> int:
     s.add_argument("--sims", type=int, default=1000)
     args = ap.parse_args()
     return {"pool": cmd_pool, "shard-file": cmd_shard_file, "collect": cmd_collect,
-            "aggregate": cmd_aggregate, "baseline": cmd_baseline, "power": cmd_power}[args.cmd](args)
+            "aggregate": cmd_aggregate, "timing": cmd_timing, "timing-report": cmd_timing_report, "baseline": cmd_baseline, "power": cmd_power}[args.cmd](args)
 
 
 if __name__ == "__main__":
