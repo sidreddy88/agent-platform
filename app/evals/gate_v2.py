@@ -65,10 +65,11 @@ def load_pool(path: Path = POOL) -> dict:
     return json.loads(path.read_text())
 
 
-# Relative time per case, measured by the CI probe (run 36455388528, 2 trials,
-# 3 concurrent replays per shard): astropy 45 s and django 45 s per replay,
-# sympy 71 s. Repos not measured count as 1.0.
-REPO_WEIGHTS = {"sympy/sympy": 1.6}
+# Relative time per case: seconds per replay on the calibration run's 20
+# shards (2026-09-28, 4 trials, 3 concurrent replays per shard), divided by
+# the fast repos' ~39 s (astropy, scikit-learn, pylint, pytest: 35-44 s).
+# django 55 s, matplotlib 67 s, sympy 81 s. Repos not listed count as 1.0.
+REPO_WEIGHTS = {"django/django": 1.4, "matplotlib/matplotlib": 1.7, "sympy/sympy": 2.0}
 
 
 def shard(cases: list[str], of: int, index: int, repos: dict[str, str] | None = None,

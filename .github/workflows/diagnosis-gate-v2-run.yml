@@ -1,0 +1,143 @@
+name: Diagnosis gate v2 (run)
+
+# The replay and aggregate jobs, shared by the automatic gate
+# (diagnosis-gate-v2.yml) and the manual runs (diagnosis-gate-v2-manual.yml).
+# Design and reasoning: app/evals/gate_v2.py.
+#
+# The replays run through the optimizer's round-0 runner, so each shard gets
+# its per-repo lanes, result cache, hard budget cap, tripwires and
+# provider-failure stops. Shards are contiguous slices of the repo-sorted pool
+# with equal expected time (gate_v2.REPO_WEIGHTS), so each clones one or two
+# repos.
+
+on:
+  workflow_call:
+    inputs:
+      mode:            # gate | baseline | baseline-part | probe
+        type: string
+        required: true
+      trials:
+        type: string
+        default: "2"
+      shard_budget_usd:
+        type: string
+        default: "4"
+      only:            # ",3,19," to run only those shards; ",," for all
+        type: string
+        default: ",,"
+      main_sha:        # recorded in a new baseline
+        type: string
+        default: ""
+
+env:
+  SHARDS: 20
+
+jobs:
+  replay:
+    name: shard ${{ matrix.shard }}/20
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with env.SHARDS -- matrix values can't read env.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    env:
+      RUN_SHARD: ${{ inputs.only == ',,' || contains(inputs.only, format(',{0},', matrix.shard)) }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.RUN_SHARD == 'true'
+
+      - uses: actions/setup-python@v5
+        if: env.RUN_SHARD == 'true'
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        if: env.RUN_SHARD == 'true'
+        run: pip install -r requirements-dev.txt
+
+      - name: Replay shard
+        if: env.RUN_SHARD == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.DIAGNOSIS_REGRESSION_GITHUB_PAT }}
+          TRIALS: ${{ inputs.trials }}
+          BUDGET: ${{ inputs.shard_budget_usd }}
+          # A PR's harness can legitimately score low: that's the result the
+          # gate reports, so round 0's pass-rate tripwire is off in gate mode.
+          # (Baselines measure main's harness, where a collapse means breakage.)
+          EXTRA: ${{ inputs.mode == 'gate' && '--no-pass-rate-tripwire' || '' }}
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          python scripts/gate_v2.py shard-file --index ${{ matrix.shard }} --of $SHARDS --out shard.json
+          # Keep going if the optimizer stops early (budget, provider, watchdog):
+          # whatever finished is still collected and uploaded, and a missing case
+          # fails the gate closed later. The step still fails with its exit code.
+          rc=0
+          python scripts/optimize_harness.py --run-dir runs/gate/shard-${{ matrix.shard }} \
+            --cases-file shard.json --rounds 0 --calibration-trials $TRIALS \
+            --budget $BUDGET --parallel 2 --lane-width 3 $EXTRA || rc=$?
+          python scripts/gate_v2.py collect --run-dir runs/gate/shard-${{ matrix.shard }} \
+            --trials $TRIALS --out gate-results/shard-${{ matrix.shard }}.json
+          python scripts/gate_v2.py timing --run-dir runs/gate/shard-${{ matrix.shard }} \
+            --shard ${{ matrix.shard }} --seconds $(( $(date +%s) - start )) \
+            --out gate-results/timing-${{ matrix.shard }}.json
+          exit $rc
+
+      - name: Upload shard results
+        if: always() && env.RUN_SHARD == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-v2-shard-${{ matrix.shard }}
+          path: gate-results/
+          if-no-files-found: ignore
+
+  aggregate:
+    name: paired test (434 cases)
+    needs: replay
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Download shard results
+        # A missing shard shows up as missing cases, which fail the gate closed.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gate-v2-shard-*
+          path: gate-results
+          merge-multiple: true
+
+      - name: Timing and cost (probe)
+        if: inputs.mode == 'probe'
+        run: python scripts/gate_v2.py timing-report --results gate-results/timing-*.json
+
+      - name: Paired test against main's baseline
+        if: inputs.mode == 'gate'
+        run: python scripts/gate_v2.py aggregate --results gate-results/shard-*.json
+
+      - name: Write a new baseline
+        if: inputs.mode == 'baseline'
+        run: >-
+          python scripts/gate_v2.py baseline --results gate-results/shard-*.json
+          --main-sha ${{ inputs.main_sha }} --pr-trials 2 --out gate-v2-baseline.json
+
+      - name: Upload the new baseline
+        if: inputs.mode == 'baseline'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-v2-baseline
+          path: gate-v2-baseline.json

@@ -122,6 +122,12 @@ class OptimizerConfig:
     diversity_after: int = 0
     cost_band: bool = False            # calibrate and apply a cost noise band (acceptance.cost_delta)
     health_baseline: dict = field(default_factory=dict)   # overrides health.BASELINE (other models)
+    # Round 0's pass-rate tripwire assumes round 0 measures the unchanged
+    # original harness. The diagnosis gate replays a PR's harness through
+    # round 0, where a collapse is the result to report, not a broken run
+    # (the gate's known-answer regression tripped it). Tool, error and cost
+    # tripwires stay on either way.
+    pass_rate_tripwire: bool = True
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -378,7 +384,7 @@ class Optimizer:
                 lanes.setdefault(f"{repo}#{i % width}", []).append(case)
         self._recent = deque(maxlen=max(1, self.cfg.health_window))
         self._since_check = 0
-        self._health_round0 = round0
+        self._health_round0 = round0 and self.cfg.pass_rate_tripwire
         gate = asyncio.Semaphore(max(1, self.cfg.parallel_lanes))
 
         async def run_lane(lane_cases: list[str]) -> None:

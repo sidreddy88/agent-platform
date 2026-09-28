@@ -10,14 +10,14 @@ name: TriageAgent Regression
 # zero-tolerance gate can't distinguish from an actual regression.
 #
 # Unlike ci.yml, this makes real Anthropic API calls -- real cost, but much
-# cheaper/faster than the sibling DiagnosisAgent gate (diagnosis-regression.yml):
+# cheaper/faster than the sibling DiagnosisAgent gate (diagnosis-gate-v2.yml):
 # no git checkout of a second repo, no GitHub API, one Haiku call per case.
 # Expect low single-digit minutes, not the hour-plus Diagnosis's
 # Sonnet-plus-tool-loop gate needs.
 #
 # The path check is done INSIDE the job (via the "Check whether relevant
 # files changed" step below), not as a top-level `on.pull_request.paths`
-# filter -- same reasoning as diagnosis-regression.yml: this job is a
+# filter -- same reasoning as diagnosis-gate-v2.yml: this job is a
 # required status check in main's branch protection, and a trigger-level
 # path filter would leave the check permanently pending (and merges
 # blocked) on any PR that doesn't touch these files. Running the job
