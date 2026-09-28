@@ -10,6 +10,7 @@ Each iteration:
 
 import json
 import logging
+import os
 import re
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
@@ -384,8 +385,10 @@ class BaseAgent:
                 step = Step(iteration=i)
                 # cache=True: the system prefix and every prior turn are resent
                 # on each iteration, so this is exactly what prompt caching pays for.
+                # PROMPT_CACHE=0 turns it off, only to measure what it saves.
                 raw = await self._llm.complete(messages=messages, system=system,
-                                               tracing_ctx=self._tracing_ctx, cache=True)
+                                               tracing_ctx=self._tracing_ctx,
+                                               cache=os.environ.get("PROMPT_CACHE", "1") != "0")
                 _total_input_tokens += self._llm.last_input_tokens
                 _total_output_tokens += self._llm.last_output_tokens
 

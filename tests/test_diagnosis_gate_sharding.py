@@ -72,6 +72,9 @@ class _ProviderError(Exception):
 
 @pytest.mark.parametrize("exc,kind", [
     (_ProviderError(400, "Your credit balance is too low to access the Anthropic API."), "billing"),
+    (_ProviderError(None, "Together_aiException - Credit limit exceeded, please add credits"), "billing"),
+    (_ProviderError(500, "APIError: Together_aiException - Credit limit exceeded"), "billing"),
+    (_ProviderError(402, "payment required"), "billing"),
     (_ProviderError(401, "invalid x-api-key"), "auth"),
     (_ProviderError(429, "rate_limit_error"), "rate_limit"),
     (_ProviderError(529, "overloaded_error"), "provider_outage"),
@@ -267,3 +270,26 @@ def test_timeout_is_not_retried(monkeypatch):
     monkeypatch.setattr(swe, "_replay_one", hang)
     results = asyncio.run(gate._run_swebench_suite([{"instance_id": "a", "repo": "r"}]))
     assert calls == ["a"] and results[0]["verdict"] == "TIMEOUT"
+
+
+def test_trajectories_out_writes_one_record_per_attempt(monkeypatch, tmp_path):
+    import asyncio
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "app.services.github",
+                        types.SimpleNamespace(GitHubService=lambda: None))
+    import scripts.eval_swebench_diagnosis as swe
+    verdicts = iter(["FAIL", "PASS"])
+
+    async def replay(instance, github, trajectory_sink=None):
+        v = next(verdicts)
+        trajectory_sink.append({"instance_id": instance["instance_id"], "llm_calls": [], "steps": []})
+        return {"instance_id": instance["instance_id"], "verdict": v, "detail": v.lower()}
+
+    monkeypatch.setattr(swe, "_replay_one", replay)
+    asyncio.run(gate._run_swebench_suite([{"instance_id": "c1", "repo": "r"}], trajectory_dir=tmp_path))
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ["c1__attempt1.json", "c1__attempt2.json"]
+    rec = json.loads((tmp_path / "c1__attempt1.json").read_text())
+    assert rec["verdict"] == "FAIL" and rec["attempt"] == 1

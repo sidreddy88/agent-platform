@@ -183,7 +183,10 @@ class LLMService:
                     getattr(response.usage, "cache_read_input_tokens", 0) or 0,
                     getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
                 )
-            return response.content[0].text
+            # Join the text blocks rather than reading content[0]: models that
+            # think by default (claude-opus-5) put a `thinking` block first,
+            # which has no .text. Found on the harness optimizer's proposer.
+            return "".join(t for b in response.content if isinstance(t := getattr(b, "text", None), str))
 
         async def _complete() -> str:
             if tracing_ctx is not None and tracing_ctx.enabled:

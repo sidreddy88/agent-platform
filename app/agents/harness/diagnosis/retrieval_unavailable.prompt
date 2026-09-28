@@ -1,0 +1,2 @@
+
+RETRIEVAL: search_codebase is not available for this incident (there is no semantic index of this repository). Wherever the steps below say search_codebase, use grep_codebase with exact names from the error text (function, class, module or message strings) to find where code lives, then get_file_contents (with start_line/end_line for large files) to read it.

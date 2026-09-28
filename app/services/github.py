@@ -1,11 +1,14 @@
 import base64
 import gzip
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
 
@@ -34,6 +37,10 @@ class GitHubError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(f"GitHub API error {status}: {message}")
         self.status = status
+
+
+class GitHubSearchError(RuntimeError):
+    """GitHub code search failed (auth, rate limit, bad query): no answer, not "no matches"."""
 
 
 class GitHubService:
@@ -345,12 +352,19 @@ class GitHubService:
         paths = {item["path"] for item in data.get("tree", []) if item.get("type") == "blob"}
         return paths, data["sha"]
 
-    async def search_code(self, owner: str, repo: str, query: str) -> list[dict]:
+    async def search_code(self, owner: str, repo: str, query: str, *, strict: bool = False) -> list[dict]:
         """
         Search file *contents* in the repo using GitHub Code Search API.
 
         Returns a list of dicts with 'path' and 'fragment' (matched code snippet).
         Skips node_modules and test files. Max 5 results.
+
+        A non-200 used to return [] silently, indistinguishable from "no
+        matches". A 401 from an expired token made DiagnosisAgent's
+        verify_symbol_in_repo answer NOT_FOUND for 87 of 87 lookups in one eval
+        run, 85 of them symbols that existed. It is now always logged; with
+        strict=True it raises GitHubSearchError instead, for callers where "no
+        results" would be read as a fact about the code.
         """
         _SKIP = ("node_modules", ".test.", ".spec.", "dist/", "build/")
         try:
@@ -361,6 +375,10 @@ class GitHubService:
                     headers={"Accept": "application/vnd.github.v3.text-match+json"},
                 )
                 if resp.status_code != 200:
+                    logger.warning("GitHub code search failed for %s/%s: HTTP %s %s",
+                                   owner, repo, resp.status_code, resp.text[:200])
+                    if strict:
+                        raise GitHubSearchError(f"HTTP {resp.status_code}: {resp.text[:200]}")
                     return []
                 items = resp.json().get("items", [])
                 results = []
@@ -376,7 +394,12 @@ class GitHubService:
                     if len(results) >= 5:
                         break
                 return results
-        except Exception:
+        except GitHubSearchError:
+            raise
+        except Exception as exc:
+            logger.warning("GitHub code search error for %s/%s: %s", owner, repo, exc)
+            if strict:
+                raise GitHubSearchError(str(exc)) from exc
             return []
 
     async def search_files_by_keyword(self, owner: str, repo: str, keyword: str, ref: str = "main") -> list[str]:

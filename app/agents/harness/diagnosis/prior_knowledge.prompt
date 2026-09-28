@@ -1,0 +1,4 @@
+
+PRIOR KNOWLEDGE (from past incidents — a LEAD to investigate, not a citable fact):
+{prior_context}
+This match is keyed on error_type + service + description — not a guarantee the past incident is actually the same bug, especially for a service that crashes for many unrelated reasons under the same generic error_type. Real production bug: a past incident matched this way was for a completely different route/file, and the diagnosis cited its (wrong) PR as evidence that several sibling files were 'already fixed,' fabricating specifics (a file count) that weren't even IN this prior-knowledge text. Before citing anything from PRIOR KNOWLEDGE in root_cause: read the actual current file(s) yourself and confirm the SAME code shape and symptom match. Never state a specific fact (which files were fixed, how many, when) unless you verified it by reading real current code — not by inferring it from this summary or from a general pattern described elsewhere (e.g. AGENTS.md).

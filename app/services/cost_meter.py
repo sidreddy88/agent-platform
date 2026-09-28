@@ -31,9 +31,20 @@ from typing import Iterator
 # $ per million tokens: (input, output). Anthropic first-party rates, checked
 # 2026-09-25. Cache writes (5-min TTL) bill at 1.25x input, cache reads at
 # 0.1x input. Keyed by alias; dated snapshot IDs are normalised below.
-PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+# (input, output) per million tokens, or (input, output, cache_read) where a
+# provider's cached-input price isn't Anthropic's 10% of input.
+PRICES_PER_MTOK: dict[str, tuple[float, ...]] = {
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
+    "claude-opus-5": (5.00, 25.00),      # harness optimizer's proposer and critic
+    "claude-sonnet-5": (2.00, 10.00),    # routing.diagnosis.model (production + evals via the gateway)
+    # Open-weight models on Together AI, for the open-model scout: serverless
+    # list prices incl. cached input, 2026-09-26, from api.together.xyz/v1/models
+    # (each probed as serverless). Keyed by the last path segment of the id.
+    "DeepSeek-V4.1-Flash": (0.30, 1.20, 0.006),
+    "MiniMax-M3": (0.30, 1.20, 0.06),
+    "GLM-5.3-Flash": (0.15, 0.50, 0.03),
+    "gpt-oss-120b": (0.15, 0.60),
 }
 CACHE_WRITE_MULTIPLIER = 1.25
 CACHE_READ_MULTIPLIER = 0.10
@@ -57,21 +68,29 @@ class _ModelUsage:
         prices = PRICES_PER_MTOK.get(_price_key(model))
         if prices is None:
             return None
-        inp, out = prices
+        inp, out = prices[0], prices[1]
+        cache_read = prices[2] if len(prices) > 2 else inp * CACHE_READ_MULTIPLIER
         return {
             "input": self.input_tokens * inp / 1e6,
             "output": self.output_tokens * out / 1e6,
             "cache_write": self.cache_write_tokens * inp * CACHE_WRITE_MULTIPLIER / 1e6,
-            "cache_read": self.cache_read_tokens * inp * CACHE_READ_MULTIPLIER / 1e6,
+            "cache_read": self.cache_read_tokens * cache_read / 1e6,
         }
 
 
 @dataclass
 class CostMeter:
     by_model: dict[str, _ModelUsage] = field(default_factory=dict)
+    # One entry per LLM call, in order. Lets a caller attribute usage to the
+    # exact call that incurred it (see scripts/analyze_cost_by_source.py).
+    call_log: list[dict] = field(default_factory=list)
 
     def record(self, model: str, input_tokens: int, output_tokens: int,
                cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> None:
+        self.call_log.append({
+            "model": model, "input": input_tokens or 0, "output": output_tokens or 0,
+            "cache_read": cache_read_tokens or 0, "cache_write": cache_write_tokens or 0,
+        })
         u = self.by_model.setdefault(model, _ModelUsage())
         u.calls += 1
         u.input_tokens += input_tokens or 0
@@ -110,13 +129,15 @@ class CostMeter:
         }
 
 
-_current: ContextVar[CostMeter | None] = ContextVar("cost_meter", default=None)
+# A stack, so meters nest: an eval case metered across all its attempts can
+# contain a per-replay meter, and a call is recorded against both.
+_current: ContextVar[tuple[CostMeter, ...]] = ContextVar("cost_meter", default=())
 
 
 @contextlib.contextmanager
 def metered() -> Iterator[CostMeter]:
     meter = CostMeter()
-    token = _current.set(meter)
+    token = _current.set(_current.get() + (meter,))
     try:
         yield meter
     finally:
@@ -125,12 +146,10 @@ def metered() -> Iterator[CostMeter]:
 
 def record(model: str, input_tokens: int, output_tokens: int,
            cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> None:
-    """Record one LLM call against the active meter, if any. Never raises:
+    """Record one LLM call against every active meter. Never raises:
     metering must not be able to break an LLM call."""
-    meter = _current.get()
-    if meter is None:
-        return
-    try:
-        meter.record(model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-    except Exception:
-        pass
+    for meter in _current.get():
+        try:
+            meter.record(model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+        except Exception:
+            pass

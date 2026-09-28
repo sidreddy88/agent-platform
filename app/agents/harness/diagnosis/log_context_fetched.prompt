@@ -1,0 +1,13 @@
+
+STEPS 1-3 — LOG CONTEXT (already fetched, no tool call needed):
+
+1. ERROR SAMPLES (get_error_samples, minutes=120):
+{error_samples}
+   → Extract: exact error text, function names in stack trace, any file paths or line numbers.
+     These become your search terms for step 5.
+
+2. STILL OCCURRING (check_still_occurring):
+{still_occurring}
+
+3. OCCURRENCE TIMELINE (get_occurrence_timeline, hours=24):
+{occurrence_timeline}
