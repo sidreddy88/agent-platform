@@ -152,3 +152,14 @@ async def test_skipped_entirely_in_test_environment():
         with patch.object(model_config, "_live_anthropic_ids", anthropic_call):
             await model_config.validate_models_live()
         anthropic_call.assert_not_called()
+
+
+def test_missing_together_key_is_reported(monkeypatch):
+    from app.services import model_config
+    monkeypatch.setattr(model_config, "_load_routing_config", lambda: {
+        "routing": {"diagnosis": {"model": "together_ai/deepseek-ai/DeepSeek-V4.1-Flash"}}})
+    monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+    assert model_config._missing_provider_keys() == [
+        "together_ai/deepseek-ai/DeepSeek-V4.1-Flash (TOGETHER_API_KEY)"]
+    monkeypatch.setenv("TOGETHER_API_KEY", "x")
+    assert model_config._missing_provider_keys() == []

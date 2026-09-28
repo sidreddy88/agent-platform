@@ -38,6 +38,7 @@ locals {
   secret_keys = [
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    "TOGETHER_API_KEY",   # DiagnosisAgent runs DeepSeek-V4.1-Flash via Together
     "GITHUB_TOKEN",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",

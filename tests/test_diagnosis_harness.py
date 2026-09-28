@@ -1,5 +1,10 @@
-"""The harness-directory refactor is behaviour-neutral, and a candidate
-harness directory actually changes what DiagnosisAgent sends."""
+"""The shipped harness renders exactly the pinned prompts, and a candidate
+harness directory actually changes what DiagnosisAgent sends.
+
+The golden files started as proof that moving the harness out of Python was
+byte-identical. They now pin the shipped harness: a deliberate harness change
+(like promoting an optimizer run's accepted edits) updates them in the same PR,
+and the diff shows exactly what the model will be sent differently."""
 from __future__ import annotations
 
 import json
@@ -17,7 +22,7 @@ GOLDEN = Path(__file__).parent / "fixtures" / "diagnosis_harness_golden"
 
 
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
-def test_task_prompt_is_byte_identical_to_pre_refactor(name):
+def test_task_prompt_matches_pinned_golden(name):
     assert capture_task_prompt(name) == (GOLDEN / f"task_prompt__{name}.txt").read_text()
 
 

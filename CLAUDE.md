@@ -37,6 +37,7 @@ Tests use mocks — no live API calls required.
 ANTHROPIC_API_KEY=
 GITHUB_TOKEN=
 OPENAI_API_KEY=          # used by RAG service (embeddings)
+TOGETHER_API_KEY=        # DiagnosisAgent (DeepSeek-V4.1-Flash)
 CODEBASE_PATH=           # local path to index with RAG
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=
@@ -69,7 +70,7 @@ ChromaDB-backed vector store with OpenAI `text-embedding-3-small`. Call `rag.ind
 | Agent | File | Description |
 |---|---|---|
 | TriageAgent | `app/agents/triage.py` | Classifies real/noise/duplicate + P0–P3 severity (Haiku) |
-| DiagnosisAgent | `app/agents/diagnosis.py` | Root cause + confidence score, grounded via RAG + call graph (Sonnet) |
+| DiagnosisAgent | `app/agents/diagnosis.py` | Root cause + confidence score, grounded via call graph + symbol verification (DeepSeek-V4.1-Flash via Together) |
 | FixGenerationAgent | `app/agents/fix_generation.py` | Generates a fix, self-critiques, sandbox-validates, opens a PR |
 | CodeReviewAgent | `app/agents/code_review.py` | Reviews the PR and posts feedback as a GitHub comment |
 | MergeDecisionAgent | `app/agents/merge_decision.py` | Decides merge-now vs refix-first when review requests changes |
