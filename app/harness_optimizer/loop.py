@@ -167,6 +167,8 @@ class Optimizer:
         self.base = Path(base_harness)
         self.cfg = cfg
         self.evaluator = evaluator
+        if hasattr(evaluator, "on_trial"):
+            evaluator.on_trial = self._touch
         self.proposer_llm = proposer_llm
         self.critic_llm = critic_llm
         self.patterns = critic_patterns
@@ -248,6 +250,11 @@ class Optimizer:
         if state.phase == "done":
             state.timing["finished_at"] = sess["end"]
         state.timing["active_seconds"] = round(sum(s.get("seconds", 0) for s in state.timing["sessions"]), 1)
+
+    def _touch(self) -> None:
+        """Liveness only: a trial finished. Keeps the watchdog quiet during long
+        cases without touching session accounting (that's _progress, per case)."""
+        self._last_progress = time.monotonic()
 
     def _progress(self, state: RunState) -> None:
         self._last_progress = time.monotonic()

@@ -74,6 +74,10 @@ jobs:
             # A baseline takes 4 trials per case: the PR runs use 2, and the
             # false-alarm check splits baseline trials into halves.
             [ "$mode" = "baseline" ] && trials=4 && budget=8
+            # gate-v2-baseline-19 (or -3-19): re-run only those shards of a
+            # baseline, e.g. after one failed. Results are merged by hand
+            # (scripts/gate_v2.py baseline --results <files from both runs>).
+            case "$mode" in baseline-*) only="$(echo "${mode#baseline-}" | tr '-' ',')"; mode=baseline-part; trials=4; budget=8;; esac
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"; echo "trials=$trials" >> "$GITHUB_OUTPUT"
           echo "budget=$budget" >> "$GITHUB_OUTPUT"; echo "only=,$only," >> "$GITHUB_OUTPUT"
@@ -119,14 +123,19 @@ jobs:
           set -euo pipefail
           start=$(date +%s)
           python scripts/gate_v2.py shard-file --index ${{ matrix.shard }} --of $SHARDS --out shard.json
+          # Keep going if the optimizer stops early (budget, provider, watchdog):
+          # whatever finished is still collected and uploaded, and a missing case
+          # fails the gate closed later. The step still fails with its exit code.
+          rc=0
           python scripts/optimize_harness.py --run-dir runs/gate/shard-${{ matrix.shard }} \
             --cases-file shard.json --rounds 0 --calibration-trials $TRIALS \
-            --budget $BUDGET --parallel 2 --lane-width 3
+            --budget $BUDGET --parallel 2 --lane-width 3 || rc=$?
           python scripts/gate_v2.py collect --run-dir runs/gate/shard-${{ matrix.shard }} \
             --trials $TRIALS --out gate-results/shard-${{ matrix.shard }}.json
           python scripts/gate_v2.py timing --run-dir runs/gate/shard-${{ matrix.shard }} \
             --shard ${{ matrix.shard }} --seconds $(( $(date +%s) - start )) \
             --out gate-results/timing-${{ matrix.shard }}.json
+          exit $rc
 
       - name: Upload shard results
         if: always()
