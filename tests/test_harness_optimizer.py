@@ -769,3 +769,22 @@ def test_critic_is_told_what_was_already_rejected():
     assert "ALREADY REJECTED IN THIS RUN" in seen["p"] and "submit sooner" in seen["p"]
     assert "NEAR-DUPLICATE" in seen["s"] and "FALSE TOOL CLAIM" in seen["s"]
     assert "NOT unbounded work" in seen["s"]
+
+
+def test_each_finished_trial_counts_as_watchdog_progress(tmp_path):
+    """A slow case at 4 trials must not look like a hang: the evaluator's
+    per-trial callback is wired to the watchdog's liveness clock."""
+    import time
+
+    class SlowEvaluator:
+        on_trial = None
+
+        async def evaluate(self, harness_dir, case_ids, trials):
+            raise AssertionError("not called")
+
+    ev = SlowEvaluator()
+    opt = _opt(tmp_path, ev)
+    assert ev.on_trial == opt._touch
+    opt._last_progress = time.monotonic() - 3600
+    ev.on_trial()
+    assert time.monotonic() - opt._last_progress < 5

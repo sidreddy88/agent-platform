@@ -1,0 +1,101 @@
+name: Diagnosis gate v2
+
+# The diagnosis regression gate: every non-draft PR that changes diagnosis
+# replays all 434 SWE-bench Verified cases outside the held-out repos (2
+# trials each) and compares each case with main's own measured pass rate
+# (app/evals/gate_v2_baseline.json) in a paired test. Design, power analysis
+# and validation: app/evals/gate_v2.py and harness-evolution-v2.md §0.11.
+#
+# "Changes diagnosis" = diagnosis.py, base.py (the shared ReAct loop), the
+# harness files, or the routed model (config/llm_routing.json). The path check
+# runs inside the workflow, not as an on.paths filter, so the `gate` job always
+# reports and can be a required check: it passes fast when nothing relevant
+# changed or the PR is a draft, and gives the real verdict when it did.
+#
+# Fails closed when the baseline is stale: if diagnosis changed on main after
+# the baseline was measured, comparing against it would be comparing against
+# the wrong thing. Refresh it with diagnosis-gate-v2-manual.yml (mode=baseline).
+#
+# Each run costs ~$29 on Together and ~40 minutes. A new push cancels the run
+# in flight for the same PR.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: diagnosis-gate-v2-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: detect diagnosis changes
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+      stale: ${{ steps.filter.outputs.stale }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          relevant='^(app/agents/((diagnosis|base)\.py$|harness/)|config/llm_routing\.json$)'
+          echo "stale=false" >> "$GITHUB_OUTPUT"
+          # The PR's live draft state, not the event payload's (see the v1 gate's history).
+          draft=$(gh pr view "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
+                  --json isDraft --jq .isDraft 2>/dev/null || echo "${{ github.event.pull_request.draft }}")
+          if [ "$draft" = "true" ]; then
+            echo "Draft PR: the gate runs when it's marked ready for review."
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          base=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "${{ github.event.pull_request.head.sha }}")
+          if ! git diff --name-only "$base" "${{ github.event.pull_request.head.sha }}" | grep -qE "$relevant"; then
+            echo "No diagnosis changes since main."
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          measured=$(python3 -c "import json; print(json.load(open('app/evals/gate_v2_baseline.json'))['main_sha'])")
+          if ! git cat-file -e "$measured^{commit}" 2>/dev/null; then
+            echo "Baseline commit $measured not found: treating the baseline as stale."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$measured" "$base" | grep -qE "$relevant"; then
+            echo "Diagnosis changed on main since the baseline ($measured): it's stale."
+            git diff --name-only "$measured" "$base" | grep -E "$relevant"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  run:
+    needs: changes
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.stale == 'false'
+    uses: ./.github/workflows/diagnosis-gate-v2-run.yml
+    secrets: inherit
+    with:
+      mode: gate
+      trials: "2"
+      shard_budget_usd: "4"
+
+  gate:
+    name: diagnosis gate v2
+    needs: [changes, run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        run: |
+          if [ "${{ needs.changes.result }}" != "success" ]; then
+            echo "Change detection ended as '${{ needs.changes.result }}': no verdict."; exit 1
+          fi
+          if [ "${{ needs.changes.outputs.run }}" != "true" ]; then
+            echo "Nothing relevant changed (or draft): passing."; exit 0
+          fi
+          if [ "${{ needs.changes.outputs.stale }}" = "true" ]; then
+            echo "The baseline is stale: refresh it (diagnosis-gate-v2-manual.yml, mode=baseline) and commit it."; exit 1
+          fi
+          if [ "${{ needs.run.result }}" != "success" ]; then
+            echo "Gate v2 ended as '${{ needs.run.result }}': see the paired-test job's summary."; exit 1
+          fi
+          echo "Gate v2 passed."

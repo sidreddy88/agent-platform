@@ -20,7 +20,7 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from app.harness_optimizer.acceptance import CaseResult, EvalResult
 
@@ -78,6 +78,11 @@ def _is_escalation(verdict: str, detail: str) -> bool:
 
 class ReplayEvaluator:
     def __init__(self, cases_paths: tuple[Path, ...] = (SWEBENCH_CASES, HELDOUT_EXTRA, SWEBENCH_FULL)):
+        # Called after every finished trial, so the loop's watchdog sees a slow
+        # but healthy case as progress. Per case wasn't enough: a sympy case at
+        # 4 trials, some retried, ran past the 20-minute stall limit near the end
+        # of a calibration shard, when no other lane was left to finish a case.
+        self.on_trial: Callable[[], None] | None = None
         self._instances = {}
         for path in cases_paths:
             if path.exists():
@@ -130,6 +135,8 @@ class ReplayEvaluator:
                 cr.escalations += _is_escalation(res["verdict"], res.get("detail", ""))
                 cr.cost_usd += cost
                 cr.verdicts.append(res["verdict"])
+                if self.on_trial is not None:
+                    self.on_trial()
                 for rec in sink:
                     trajectories.append({**rec, "trial": t + 1, "verdict": res["verdict"],
                                          "detail": res.get("detail", "")})

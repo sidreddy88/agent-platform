@@ -1,0 +1,80 @@
+name: Diagnosis gate v2 (manual)
+
+# Manual gate v2 runs, started by a PR label or by workflow_dispatch:
+#
+#   gate-v2-gate          replay the PR and compare it with the baseline
+#   gate-v2-baseline      measure a new baseline (4 trials, $8/shard); upload it
+#                         as an artifact and commit it through a PR
+#   gate-v2-baseline-3-19 re-run only those shards of a baseline (merge by hand:
+#                         scripts/gate_v2.py baseline --results <both runs>)
+#   gate-v2-probe         shards 1, 11, 20 at 2 trials: timing and cost only
+#
+# Refresh the baseline after every merge that changes diagnosis: dispatch this
+# with mode=baseline on main, or label a PR that doesn't touch diagnosis. The
+# automatic gate (diagnosis-gate-v2.yml) fails when the baseline is stale.
+#
+# Kept apart from the automatic gate on purpose: a labeled event for any
+# unrelated label would otherwise re-run the required check as "skipped",
+# which GitHub counts as passing, and could hide a real failure.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "gate, baseline or probe"
+        type: choice
+        options: [gate, baseline, probe]
+        default: baseline
+      trials:
+        description: "trials per case (baselines use 4)"
+        default: "4"
+      shard_budget_usd:
+        description: "hard spending cap per shard (20 shards)"
+        default: "8"
+      only_shards:
+        description: "comma-separated shard numbers; empty = all"
+        default: ""
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: diagnosis-gate-v2-manual-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  config:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'gate-v2-')
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.c.outputs.mode }}
+      trials: ${{ steps.c.outputs.trials }}
+      budget: ${{ steps.c.outputs.budget }}
+      only: ${{ steps.c.outputs.only }}
+    steps:
+      - id: c
+        env:
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            mode="${{ inputs.mode }}"; trials="${{ inputs.trials }}"
+            budget="${{ inputs.shard_budget_usd }}"; only="${{ inputs.only_shards }}"
+          else
+            mode="${LABEL#gate-v2-}"; trials=2; budget=4; only=""
+            [ "$mode" = "probe" ] && only="1,11,20"
+            [ "$mode" = "baseline" ] && trials=4 && budget=8
+            case "$mode" in baseline-*) only="$(echo "${mode#baseline-}" | tr '-' ',')"; mode=baseline-part; trials=4; budget=8;; esac
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"; echo "trials=$trials" >> "$GITHUB_OUTPUT"
+          echo "budget=$budget" >> "$GITHUB_OUTPUT"; echo "only=,$only," >> "$GITHUB_OUTPUT"
+          echo "mode=$mode trials=$trials budget/shard=$budget only=${only:-all}"
+
+  run:
+    needs: config
+    uses: ./.github/workflows/diagnosis-gate-v2-run.yml
+    secrets: inherit
+    with:
+      mode: ${{ needs.config.outputs.mode }}
+      trials: ${{ needs.config.outputs.trials }}
+      shard_budget_usd: ${{ needs.config.outputs.budget }}
+      only: ${{ needs.config.outputs.only }}
+      main_sha: ${{ github.event.pull_request.base.sha || github.sha }}

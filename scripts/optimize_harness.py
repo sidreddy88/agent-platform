@@ -208,6 +208,9 @@ def main() -> int:
                         help='tripwire baseline overrides as JSON, e.g. \'{"cost_per_trial_usd": 0.035}\'')
     parser.add_argument("--seed-history", type=Path,
                         help="a pilot run's history.jsonl, given to the proposer as notes (new runs only)")
+    parser.add_argument("--no-pass-rate-tripwire", action="store_true",
+                        help="measuring a PR's harness (the diagnosis gate): a low round-0 pass "
+                             "rate is the result, not a broken run")
     parser.add_argument("--status", action="store_true")
     args = parser.parse_args()
     args.rounds_given = any(a == "--rounds" or a.startswith("--rounds=") for a in sys.argv[1:])
@@ -265,6 +268,7 @@ def main() -> int:
         cfg.diversity_after = args.diversity
         cfg.cost_band = args.cost_band
         cfg.health_baseline = args.health_baseline or {}
+        cfg.pass_rate_tripwire = not args.no_pass_rate_tripwire
         if args.seed_history:
             seed_history(args.seed_history, args.run_dir)
     opt = Optimizer(args.run_dir, args.harness or DEFAULT_ROOT / "diagnosis", cfg, ReplayEvaluator(),

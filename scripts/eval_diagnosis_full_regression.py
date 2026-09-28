@@ -1,12 +1,18 @@
 """
-Regression gate for DiagnosisAgent: replay every case in the golden dataset
-(6 real AllInterviews production incidents + 56 SWE-bench Verified instances
-DiagnosisAgent is known to get right) and fail if more than MAX_NONPASS_RATE
-of them stop passing.
+Diagnosis gate v1: replay every case in the golden dataset (6 real
+production incidents + 56 SWE-bench Verified instances DiagnosisAgent is
+known to get right) and fail if more than MAX_NONPASS_RATE of them stop
+passing.
 
-This is the enforcement mechanism behind CI's diagnosis-regression workflow
-(.github/workflows/diagnosis-regression.yml) -- any PR touching
-app/agents/diagnosis.py or app/agents/base.py must pass this before merging.
+Retired as the CI gate on 2026-09-28: gate v2 (.github/workflows/
+diagnosis-gate-v2.yml, app/evals/gate_v2.py) replays all 434 non-held-out
+SWE-bench cases and compares each with main's measured pass rate in a paired
+test. Always-pass cases barely move under a mild regression: simulated, this
+design (100 always-pass cases, fixed threshold) caught a ~3.8-point drop only
+about a third of the time, while v2 catches a 3.5-point drop ~85% of the time
+at a 5% false-alarm rate. Kept for local
+runs, and because it's the only gate that includes the 6 private production
+incidents (gitignored, so CI never replayed them).
 
 Why 56, not the full 100-instance SWE-bench sample: the other 44 already
 fail today (see docs/blog-drafts/swebench-results-log.md for the full
