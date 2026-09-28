@@ -47,7 +47,8 @@ def cmd_pool(args) -> int:
 
 
 def cmd_shard_file(args) -> int:
-    cases = gate_v2.shard(gate_v2.load_pool()["cases"], args.of, args.index)
+    pool = gate_v2.load_pool()
+    cases = gate_v2.shard(pool["cases"], args.of, args.index, pool["repos"], gate_v2.REPO_WEIGHTS)
     Path(args.out).write_text(json.dumps({"evolve": cases, "guards": []}))
     print(f"shard {args.index}/{args.of}: {len(cases)} cases")
     return 0

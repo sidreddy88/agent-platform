@@ -65,15 +65,32 @@ def load_pool(path: Path = POOL) -> dict:
     return json.loads(path.read_text())
 
 
-def shard(cases: list[str], of: int, index: int) -> list[str]:
-    """Contiguous, near-equal slices of the repo-sorted pool (index is 1-based).
-    Contiguous rather than round-robin: each shard then clones one or two repos,
-    not all of them."""
+# Relative time per case, measured by the CI probe (run 36455388528, 2 trials,
+# 3 concurrent replays per shard): astropy 45 s and django 45 s per replay,
+# sympy 71 s. Repos not measured count as 1.0.
+REPO_WEIGHTS = {"sympy/sympy": 1.6}
+
+
+def shard(cases: list[str], of: int, index: int, repos: dict[str, str] | None = None,
+          weights: dict[str, float] | None = None) -> list[str]:
+    """Contiguous slices of the repo-sorted pool (index is 1-based), cut so each
+    slice has about the same total expected time. A full run is only as fast as
+    its slowest shard, and a sympy case takes ~1.6x a django one, so equal case
+    counts left sympy's shards ~20 minutes behind. Contiguous rather than
+    round-robin: each shard then clones one or two repos, not all of them."""
     if not 1 <= index <= of:
         raise ValueError(f"shard {index}/{of}")
-    n = len(cases)
-    lo, hi = (index - 1) * n // of, index * n // of
-    return cases[lo:hi]
+    w = [(weights or {}).get((repos or {}).get(c, ""), 1.0) for c in cases]
+    total = sum(w)
+    # Shard k takes the cases whose cumulative-weight midpoint falls in its
+    # 1/of of the total: every case lands in exactly one shard.
+    out, acc = [], 0.0
+    for c, wi in zip(cases, w):
+        mid = acc + wi / 2
+        if (index - 1) * total / of <= mid < index * total / of or (index == of and mid >= total):
+            out.append(c)
+        acc += wi
+    return out
 
 
 # ---- results and the baseline ------------------------------------------------

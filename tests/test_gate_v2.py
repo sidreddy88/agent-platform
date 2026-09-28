@@ -108,3 +108,12 @@ def test_calibrated_threshold_holds_false_alarms_at_alpha():
     z = gate_v2.calibrate_threshold(base, pool, 2, sims=400)
     rate, _ = gate_v2.power(base, pool, 2, shift=0.0, sims=400, seed=99, z_alpha=z)
     assert 0.01 <= rate <= 0.10
+
+
+def test_weighted_shards_cover_the_pool_and_balance_time():
+    pool = json.loads(gate_v2.POOL.read_text())
+    cases, repos = pool["cases"], pool["repos"]
+    parts = [gate_v2.shard(cases, 20, i, repos, gate_v2.REPO_WEIGHTS) for i in range(1, 21)]
+    assert sum(parts, []) == cases
+    cost = [sum(gate_v2.REPO_WEIGHTS.get(repos[c], 1.0) for c in p) for p in parts]
+    assert max(cost) - min(cost) <= 1.6          # within one sympy case

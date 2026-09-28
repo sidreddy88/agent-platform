@@ -71,6 +71,9 @@ jobs:
           else
             mode="${LABEL#gate-v2-}"; trials=2; budget=4; only=""
             [ "$mode" = "probe" ] && only="1,11,20"
+            # A baseline takes 4 trials per case: the PR runs use 2, and the
+            # false-alarm check splits baseline trials into halves.
+            [ "$mode" = "baseline" ] && trials=4 && budget=8
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"; echo "trials=$trials" >> "$GITHUB_OUTPUT"
           echo "budget=$budget" >> "$GITHUB_OUTPUT"; echo "only=,$only," >> "$GITHUB_OUTPUT"
@@ -170,7 +173,7 @@ jobs:
         if: needs.config.outputs.mode == 'baseline'
         run: >-
           python scripts/gate_v2.py baseline --results gate-results/*.json
-          --main-sha ${{ github.event.pull_request.head.sha || github.sha }} --pr-trials 2 --out gate-v2-baseline.json
+          --main-sha ${{ github.event.pull_request.base.sha || github.sha }} --pr-trials 2 --out gate-v2-baseline.json
 
       - name: Upload the new baseline
         if: needs.config.outputs.mode == 'baseline'
