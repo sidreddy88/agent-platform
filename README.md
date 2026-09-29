@@ -200,7 +200,7 @@ docs/              # architecture notes
 
 **Push, not poll.** CloudWatch alarms → SNS → HTTPS webhook. Zero polling load on the production server. Detection latency drops from ~7d (human attention) to single-digit minutes.
 
-**Hard blocks are deterministic, soft hints are LLM-shaped.** Dedup is a hard block (drop the event); regression context is a soft hint (prompt injection). Mixing the two created a four-failure-mode bug. ([walked through here](https://remediatelabs.io/blog/rag-dedup-failure))
+**Hard blocks are deterministic, soft hints are LLM-shaped.** Dedup is a hard block (drop the event); regression context is a soft hint (prompt injection). Mixing the two created a four-failure-mode bug.
 
 **Ground every symbol against the repo.** DiagnosisAgent verifies symbols against the local checkout first (definitions before references), a failed lookup says so (`VERIFY_ERROR`) instead of pretending the symbol doesn't exist, and a grounding gate rejects any diagnosis that doesn't quote code the agent actually read.
 
@@ -242,7 +242,6 @@ Why paired: the old gate counted failures on 56 always-passing cases, which bare
 Notes from building this — self-improving harnesses, evals, retrieval design, cost engineering. A few representative posts below; full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
 
 - **Self-Improving Harness** (7 parts) — [Designing a Self-Improving Agent Harness](https://remediatelabs.io/blog/designing-a-self-improving-agent-harness) · [Power Analysis, and the Run That Worked](https://remediatelabs.io/blog/power-analysis-and-the-run-that-worked) · [Running an Agent for 7 Hours](https://remediatelabs.io/blog/running-an-agent-for-7-hours)
-- **RAG Learnings** — [Why the Same Bug Kept Creating New Incidents](https://remediatelabs.io/blog/rag-dedup-failure) (four-failure-mode dedup bug)
 - **Code Graph in Production** — [We Built a Call Graph Because Our Agent Kept Breaking Callers It Never Knew About](https://remediatelabs.io/blog/code-graph-call-graph-reverse-index) · [Five Data Structures for a Call Graph](https://remediatelabs.io/blog/code-graph-data-structures)
 - **Code RAG in Production** (9 parts) — [What Actually Gets Indexed](https://remediatelabs.io/blog/code-rag-what-gets-indexed) · [Hybrid Search — Closing the Vocabulary Gap](https://remediatelabs.io/blog/code-rag-hybrid-search) · [Cross-Encoder Re-Ranking — From Top-3 to Rank 1](https://remediatelabs.io/blog/code-rag-cross-encoder-reranking)
 - **Agent Cost Engineering** — [Token Cost Engineering in Agent Loops](https://remediatelabs.io/blog/prompt-caching-react-loops) (prompt caching + state pruning)
