@@ -31,18 +31,13 @@ It is also a research substrate: every LLM call and tool execution is captured a
 | DeepSeek + evolved harness vs Claude Sonnet 5 on the held-out cases | **89.9% vs 79.5%** at 4.7× lower cost |
 | Diagnosis CI gate (434 cases, paired test) | catches a 3.5-point drop **85%** of the time (old gate: under 10%) at a **5%** false-alarm rate |
 
-**Live pipeline** (snapshot from `GET /agents/pr-stats`):
+**Live pipeline** (from `GET /agents/pr-stats`, computed from every incident's actual PR outcome in the live deploy's Postgres `incidents` table, not reproducible from a fresh clone):
 
-| Metric | Value | Source |
+| Metric | Value | What it covers |
 |---|---|---|
-| Merged PRs | 11 | `GET /agents/pr-stats` |
-| Agent pipeline time | ~6 min per incident | `GET /agents/pr-stats` |
-| Avg MTTD | 75.8h | `GET /agents/pr-stats` |
-| Avg MTTR | 32 min | `GET /agents/pr-stats` |
-| Avg diagnosis confidence | 56% | `GET /agents/pr-stats` |
-| Avg cost per incident | $0.76 | `GET /agents/pr-stats` |
-
-The live numbers refresh from `GET /agents/pr-stats`, computed from every incident's actual PR outcome (Postgres `incidents` table, live deploy — not reproducible from a fresh clone). Avg diagnosis confidence (56%) is below the 70% auto-fix threshold because it averages across *every* diagnosis, including the lower-confidence ones that escalated to human approval rather than auto-merging — the 11 PRs that did merge cleared that bar individually. There's no manual pre-agent baseline to compare against yet — these numbers stand on their own until real "before" incident data exists. The cost figure predates the 2026-09-28 switch of diagnosis from Sonnet to DeepSeek.
+| Merged PRs | 11 | all opened by the agents: 6 fixes (FixGenerationAgent), 5 observability (ErrorClarityAgent) |
+| Agent pipeline | ~6 min | detected event to open fix PR, averaged over the 6 fix PRs |
+| Avg MTTR | 32 min | detected event to merged PR, including human review, over all 11 |
 
 ---
 
