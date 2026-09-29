@@ -39,7 +39,6 @@ It is also a research substrate: every LLM call and tool execution is captured a
 | Agent pipeline time | ~6 min per incident | `GET /agents/pr-stats` |
 | Avg MTTD | 75.8h | `GET /agents/pr-stats` |
 | Avg MTTR | 32 min | `GET /agents/pr-stats` |
-| CI pass rate | 100% | `GET /agents/pr-stats` |
 | Avg diagnosis confidence | 56% | `GET /agents/pr-stats` |
 | Avg cost per incident | $0.76 | `GET /agents/pr-stats` |
 
