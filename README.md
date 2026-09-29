@@ -12,15 +12,26 @@ When a production error fires a CloudWatch alarm, the platform's pipeline:
 
 1. **Detects** the alarm via SNS → HTTPS webhook (push-based; zero polling load on the production server).
 2. **Triages** the event into real / noise / duplicate at P0–P3 severity using a Haiku-class classifier validated against a 575-case golden dataset (461 train / 114 held-out), CI-gated on a noise-floor threshold rather than a literal 100%-pass bar.
-3. **Diagnoses** the root cause with a Sonnet-class agent that grounds structured fields (affected file/function, secondary fixes) against the actual repo via GitHub Code Search.
+3. **Diagnoses** the root cause with DeepSeek-V4.1-Flash running an evolved harness (see [Self-improving harness](#self-improving-harness)); every named file, function and snippet is grounded against the actual repo before a diagnosis is accepted.
 4. **Generates a fix** — writes a patch, runs it in a Docker sandbox against the real test suite, retries up to 3× on failure.
 5. **Self-critiques** the fix, opens a GitHub PR, and queues the merge for human approval if HIGH/CRITICAL.
 
-It is also a research substrate: every LLM call and tool execution is captured as a Langfuse span, every approval rejection feeds an RLHF preference dataset, and every resolved incident is auto-captured into the golden eval set.
+It is also a research substrate: every LLM call and tool execution is captured as a Langfuse span, every approval rejection feeds an RLHF preference dataset, and every resolved incident is auto-captured into the golden eval set. The diagnosis agent's harness is improved by an optimizer agent and every change to it is gated by a statistical regression test (below).
 
 ---
 
 ## Headline numbers
+
+**Diagnosis agent, measured on SWE-bench Verified** (localization: naming the file the real fix changed):
+
+| Metric | Value |
+|---|---|
+| Evolved harness vs original, 66 held-out cases from unseen repos | **78.8% → 89.9%** (+11.1pp, 95% CI +6.1 to +16.2); ties a best-of-2 rerun at ~60% of its cost |
+| DeepSeek-V4.1-Flash, unchanged harness, all 500 cases | **87.0%** at $0.039 per diagnosis |
+| DeepSeek + evolved harness vs Claude Sonnet 5 on the held-out cases | **89.9% vs 79.5%** at 4.7× lower cost |
+| Diagnosis CI gate (434 cases, paired test) | catches a 3.5-point drop **85%** of the time (old gate: under 10%) at a **5%** false-alarm rate |
+
+**Live pipeline** (snapshot from `GET /agents/pr-stats`):
 
 | Metric | Value | Source |
 |---|---|---|
@@ -32,7 +43,7 @@ It is also a research substrate: every LLM call and tool execution is captured a
 | Avg diagnosis confidence | 56% | `GET /agents/pr-stats` |
 | Avg cost per incident | $0.76 | `GET /agents/pr-stats` |
 
-Numbers refresh live from `GET /agents/pr-stats`, computed from every incident's actual PR outcome (Postgres `incidents` table, live deploy — not reproducible from a fresh clone). Avg diagnosis confidence (56%) is below the 70% auto-fix threshold because it averages across *every* diagnosis, including the lower-confidence ones that escalated to human approval rather than auto-merging — the 11 PRs that did merge cleared that bar individually. There's no manual pre-agent baseline to compare against yet — these numbers stand on their own until real "before" incident data exists.
+The live numbers refresh from `GET /agents/pr-stats`, computed from every incident's actual PR outcome (Postgres `incidents` table, live deploy — not reproducible from a fresh clone). Avg diagnosis confidence (56%) is below the 70% auto-fix threshold because it averages across *every* diagnosis, including the lower-confidence ones that escalated to human approval rather than auto-merging — the 11 PRs that did merge cleared that bar individually. There's no manual pre-agent baseline to compare against yet — these numbers stand on their own until real "before" incident data exists. The cost figure predates the 2026-09-28 switch of diagnosis from Sonnet to DeepSeek.
 
 ---
 
@@ -54,7 +65,7 @@ CloudWatch Logs ─► DetectionService (poll · 5 min) ──────┤
                                                         │   (real, ≥ P2)
                                                         ▼
                                               ┌────────────────┐
-                                              │ DiagnosisAgent │  grounds every symbol against the live repo (Sonnet)
+                                              │ DiagnosisAgent │  grounds every symbol against the repo (DeepSeek-V4.1-Flash)
                                               └────────┬───────┘
                                           (< 70% confidence, no file identified) ──► ErrorClarityAgent
                                                         │                            adds logging only — never fixes
@@ -69,7 +80,7 @@ CloudWatch Logs ─► DetectionService (poll · 5 min) ──────┤
                                                         ▼
                                               ┌────────────────┐
                                               │ CodeReviewAgent│  independent review, posts PR comment — applies fix
-                                              │                │  vs. observability-specific criteria (GPT-4.1)
+                                              │                │  vs. observability-specific criteria (GPT-5.5)
                                               └────────┬───────┘
                                                         ▼
                                               ┌────────────────┐
@@ -77,7 +88,7 @@ CloudWatch Logs ─► DetectionService (poll · 5 min) ──────┤
                                               └────────────────┘
 ```
 
-Two independent detection paths feed the same dedup gate: a push-based SNS webhook (near-zero latency) and a `DetectionService` background loop polling CloudWatch Logs every 5 minutes as a backstop — this polls AWS's own CloudWatch API, not the target application's servers, so it adds no load there. Self-critique (Haiku) runs *inside* `FixGenerationAgent`, before the PR exists; `CodeReviewAgent` (GPT-4.1, via `litellm`) is a separate agent that reviews and comments *after* the PR is already open — two distinct steps, not one.
+Two independent detection paths feed the same dedup gate: a push-based SNS webhook (near-zero latency) and a `DetectionService` background loop polling CloudWatch Logs every 5 minutes as a backstop — this polls AWS's own CloudWatch API, not the target application's servers, so it adds no load there. Self-critique (Haiku) runs *inside* `FixGenerationAgent`, before the PR exists; `CodeReviewAgent` (GPT-5.5, via `litellm`) is a separate agent that reviews and comments *after* the PR is already open — two distinct steps, not one.
 
 When `DiagnosisAgent`'s confidence lands below the fix threshold with no file identified, `ErrorClarityAgent` (`app/agents/error_clarity.py`) runs instead of `FixGenerationAgent` — it adds a logging or error-handling line so the *next* occurrence is diagnosable, and explicitly does not attempt the fix itself. That boundary is enforced structurally, not just by prompt: its only path to committing code requires a proposed change to add a net-new logging/error-handling call, or it's rejected outright and routed to a text-only recommendation instead — a config change or behavior fix, even a correct one, can't get through. `CodeReviewAgent` reviews PRs from both agents, with different criteria depending on which one opened it (root-cause/symptom-fix checks for a `FixGenerationAgent` PR; secrets/PII-leakage and behavior-change checks for an `ErrorClarityAgent` one, since there's no "root cause" to check against for a change that isn't a fix).
 
@@ -89,7 +100,7 @@ The pipeline runs on FastAPI with WebSocket streaming for the live dashboard. St
 
 | Layer | Choice |
 |---|---|
-| Agent runtime | Anthropic SDK · Claude Sonnet 4.6 / Haiku 4.5 · GPT-4.1 (via litellm, `CodeReviewAgent` only) |
+| Agent runtime | Anthropic SDK · Claude Sonnet 4.6 (fix) / Haiku 4.5 (triage, critique) · DeepSeek-V4.1-Flash via Together (diagnosis) · GPT-5.5 (code review) · routed in `config/llm_routing.json` via litellm |
 | Web framework | FastAPI · WebSocket streaming · Pydantic v2 |
 | Storage | Postgres (SQLAlchemy Core) · pgvector for RAG |
 | Sandbox | Docker Compose · Jest · mongodb-memory-server |
@@ -164,19 +175,23 @@ also a legitimate outcome, worth seeing either way.
 
 ```
 app/
-  agents/          # BaseAgent + 12 agents — 7 in the production pipeline (triage,
-                   # diagnosis, fix, review, merge-decision, error-clarity, monitor-gen),
-                   # 5 standalone/earlier-design — see CLAUDE.md's Agents table
+  agents/          # BaseAgent + the 7 production-pipeline agents (triage, diagnosis,
+                   # fix, review, merge-decision, error-clarity, monitor-gen)
+    harness/       # DiagnosisAgent's harness as files: prompts, tool descriptions, settings
+  integrations/    # 5 optional target-integration agents (not in the core pipeline)
+  harness_optimizer/ # the self-improving harness: proposer, critic, acceptance rules,
+                   # evaluator, tripwires, checkpointed long-running loop
+  evals/           # golden datasets, SWE-bench splits, gate v2 (paired regression test)
   api/routes/      # FastAPI route handlers
   core/config.py   # Settings via pydantic-settings
   models/          # Pydantic data models (ErrorEvent, IncidentState, etc.)
   services/        # LLM, GitHub, AWS, RAG, approvals, tracing, circuit_breaker, sandbox
 mcp_server/        # MCP server exposing agents to Claude Desktop
 infra/             # Terraform for ECS Fargate + Cloudflare + SNS
-scripts/           # measure_mttr.py, eval_rag.py, triage_replay.py
+scripts/           # optimize_harness.py, gate_v2.py, eval_swebench_diagnosis.py, measure_mttr.py, …
 targets/           # Fetched from S3 at container startup (scripts/fetch_target_harness.py) —
                    # empty on a fresh clone, not committed to this repo
-tests/             # pytest test suite (871 tests, mocked — no live API calls)
+tests/             # pytest test suite (1,187 tests, mocked — no live API calls)
 docs/              # architecture notes
 ```
 
@@ -188,7 +203,7 @@ docs/              # architecture notes
 
 **Hard blocks are deterministic, soft hints are LLM-shaped.** Dedup is a hard block (drop the event); regression context is a soft hint (prompt injection). Mixing the two created a four-failure-mode bug. ([walked through here](https://remediatelabs.io/blog/rag-dedup-failure))
 
-**Ground every symbol against the repo.** DiagnosisAgent runs `verify_symbol_in_repo` via GitHub Code Search; a server-side guard re-checks every named function in the parsed output and rejects fabricated camelCase identifiers.
+**Ground every symbol against the repo.** DiagnosisAgent verifies symbols against the local checkout first (definitions before references), a failed lookup says so (`VERIFY_ERROR`) instead of pretending the symbol doesn't exist, and a grounding gate rejects any diagnosis that doesn't quote code the agent actually read.
 
 **Sandbox before PR.** Every fix runs in a Docker container against the real test suite. If tests fail, regenerate up to 3× before opening any GitHub noise.
 
@@ -200,11 +215,34 @@ docs/              # architecture notes
 
 ---
 
+## Self-improving harness
+
+An optimizer agent (`app/harness_optimizer/`, `scripts/optimize_harness.py`) evolves DiagnosisAgent's harness (task prompt, tool descriptions, settings, control flow via settings) and keeps a change only if it can prove it:
+
+- **GEPA-style proposals:** an LLM reads failing traces and proposes one targeted edit per round.
+- **RRSI-style regularization:** a noise band calibrated from repeated trials of the unchanged harness, cost-aware acceptance, an LLM leakage critic plus a denylist of every benchmark case ID, repo and fix path, and an escalation guard.
+- **Held out by repository:** xarray and sphinx (66 cases) are never shown to the optimizer; the final phase compares the original and evolved harness there, against a matched-budget rerun baseline (AI2's test).
+- **Long-running:** checkpoints after every phase, a per-case result cache, a hard budget cap, tripwires that pause the run when its own measurements look broken, and a watchdog.
+
+The first full run (Sonnet 5, 51 cases) rejected every edit as within noise, reproducing the finding that evolution rarely beats reruns. A power analysis showed the limit was sample size; rebuilt around 138 cases DeepSeek-V4.1-Flash actually fails, a 7.4-hour run (2,129 agent runs, surviving a provider outage) accepted two changes, a correction-loop prompt and retry on no submission, that raised held-out localization from 78.8% to 89.9%. The evolved prompt edit didn't transfer back to Sonnet (−2.3pp, not significant) while retry did (+8.3pp), so the harness shipped together with DeepSeek.
+
+## Diagnosis regression gate
+
+Every non-draft PR that changes diagnosis (the agent, the shared ReAct loop, the harness files, or the routed model) runs `diagnosis-gate-v2.yml`, a required check on `main`:
+
+- replays all 434 SWE-bench Verified cases outside the held-out repos, 2 trials each, sharded 20 ways (~40 min, ~$29)
+- compares **each case with main's own measured pass rate** (`app/evals/gate_v2_baseline.json`, 4 trials per case) in a paired test, with a threshold calibrated by bootstrap for a 5% false-alarm rate
+- fails closed on a missing case or a stale baseline
+
+Why paired: the old gate counted failures on 56 always-passing cases, which barely move under a mild regression. Modelled on the same baseline, it caught a 3.5-point drop under 10% of the time; this one catches it ~85% of the time. Validated with known-answer tests: an unchanged harness passes (z = +2.03), and cutting the turn budget from 15 to 8 fails (z = −24.2).
+
+---
+
 ## Engineering blog
 
-Notes from building this — debugging stories, architecture posts, retrieval design. 16 posts across 7 series; a few representative ones below, full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
+Notes from building this — self-improving harnesses, evals, retrieval design, cost engineering. A few representative posts below; full index at [remediatelabs.io/blog](https://remediatelabs.io/blog):
 
-- **Agent Debugging** — [Why My AI Agent Kept Adding Null Checks Instead of Fixing the Bug](https://remediatelabs.io/blog/symptom-fix-antipattern) (producer/consumer routing) · [Why My AI Agent Cited a File That Never Existed](https://remediatelabs.io/blog/fabricated-file-citation) (fabrication under a code-reading requirement)
+- **Self-Improving Harness** (7 parts) — [Designing a Self-Improving Agent Harness](https://remediatelabs.io/blog/designing-a-self-improving-agent-harness) · [Power Analysis, and the Run That Worked](https://remediatelabs.io/blog/power-analysis-and-the-run-that-worked) · [Running an Agent for 7 Hours](https://remediatelabs.io/blog/running-an-agent-for-7-hours)
 - **RAG Learnings** — [Why the Same Bug Kept Creating New Incidents](https://remediatelabs.io/blog/rag-dedup-failure) (four-failure-mode dedup bug)
 - **Code Graph in Production** — [We Built a Call Graph Because Our Agent Kept Breaking Callers It Never Knew About](https://remediatelabs.io/blog/code-graph-call-graph-reverse-index) · [Five Data Structures for a Call Graph](https://remediatelabs.io/blog/code-graph-data-structures)
 - **Code RAG in Production** (9 parts) — [What Actually Gets Indexed](https://remediatelabs.io/blog/code-rag-what-gets-indexed) · [Hybrid Search — Closing the Vocabulary Gap](https://remediatelabs.io/blog/code-rag-hybrid-search) · [Cross-Encoder Re-Ranking — From Top-3 to Rank 1](https://remediatelabs.io/blog/code-rag-cross-encoder-reranking)
