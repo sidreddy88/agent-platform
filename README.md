@@ -213,9 +213,9 @@ docs/              # architecture notes
 
 An optimizer agent (`app/harness_optimizer/`, `scripts/optimize_harness.py`) evolves DiagnosisAgent's harness (task prompt, tool descriptions, settings, control flow via settings) and keeps a change only if it can prove it:
 
-- **GEPA-style proposals:** an LLM reads failing traces and proposes one targeted edit per round.
-- **RRSI-style regularization:** a noise band calibrated from repeated trials of the unchanged harness, cost-aware acceptance, an LLM leakage critic plus a denylist of every benchmark case ID, repo and fix path, and an escalation guard.
-- **Held out by repository:** xarray and sphinx (66 cases) are never shown to the optimizer; the final phase compares the original and evolved harness there, against a matched-budget rerun baseline (AI2's test).
+- **GEPA-style proposals** ([paper](https://arxiv.org/abs/2507.19457)): an LLM reads failing traces and proposes one targeted edit per round.
+- **RRSI-style regularization** ([paper](https://arxiv.org/abs/2609.24972), [reference implementation](https://github.com/google-research/rrsi), Apache-2.0; the acceptance rules and the critic prompt are adapted from it): a noise band calibrated from repeated trials of the unchanged harness, cost-aware acceptance, an LLM leakage critic plus a denylist of every benchmark case ID, repo and fix path, and an escalation guard.
+- **Held out by repository:** xarray and sphinx (66 cases) are never shown to the optimizer; the final phase compares the original and evolved harness there, against a matched-budget rerun baseline ([Wang et al., AI2](https://arxiv.org/abs/2607.12227)).
 - **Long-running:** checkpoints after every phase, a per-case result cache, a hard budget cap, tripwires that pause the run when its own measurements look broken, and a watchdog.
 
 The first full run (Sonnet 5, 51 cases) rejected every edit as within noise, reproducing the finding that evolution rarely beats reruns. A power analysis showed the limit was sample size; rebuilt around 138 cases DeepSeek-V4.1-Flash actually fails, a 7.4-hour run (2,129 agent runs, surviving a provider outage) accepted two changes, a correction-loop prompt and retry on no submission, that raised held-out localization from 78.8% to 89.9%. The evolved prompt edit didn't transfer back to Sonnet (−2.3pp, not significant) while retry did (+8.3pp), so the harness shipped together with DeepSeek.
@@ -246,6 +246,18 @@ Notes from building this — self-improving harnesses, evals, retrieval design, 
 ## Deployment
 
 ECS Fargate behind a Cloudflare-fronted ALB. CI/CD via GitHub Actions OIDC (no secrets in repo). Terraform module in [`infra/agent_platform/`](infra/agent_platform/). On `main` push, the build, push to ECR, and ECS deploy run automatically.
+
+---
+
+## Credits
+
+The self-improving harness and the evals build on published work:
+
+- **RRSI** (Xia et al., [arXiv 2609.24972](https://arxiv.org/abs/2609.24972); [reference implementation](https://github.com/google-research/rrsi), Apache-2.0): the acceptance rules, the escalation guard, the edit history format, and the leakage critic, whose six reject classes and prompt wording are adapted from `rrsi/critic.py`. Reimplemented, not imported: `app/harness_optimizer/acceptance.py`, `critic.py`, `history.py`.
+- **GEPA** (Agrawal et al., [arXiv 2507.19457](https://arxiv.org/abs/2507.19457)): reflective, trace-driven edit proposals (`app/harness_optimizer/proposer.py`).
+- **Rethinking the Evaluation of Harness Evolution for Agents** (Wang et al., [arXiv 2607.12227](https://arxiv.org/abs/2607.12227)): the matched-budget rerun baseline in the held-out report (`app/harness_optimizer/report.py`).
+- **SWE-bench** (Jimenez et al., [arXiv 2310.06770](https://arxiv.org/abs/2310.06770)) and its human-validated **SWE-bench Verified** subset ([dataset](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified)): the benchmark every diagnosis number above is measured on.
+- **pass@k** unbiased estimator (Chen et al., [arXiv 2107.03374](https://arxiv.org/abs/2107.03374)) and **pass^k** for agent reliability (Yao et al., τ-bench, [arXiv 2406.12045](https://arxiv.org/abs/2406.12045)): `app/evals/pass_k.py`.
 
 ---
 
