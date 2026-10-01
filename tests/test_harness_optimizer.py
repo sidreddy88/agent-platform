@@ -788,3 +788,31 @@ def test_each_finished_trial_counts_as_watchdog_progress(tmp_path):
     opt._last_progress = time.monotonic() - 3600
     ev.on_trial()
     assert time.monotonic() - opt._last_progress < 5
+
+
+# ---- evidence: the proposer never sees the true fix files -------------------
+
+def _failing_rec(detail: str, verdict: str = "FAIL") -> dict:
+    return {"instance_id": "x__x-1", "repo": "x/x", "llm_calls": [], "steps": [],
+            "trial": 1, "verdict": verdict, "detail": detail}
+
+
+def test_evidence_strips_true_fix_files_from_wrong_file_failures():
+    from app.harness_optimizer import evidence
+    from scripts.eval_swebench_diagnosis import _grade
+
+    verdict, detail = _grade({"src/wrong.py"}, {"src/right_fix.py"})
+    assert "right_fix" in detail                      # the eval's own output keeps it
+    result = EvalResult({"x__x-1": CaseResult(passes=0, trials=1, verdicts=[verdict])})
+    text = evidence.build(result, [_failing_rec(detail, verdict)])
+    assert "right_fix" not in text
+    assert "src/wrong.py" in text and "not a file the fix changed" in text
+
+
+def test_evidence_keeps_details_that_carry_no_answer():
+    from app.harness_optimizer import evidence
+    from scripts.eval_swebench_diagnosis import _grade
+
+    verdict, detail = _grade(set(), {"src/right_fix.py"})
+    assert evidence.outcome(_failing_rec(detail, verdict)) == f"FAIL: {detail}"
+    assert evidence.outcome(_failing_rec("matched {'src/right_fix.py'}", "PASS")) == "PASS"

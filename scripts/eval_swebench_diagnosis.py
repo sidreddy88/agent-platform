@@ -67,6 +67,11 @@ _DEFAULT_DATASET = Path(__file__).resolve().parent.parent / "app" / "evals" / "s
 
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
 
+# Separates what the agent named from the true fix files in a FAIL detail.
+# The harness optimizer's evidence cuts the detail here, so the proposer never
+# sees the answer (app/harness_optimizer/evidence.py).
+TRUTH_MARKER = ", real fix touched "
+
 
 def _load_instances(path: Path, limit: int | None = None) -> list[dict[str, Any]]:
     if not path.exists():
@@ -226,6 +231,18 @@ def _capture_llm_calls(agent: Any, meter: Any, calls: list[dict]) -> None:
     llm.complete = capturing
 
 
+def _grade(candidates: set[str], truth_files: set[str]) -> tuple[str, str]:
+    """File-level localization: PASS if any file the agent named is one the
+    real fix touched."""
+    normalized_truth = {f.lstrip("/") for f in truth_files}
+    normalized_candidates = {c.lstrip("/") for c in candidates}
+    if normalized_candidates & normalized_truth:
+        return "PASS", f"matched {normalized_candidates & normalized_truth}"
+    if not candidates:
+        return "FAIL", "no affected_file identified — escalated or ungrounded"
+    return "FAIL", f"identified {normalized_candidates or '{}'}{TRUTH_MARKER}{normalized_truth}"
+
+
 async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = False,
                       steps_sink: list[dict] | None = None,
                       steps_max_chars: int = 20000,
@@ -333,24 +350,15 @@ async def _replay_one(instance: dict[str, Any], github: Any, use_rag: bool = Fal
 
     candidates = {f for f in (result.affected_file, result.additional_fix_file) if f}
     candidates |= {t.get("file") for t in (result.additional_fix_targets or []) if t.get("file")}
-    normalized_truth = {f.lstrip("/") for f in truth_files}
-    normalized_candidates = {c.lstrip("/") for c in candidates}
-    hit = bool(normalized_candidates & normalized_truth)
-
-    if hit:
-        verdict, detail = "PASS", f"matched {normalized_candidates & normalized_truth}"
-    elif not candidates:
-        verdict, detail = "FAIL", "no affected_file identified — escalated or ungrounded"
-    else:
-        verdict, detail = "FAIL", f"identified {normalized_candidates or '{}'}, real fix touched {normalized_truth}"
+    verdict, detail = _grade(candidates, truth_files)
 
     return {
         "instance_id": instance["instance_id"],
         "repo": instance["repo"],
         "verdict": verdict,
         "detail": detail,
-        "truth_files": sorted(normalized_truth),
-        "candidate_files": sorted(normalized_candidates),
+        "truth_files": sorted(f.lstrip("/") for f in truth_files),
+        "candidate_files": sorted(c.lstrip("/") for c in candidates),
         "confidence": result.confidence,
         "escalate": result.escalate,
         "rag_enabled": rag is not None,
