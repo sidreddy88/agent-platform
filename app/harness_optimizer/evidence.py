@@ -16,12 +16,27 @@ aggregate to specific:
 
 Case ids, repo names and paths appear here because the proposer needs to
 understand failures; the critic's precheck is what keeps them out of the
-harness itself.
+harness itself. The true fix files never appear: a failing trajectory shows
+what the agent named and that it was wrong, not what was right. The grader's
+FAIL detail carries the answer, so it is cut at TRUTH_MARKER before the
+proposer sees it (as Raven's Curator strips the reference answer from a
+round's signals).
 """
 from __future__ import annotations
 
 from app.harness_optimizer import grader
 from app.harness_optimizer.acceptance import EvalResult
+
+
+def outcome(rec: dict) -> str:
+    """A trajectory's verdict and detail, with the true fix files removed."""
+    from scripts.eval_swebench_diagnosis import TRUTH_MARKER
+
+    verdict, detail = rec.get("verdict"), rec.get("detail") or ""
+    if verdict == "PASS":
+        return "PASS"
+    named, cut, _ = detail.partition(TRUTH_MARKER)
+    return f"{verdict}: {named}, not a file the fix changed" if cut else f"{verdict}: {detail}"
 
 
 def build(result: EvalResult, trajectories: list[dict], max_failing: int = 3,
@@ -47,7 +62,7 @@ def build(result: EvalResult, trajectories: list[dict], max_failing: int = 3,
     failing = [(r, g) for r, g in zip(trajectories, grades) if r.get("verdict") != "PASS"][:max_failing]
     for rec, g in failing:
         lines += ["", f"=== Failing trajectory: {rec['instance_id']} trial {rec.get('trial')} "
-                      f"({rec.get('verdict')}: {rec.get('detail', '')[:120]}) ==="]
+                      f"({outcome(rec)[:160]}) ==="]
         lines += [f"  flag: {f}" for f in g.flags]
         for step in rec.get("steps") or []:
             out = str(step.get("output", ""))
