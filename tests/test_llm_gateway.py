@@ -361,3 +361,33 @@ class TestGatewayLLMService:
         svc = gw.get_llm_service_for("triage")
         assert isinstance(svc, GatewayLLMService)
         assert svc._task_type == "triage"
+
+
+# ---------------------------------------------------------------------------
+# complete_with_tools is metered like complete()
+# ---------------------------------------------------------------------------
+
+class TestCompleteWithToolsMetering:
+    @pytest.mark.asyncio
+    async def test_tool_round_is_recorded_in_cost_meter(self):
+        """FixGenerationAgent and ErrorClarityAgent call complete_with_tools,
+        which goes to LiteLLM directly; its usage must reach cost_meter."""
+        from app.services import cost_meter
+        from app.services.llm_gateway import llm_gateway
+
+        details = MagicMock(cached_tokens=600)
+        usage = MagicMock(prompt_tokens=1000, completion_tokens=200,
+                          prompt_tokens_details=details, cache_creation_input_tokens=100)
+        message = MagicMock(content="", tool_calls=None)
+        resp = MagicMock(choices=[MagicMock(message=message, finish_reason="stop")], usage=usage)
+
+        service = llm_gateway.get_llm_service_for("fix")
+        with patch("litellm.acompletion", new=AsyncMock(return_value=resp)):
+            with cost_meter.metered() as meter:
+                await service.complete_with_tools([{"role": "user", "content": "fix it"}], tools=[])
+
+        summary = meter.summary()
+        assert summary["calls"] == 1
+        assert summary["models"] == [service._model]
+        assert summary["tokens"] == {"input": 300, "output": 200, "cache_write": 100, "cache_read": 600}
+        assert summary["cost_usd"] > 0
