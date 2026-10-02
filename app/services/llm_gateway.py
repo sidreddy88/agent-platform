@@ -289,9 +289,27 @@ class GatewayLLMService:
                     args = {}
                 tool_calls.append({"id": tc.id, "name": tc.function.name, "input": args})
 
-        if response.usage:
-            self.last_input_tokens = response.usage.prompt_tokens
-            self.last_output_tokens = response.usage.completion_tokens
+        usage = response.usage
+        if usage:
+            self.last_input_tokens = usage.prompt_tokens
+            self.last_output_tokens = usage.completion_tokens
+            # Meter it like LLMGateway.complete() does. This path calls LiteLLM
+            # directly, so until it recorded usage here, every tool-use round
+            # (FixGenerationAgent's fix generation, ErrorClarityAgent) was
+            # missing from cost_meter and the per-task cost tracker.
+            details = getattr(usage, "prompt_tokens_details", None)
+            cache_read = (getattr(details, "cached_tokens", 0) or 0) if details else 0
+            cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            from app.services import cost_meter
+            cost_meter.record(
+                model,
+                max(0, usage.prompt_tokens - cache_read - cache_write),
+                usage.completion_tokens,
+                cache_read, cache_write,
+            )
+            cost = self._gateway._compute_cost(model, usage.prompt_tokens - cache_read, usage.completion_tokens)
+            cost += self._gateway._compute_cost(model, cache_read, 0) * 0.1
+            self._gateway._record_cost(self._task_type, _infer_provider(model), cost)
 
         return text, tool_calls, stop_reason
 
