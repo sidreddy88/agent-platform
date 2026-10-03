@@ -78,3 +78,27 @@ async def test_nudge_fires_at_most_once():
     old, new, patches, _ = await _run(agent)
     assert (old, new, patches) == ("", "", [])
     assert len(seen) == 1 + fix_generation._NO_EDIT_NUDGES
+
+
+@pytest.mark.asyncio
+async def test_model_is_warned_before_the_turn_budget_runs_out():
+    """sphinx-10614: the model read and searched for every turn and never edited."""
+    reads = [("", [{"id": f"r{i}", "name": "read_file", "input": {"path": "src/other.js"}}], "tool_use")
+             for i in range(fix_generation._MAX_FIX_TURNS)]
+    agent, seen = _agent(reads)
+    agent._read_file = AsyncMock(return_value=("const other = 1;", "sha"))
+    await _run(agent)
+    warn_turn = fix_generation._MAX_FIX_TURNS - fix_generation._BUDGET_WARNING_TURNS
+    warning = seen[warn_turn][-1]
+    assert warning["role"] == "user" and "turns left and have not made an edit" in warning["content"]
+    assert not any("turns left" in str(m.get("content")) for m in seen[warn_turn - 1])
+
+
+@pytest.mark.asyncio
+async def test_no_budget_warning_once_an_edit_exists():
+    reads = [_edit()] + [("", [{"id": f"r{i}", "name": "read_file", "input": {"path": "src/other.js"}}],
+                          "tool_use") for i in range(fix_generation._MAX_FIX_TURNS)]
+    agent, seen = _agent(reads)
+    agent._read_file = AsyncMock(return_value=("const other = 1;", "sha"))
+    await _run(agent)
+    assert not any("turns left" in str(m.get("content")) for msgs in seen for m in msgs)

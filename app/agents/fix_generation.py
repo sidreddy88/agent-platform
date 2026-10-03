@@ -54,6 +54,12 @@ PR_BASE = "staging"  # all fix PRs target this branch; fix branches are created 
 _NO_EDIT_NUDGES = 1
 _NO_EDIT_MARKER = "NO_EDIT"
 
+# The fix loop's turn budget, and how many turns before the end the model is told
+# it's running out. The other DeepSeek miss on the pilot never stopped: it read
+# and searched for all 20 turns without editing (sphinx-10614).
+_MAX_FIX_TURNS = 20
+_BUDGET_WARNING_TURNS = 3
+
 # Upper bound on how many additional files _resolve_secondary_targets() will commit
 # fixes to in one PR. Bounds cost/blast-radius when a diagnosis's blast_radius list
 # is large — this codebase's brand fan-out tops out around 8 sibling files today, so
@@ -1871,7 +1877,17 @@ class FixGenerationAgent(BaseAgent):
         # exploring files this loop has no ability to edit (see additional_fix_section
         # comment). Legitimate single-file work — read tests/callers, patch, then scan
         # for adjacent issues — can still reasonably need more than 14 turns.
-        for iteration in range(20):
+        for iteration in range(_MAX_FIX_TURNS):
+            if (iteration == _MAX_FIX_TURNS - _BUDGET_WARNING_TURNS
+                    and not edit_result and not patch_calls):
+                logger.warning("[FixGen] Agentic: %d turns left and no edit yet — warning the model",
+                               _BUDGET_WARNING_TURNS)
+                messages.append({"role": "user", "content": (
+                    f"You have {_BUDGET_WARNING_TURNS} turns left and have not made an edit yet. "
+                    "Stop exploring: make your fix now with apply_edit, or patch_line with "
+                    "old_snippet copied verbatim from the file. If you have confirmed this file "
+                    f"has nothing to fix, reply with exactly '{_NO_EDIT_MARKER}: <one-sentence reason>'."
+                )})
             if iteration > 0 and iteration % 3 == 0:
                 messages, pruned = _prune_tool_results(messages)
                 _total_pruned_chars += pruned
