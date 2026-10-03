@@ -45,6 +45,15 @@ except Exception as _cg_err:
 
 PR_BASE = "staging"  # all fix PRs target this branch; fix branches are created from its tip
 
+# How many times the fix loop pushes back when the model ends its turn without
+# any edit. Measured on SWE-bench (2026-10-01): every DeepSeek-V4.1-Flash miss
+# was "LLM stopped without apply_edit", often after describing the fix in prose;
+# DiagnosisAgent's "never submitted" failure on the same model was fixed the same
+# way (retry on no submission). A deliberate "no edit" (rule 5 of the prompt)
+# answers NO_EDIT and stops cleanly.
+_NO_EDIT_NUDGES = 1
+_NO_EDIT_MARKER = "NO_EDIT"
+
 # Upper bound on how many additional files _resolve_secondary_targets() will commit
 # fixes to in one PR. Bounds cost/blast-radius when a diagnosis's blast_radius list
 # is large — this codebase's brand fan-out tops out around 8 sibling files today, so
@@ -1853,6 +1862,7 @@ class FixGenerationAgent(BaseAgent):
         edit_result: dict | None = None
         patch_calls: list[dict] = []
         verdict: dict | None = None
+        nudges = 0
         _SKIP = ("node_modules", "dist/", "build/", ".min.js")
         _total_pruned_chars = 0
         import json as _json
@@ -1893,8 +1903,26 @@ class FixGenerationAgent(BaseAgent):
                 continue
 
             if stop_reason == "end_turn" or not tool_calls:
-                if not edit_result:
-                    logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
+                if not edit_result and not patch_calls:
+                    if _NO_EDIT_MARKER in (text or ""):
+                        logger.info("[FixGen] Agentic: model chose no edit: %s", (text or "")[:200])
+                    elif nudges < _NO_EDIT_NUDGES:
+                        nudges += 1
+                        logger.warning("[FixGen] Agentic: LLM stopped without an edit (iteration %d) "
+                                       "— nudging (%d/%d)", iteration, nudges, _NO_EDIT_NUDGES)
+                        if text:
+                            messages.append({"role": "assistant", "content": text})
+                        messages.append({"role": "user", "content": (
+                            "You ended your turn without calling apply_edit or patch_line, so no "
+                            "change has been recorded. If you worked out a fix (including one you "
+                            "described in text above), make it now: call apply_edit, or patch_line "
+                            "with old_snippet copied verbatim from the file. If you have confirmed "
+                            "this file has nothing to fix, reply with exactly "
+                            f"'{_NO_EDIT_MARKER}: <one-sentence reason>' and stop."
+                        )})
+                        continue
+                    else:
+                        logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
                 break
 
             messages.append({
