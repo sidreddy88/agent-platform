@@ -16,6 +16,7 @@ Output (FixResult):
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -50,6 +51,50 @@ PR_BASE = "staging"  # all fix PRs target this branch; fix branches are created 
 # is large — this codebase's brand fan-out tops out around 8 sibling files today, so
 # 10 gives headroom without being unbounded.
 _MAX_SECONDARY_FIXES = 10
+
+
+def _nearest_lines(content: str, snippet: str, context: int = 2) -> str:
+    """The lines of `content` most like the start of `snippet`, numbered, so a
+    model whose snippet didn't match verbatim can copy the real text."""
+    lines = content.splitlines()
+    first = next((ln.strip() for ln in snippet.splitlines() if ln.strip()), "")
+    if not lines or not first:
+        return ""
+    scores = [difflib.SequenceMatcher(None, first, ln.strip()).ratio() for ln in lines]
+    best = max(range(len(lines)), key=scores.__getitem__)
+    span = max(1, len(snippet.splitlines()))
+    lo, hi = max(0, best - context), min(len(lines), best + span + context)
+    return "\n".join(f"  {i + 1}: {lines[i]}" for i in range(lo, hi))
+
+
+def _working_content(content: str, extracted_old: str | None, edit_result: dict | None,
+                     patch_calls: list[dict]) -> str:
+    """The file as the edits recorded so far will leave it, applied in the same
+    order and the same way as FixGenerationAgent._apply_all_edits."""
+    current = content
+    if edit_result:
+        old = extracted_old or (edit_result.get("old_text") or "").strip()
+        new = (edit_result.get("new_text") or "").strip()
+        if old and old in current:
+            current = current.replace(old, new, 1)
+    for tc in patch_calls:
+        o, n = tc["input"].get("old_snippet", ""), tc["input"].get("new_snippet", "")
+        if o and o in current:
+            current = current.replace(o, n, 1)
+    return current
+
+
+def _edit_not_found(tool: str, field_name: str, file_path: str, content: str, snippet: str) -> str:
+    """Tool result for an edit whose old text isn't in the file. Said at the
+    call, so the model can fix it, instead of the edit being dropped later."""
+    squash = lambda t: " ".join(t.split())  # noqa: E731
+    hint = ("It matches the file except for whitespace or indentation: copy the exact "
+            "indentation and line breaks." if snippet.strip() and squash(snippet) in squash(content)
+            else "It is not in the file.")
+    near = _nearest_lines(content, snippet)
+    return (f"ERROR: {tool} was NOT recorded: {field_name} does not appear verbatim in {file_path}. "
+            f"{hint}" + (f" Closest lines in the file:\n{near}\n" if near else " ")
+            + f"Copy {field_name} exactly from the file and call {tool} again.")
 
 
 # ---------------------------------------------------------------------------
@@ -1913,18 +1958,39 @@ class FixGenerationAgent(BaseAgent):
             for tc in tool_calls:
                 name = tc["name"]
                 if name == "apply_edit":
-                    if edit_result is None:
-                        edit_result = tc["input"]
-                    result = (
-                        "✓ Primary function fix recorded. "
-                        "Now scan the ENTIRE file for adjacent issues — wrong model IDs, "
-                        "missing error handling, stale hardcoded values — and call patch_line "
-                        "for each one found. Call end_turn when done."
-                    )
+                    # Checked here, not after the loop: a wrong old_text used to
+                    # fail the whole fix once the loop had ended, with no chance
+                    # for the model to correct it.
+                    llm_old = (tc["input"].get("old_text") or "").strip()
+                    if edit_result is None and not extracted_old and llm_old not in content:
+                        result = (_edit_not_found("apply_edit", "old_text", file_path, content, llm_old)
+                                  if llm_old else
+                                  "ERROR: apply_edit was NOT recorded: old_text is required here (the "
+                                  "function could not be pre-extracted). Copy it verbatim from the file, "
+                                  "or use patch_line for a smaller change.")
+                    else:
+                        if edit_result is None:
+                            edit_result = tc["input"]
+                        result = (
+                            "✓ Primary function fix recorded. "
+                            "Now scan the ENTIRE file for adjacent issues — wrong model IDs, "
+                            "missing error handling, stale hardcoded values — and call patch_line "
+                            "for each one found. Call end_turn when done."
+                        )
                 elif name == "patch_line":
-                    patch_calls.append(tc)
-                    snip = tc["input"].get("old_snippet", "")[:60].replace("\n", "↵")
-                    result = f"✓ patch_line recorded ({snip}). Continue scanning for more issues or call end_turn."
+                    old_snip = tc["input"].get("old_snippet", "")
+                    # Checked against the file as it will be when this patch is
+                    # applied: the primary edit first, then earlier patches, the
+                    # same order as _apply_all_edits. A snippet inside the
+                    # function the primary edit replaced is gone by then.
+                    current = _working_content(content, extracted_old, edit_result, patch_calls)
+                    if not old_snip or old_snip not in current:
+                        result = _edit_not_found("patch_line", "old_snippet", file_path, current, old_snip)
+                        logger.info("[FixGen] patch_line rejected at call: snippet not in %s", file_path)
+                    else:
+                        patch_calls.append(tc)
+                        snip = old_snip[:60].replace("\n", "↵")
+                        result = f"✓ patch_line recorded ({snip}). Continue scanning for more issues or call end_turn."
                 elif name == "read_file":
                     path = tc["input"].get("path", "")
                     try:
