@@ -99,3 +99,17 @@ async def test_patch_line_may_target_the_new_primary_text():
 def test_nearest_lines_points_at_the_closest_line():
     near = _nearest_lines(PY, "    return x.valu")
     assert "5:     return x.value" in near and "1: import os" not in near
+
+
+@pytest.mark.asyncio
+async def test_patch_line_inside_the_replaced_function_is_rejected():
+    """The primary edit is applied first, so a snippet from the old function body is
+    gone by the time patches apply; it used to be dropped silently (sphinx run, 2026-10-03)."""
+    agent, seen = _agent([
+        _call("apply_edit", old_text="def target(x):\n    return x.value", new_text="def target(x):\n    return x"),
+        _call("patch_line", old_snippet="    return x.value", new_snippet="    return x.value or None"),
+        ("done", [], "end_turn"),
+    ])
+    _, _, patches, _ = await _run(agent)
+    assert _tool_results(seen)[1].startswith("ERROR: patch_line was NOT recorded")
+    assert patches == []

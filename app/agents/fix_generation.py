@@ -67,6 +67,23 @@ def _nearest_lines(content: str, snippet: str, context: int = 2) -> str:
     return "\n".join(f"  {i + 1}: {lines[i]}" for i in range(lo, hi))
 
 
+def _working_content(content: str, extracted_old: str | None, edit_result: dict | None,
+                     patch_calls: list[dict]) -> str:
+    """The file as the edits recorded so far will leave it, applied in the same
+    order and the same way as FixGenerationAgent._apply_all_edits."""
+    current = content
+    if edit_result:
+        old = extracted_old or (edit_result.get("old_text") or "").strip()
+        new = (edit_result.get("new_text") or "").strip()
+        if old and old in current:
+            current = current.replace(old, new, 1)
+    for tc in patch_calls:
+        o, n = tc["input"].get("old_snippet", ""), tc["input"].get("new_snippet", "")
+        if o and o in current:
+            current = current.replace(o, n, 1)
+    return current
+
+
 def _edit_not_found(tool: str, field_name: str, file_path: str, content: str, snippet: str) -> str:
     """Tool result for an edit whose old text isn't in the file. Said at the
     call, so the model can fix it, instead of the edit being dropped later."""
@@ -1962,11 +1979,13 @@ class FixGenerationAgent(BaseAgent):
                         )
                 elif name == "patch_line":
                     old_snip = tc["input"].get("old_snippet", "")
-                    # The primary edit is applied before patches, so a snippet may
-                    # also target the new function text.
-                    primary_new = (edit_result or {}).get("new_text", "")
-                    if not old_snip or (old_snip not in content and old_snip not in primary_new):
-                        result = _edit_not_found("patch_line", "old_snippet", file_path, content, old_snip)
+                    # Checked against the file as it will be when this patch is
+                    # applied: the primary edit first, then earlier patches, the
+                    # same order as _apply_all_edits. A snippet inside the
+                    # function the primary edit replaced is gone by then.
+                    current = _working_content(content, extracted_old, edit_result, patch_calls)
+                    if not old_snip or old_snip not in current:
+                        result = _edit_not_found("patch_line", "old_snippet", file_path, current, old_snip)
                         logger.info("[FixGen] patch_line rejected at call: snippet not in %s", file_path)
                     else:
                         patch_calls.append(tc)
