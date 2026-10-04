@@ -210,6 +210,9 @@ class FixResult:
     escalate: bool = False
     escalate_reason: str | None = None
     blast_radius_addressed: bool | None = None
+    # path -> full new file content. Only set by fix_with_steps(patch_only=True),
+    # which stops before the sandbox, the Issue and the PR (offline evals).
+    patched_files: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -372,10 +375,16 @@ class FixGenerationAgent(BaseAgent):
             commit_sha=commit_sha,
         ), steps
 
-    async def fix_with_steps(self, incident: IncidentState) -> tuple[FixResult, list[str]]:
+    async def fix_with_steps(self, incident: IncidentState,
+                             patch_only: bool = False) -> tuple[FixResult, list[str]]:
         """
         Same as fix() but also returns a list of step strings for debugging.
         Each string describes what happened at that step (✓ success / ✗ failure).
+
+        patch_only stops after the self-critique: no sandbox run, no Issue, no
+        branch or PR. The fixed file comes back in FixResult.patched_files, for
+        offline evaluation against a benchmark's own tests
+        (scripts/eval_swebench_fix.py).
         """
         steps: list[str] = []
         event = incident.error_event
@@ -569,6 +578,17 @@ class FixGenerationAgent(BaseAgent):
                     steps.append(f"⚠ Alt-frame retry failed: {exc} — proceeding with original")
             else:
                 steps.append("⚠ Critique LIKELY WRONG but no alternate frame available — proceeding")
+
+        if patch_only:
+            new_content = self._apply_all_edits(content, old_function, new_function, patches)
+            steps.append("✓ patch_only: stopping before sandbox, Issue and PR")
+            return FixResult(
+                issue_url=None, pr_url=None, pr_number=None, branch=branch_name,
+                fix_description=f"Fix generated for {function_name} in {file_path} (patch only)",
+                files_changed=[file_path] if new_content != content else [],
+                target_file=file_path, target_function=function_name,
+                patched_files={file_path: new_content} if new_content != content else {},
+            ), steps
 
         # ── 3d. Sandbox validation with retry ─────────────────────────
         from app.services.sandbox import SandboxService
@@ -2056,7 +2076,11 @@ class FixGenerationAgent(BaseAgent):
                 elif name == "find_callers":
                     fn_name = tc["input"].get("function_name", "")
                     try:
-                        callers = _code_graph.find_callers(fn_name)
+                        # A per-agent graph (set by offline evals, which run several
+                        # repos at once) wins over the module-level one built for
+                        # the production target repo.
+                        graph = getattr(self, "_code_graph", None) or _code_graph
+                        callers = graph.find_callers(fn_name)
                         if not callers:
                             result = f"No callers found for '{fn_name}' in the call graph index."
                         else:
