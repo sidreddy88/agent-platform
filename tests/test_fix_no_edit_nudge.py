@@ -102,3 +102,50 @@ async def test_no_budget_warning_once_an_edit_exists():
     agent._read_file = AsyncMock(return_value=("const other = 1;", "sha"))
     await _run(agent)
     assert not any("turns left" in str(m.get("content")) for msgs in seen for m in msgs)
+
+
+def _agent_capturing(replies):
+    """Like _agent, but also records each call's tools and tool_choice."""
+    agent, seen = _agent(replies)
+    calls: list[dict] = []
+    inner = agent._llm.complete_with_tools.side_effect
+
+    async def capture(messages=None, tools=None, system=None, **kwargs):
+        calls.append({"tools": [t["name"] for t in tools or []], "tool_choice": kwargs.get("tool_choice", "auto")})
+        return await inner(messages=messages, tools=tools, system=system, **kwargs)
+
+    agent._llm.complete_with_tools = AsyncMock(side_effect=capture)
+    return agent, seen, calls
+
+
+@pytest.mark.asyncio
+async def test_nudge_turn_requires_an_edit_or_no_edit_tool_call():
+    agent, seen, calls = _agent_capturing([("I'd guard x.", [], "end_turn"), _edit(), ("done", [], "end_turn")])
+    _, new, _, _ = await _run(agent)
+    assert new == FIXED
+    assert calls[0]["tool_choice"] == "auto" and "read_file" in calls[0]["tools"]
+    assert calls[1] == {"tools": ["apply_edit", "patch_line", "no_edit"], "tool_choice": "required"}
+    assert calls[2]["tool_choice"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_no_edit_tool_call_stops_cleanly_with_no_patch():
+    agent, seen, calls = _agent_capturing([
+        ("hm", [], "end_turn"),
+        ("", [{"id": "n1", "name": "no_edit", "input": {"reason": "the bug is in another file"}}], "tool_use"),
+        ("should not be reached", [], "end_turn"),
+    ])
+    old, new, patches, _ = await _run(agent)
+    assert (old, new, patches) == ("", "", [])
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_last_turn_is_forced_when_there_is_still_no_edit():
+    reads = [("", [{"id": f"r{i}", "name": "read_file", "input": {"path": "src/other.js"}}], "tool_use")
+             for i in range(fix_generation._MAX_FIX_TURNS)]
+    agent, seen, calls = _agent_capturing(reads)
+    agent._read_file = AsyncMock(return_value=("const other = 1;", "sha"))
+    await _run(agent)
+    assert calls[-1]["tool_choice"] == "required"
+    assert all(c["tool_choice"] == "auto" for c in calls[:-1])

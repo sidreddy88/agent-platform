@@ -61,6 +61,25 @@ _NO_EDIT_MARKER = "NO_EDIT"
 _MAX_FIX_TURNS = 20
 _BUDGET_WARNING_TURNS = 3
 
+# Asking in text wasn't enough: on 66 held-out cases DeepSeek ignored the
+# no-edit nudge 13 times of 17 and never answered NO_EDIT. So the nudge turn,
+# and the last turn if there's still no edit, offer only the edit tools plus
+# no_edit and require a tool call (tool_choice="required"): the model has to
+# make an edit or say on the record that there's nothing to fix.
+_NO_EDIT_TOOL = {
+    "name": "no_edit",
+    "description": (
+        "Call ONLY if you have confirmed this file has nothing to fix for this incident. "
+        "Give the reason. Making no change is then the recorded outcome."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"reason": {"type": "string", "description": "One sentence: why no edit is needed here."}},
+        "required": ["reason"],
+    },
+}
+_FORCED_EDIT_TOOLS = ("apply_edit", "patch_line")
+
 # Upper bound on how many additional files _resolve_secondary_targets() will commit
 # fixes to in one PR. Bounds cost/blast-radius when a diagnosis's blast_radius list
 # is large — this codebase's brand fan-out tops out around 8 sibling files today, so
@@ -1934,6 +1953,8 @@ class FixGenerationAgent(BaseAgent):
         patch_calls: list[dict] = []
         verdict: dict | None = None
         nudges = 0
+        force_edit = False
+        chose_no_edit = False
         _SKIP = ("node_modules", "dist/", "build/", ".min.js")
         _total_pruned_chars = 0
         import json as _json
@@ -1958,9 +1979,18 @@ class FixGenerationAgent(BaseAgent):
                 _total_pruned_chars += pruned
                 if pruned:
                     logger.debug("[FixGen] State pruning at iteration %d: removed %d chars", iteration, pruned)
+            if (iteration == _MAX_FIX_TURNS - 1 and not edit_result and not patch_calls):
+                force_edit = True
+            tools = self._FIX_TOOLS
+            call_kwargs = {}
+            if force_edit:
+                tools = [t for t in self._FIX_TOOLS if t["name"] in _FORCED_EDIT_TOOLS] + [_NO_EDIT_TOOL]
+                call_kwargs = {"tool_choice": "required"}
+                logger.info("[FixGen] Agentic: forcing an edit-or-no_edit tool call (iteration %d)", iteration)
+                force_edit = False
             try:
                 text, tool_calls, stop_reason = await self._llm.complete_with_tools(
-                    messages, self._FIX_TOOLS, system=system
+                    messages, tools, system=system, **call_kwargs
                 )
             except Exception as exc:
                 logger.error("[FixGen] Agentic LLM call failed (iteration %d): %s", iteration, exc)
@@ -1998,9 +2028,9 @@ class FixGenerationAgent(BaseAgent):
                             "change has been recorded. If you worked out a fix (including one you "
                             "described in text above), make it now: call apply_edit, or patch_line "
                             "with old_snippet copied verbatim from the file. If you have confirmed "
-                            "this file has nothing to fix, reply with exactly "
-                            f"'{_NO_EDIT_MARKER}: <one-sentence reason>' and stop."
+                            "this file has nothing to fix, call no_edit with the reason."
                         )})
+                        force_edit = True
                         continue
                     else:
                         logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
@@ -2093,6 +2123,11 @@ class FixGenerationAgent(BaseAgent):
                     except Exception as exc:
                         result = f"Call graph lookup failed: {exc}"
                     logger.debug("[FixGen] find_callers: %s → %d results", fn_name, len(callers) if "callers" in dir() else 0)
+                elif name == "no_edit":
+                    chose_no_edit = True
+                    logger.info("[FixGen] Agentic: model chose no edit: %s",
+                                str(tc["input"].get("reason", ""))[:200])
+                    result = "✓ no edit recorded. Call end_turn."
                 elif name == "final_verdict":
                     verdict = tc["input"]
                     logger.info(
@@ -2112,6 +2147,8 @@ class FixGenerationAgent(BaseAgent):
                 else:
                     result = f"Unknown tool: {name}"
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+            if chose_no_edit and not edit_result and not patch_calls:
+                break
 
         if _total_pruned_chars:
             logger.info("[FixGen] State pruning total: %d chars removed across %d iterations", _total_pruned_chars, iteration + 1)
