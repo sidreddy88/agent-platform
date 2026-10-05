@@ -231,6 +231,7 @@ class GatewayLLMService:
         messages: list[dict],
         tools: list[dict],
         system: str | list | None = None,
+        tool_choice: str = "auto",
     ) -> tuple[str, list[dict], str]:
         """
         Single tool-use round via LiteLLM.
@@ -239,6 +240,7 @@ class GatewayLLMService:
             messages: Conversation history (no system message — pass via system=).
             tools:    Anthropic-format tool definitions (name/description/input_schema).
             system:   Optional system prompt prepended to every call.
+            tool_choice: "auto" (default) or "required" to force a tool call.
 
         Returns:
             (text_content, tool_calls, stop_reason)
@@ -271,7 +273,7 @@ class GatewayLLMService:
             model=model,
             messages=msgs,  # type: ignore[arg-type]
             tools=litellm_tools,
-            tool_choice="auto",
+            tool_choice=tool_choice,   # "required" forces a tool call (LiteLLM maps it per provider)
             max_tokens=max_tokens,
         ))
 
