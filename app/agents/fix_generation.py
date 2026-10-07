@@ -61,6 +61,11 @@ _NO_EDIT_MARKER = "NO_EDIT"
 _MAX_FIX_TURNS = 20
 _BUDGET_WARNING_TURNS = 3
 
+# Responses cut off at the output limit in a row before the loop gives up. A cut-off
+# response has no usable tool call; on reasoning models the limit is usually spent on
+# hidden reasoning, so the model is told to keep it short and edit.
+_MAX_CUTOFFS = 3
+
 # Asking in text wasn't enough: on 66 held-out cases DeepSeek ignored the
 # no-edit nudge 13 times of 17 and never answered NO_EDIT. So the nudge turn,
 # and the last turn if there's still no edit, offer only the edit tools plus
@@ -1953,6 +1958,7 @@ class FixGenerationAgent(BaseAgent):
         patch_calls: list[dict] = []
         verdict: dict | None = None
         nudges = 0
+        cutoffs = 0
         force_edit = False
         chose_no_edit = False
         _SKIP = ("node_modules", "dist/", "build/", ".min.js")
@@ -1983,6 +1989,7 @@ class FixGenerationAgent(BaseAgent):
                 force_edit = True
             tools = self._FIX_TOOLS
             call_kwargs = {}
+            forced_turn = force_edit
             if force_edit:
                 tools = [t for t in self._FIX_TOOLS if t["name"] in _FORCED_EDIT_TOOLS] + [_NO_EDIT_TOOL]
                 call_kwargs = {"tool_choice": "required"}
@@ -1997,21 +2004,29 @@ class FixGenerationAgent(BaseAgent):
                 return "", "", [], None
 
             if stop_reason == "max_tokens":
+                # Any tool call in a cut-off response may be truncated, so none is used.
+                cutoffs += 1
+                if cutoffs > _MAX_CUTOFFS:
+                    logger.warning("[FixGen] Agentic: cut off at the output limit %d times in a row "
+                                   "(iteration %d) — giving up", cutoffs, iteration)
+                    break
                 logger.warning(
-                    "[FixGen] Agentic: LLM hit max_tokens at iteration %d — tool inputs may be truncated; discarding",
-                    iteration,
+                    "[FixGen] Agentic: response cut off at the output limit (iteration %d, %d/%d) "
+                    "— asking for a short response", iteration, cutoffs, _MAX_CUTOFFS,
                 )
-                # Truncated tool calls produce incomplete new_text — don't accept them.
-                # Ask the model to produce a shorter replacement on the next iteration.
                 messages.append({
                     "role": "user",
                     "content": (
-                        "Your previous response was cut off because it exceeded the output limit. "
-                        "Write a shorter, more focused fix. Use apply_edit with only the minimum "
-                        "lines that need to change — do not reproduce unchanged surrounding code."
+                        "Your previous response was cut off at the output limit before you called a "
+                        "tool, so nothing was recorded. Keep your reasoning brief. If you know the fix, "
+                        "call apply_edit or patch_line now, changing only the lines that need to change; "
+                        "otherwise make one tool call to get what you need."
                     ),
                 })
+                # A cut-off forced turn stays forced: the model still owes an edit or no_edit.
+                force_edit = forced_turn
                 continue
+            cutoffs = 0
 
             if stop_reason == "end_turn" or not tool_calls:
                 if not edit_result and not patch_calls:

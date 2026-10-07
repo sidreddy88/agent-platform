@@ -391,3 +391,38 @@ class TestCompleteWithToolsMetering:
         assert summary["models"] == [service._model]
         assert summary["tokens"] == {"input": 300, "output": 200, "cache_write": 100, "cache_read": 600}
         assert summary["cost_usd"] > 0
+
+
+class TestCompleteWithToolsStopReason:
+    """A response cut off at the output limit (finish_reason "length") used to be
+    reported as "end_turn", so callers couldn't tell it from a finished response."""
+
+    @staticmethod
+    async def _stop_reason(finish_reason: str) -> str:
+        from app.services.llm_gateway import llm_gateway
+        usage = MagicMock(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None,
+                          cache_creation_input_tokens=0)
+        message = MagicMock(content="", tool_calls=None)
+        resp = MagicMock(choices=[MagicMock(message=message, finish_reason=finish_reason)], usage=usage)
+        service = llm_gateway.get_llm_service_for("fix")
+        with patch("litellm.acompletion", new=AsyncMock(return_value=resp)):
+            _, _, stop_reason = await service.complete_with_tools([{"role": "user", "content": "x"}], tools=[])
+        return stop_reason
+
+    @pytest.mark.asyncio
+    async def test_length_is_reported_as_max_tokens(self):
+        assert await self._stop_reason("length") == "max_tokens"
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_and_stop_unchanged(self):
+        assert await self._stop_reason("tool_calls") == "tool_use"
+        assert await self._stop_reason("stop") == "end_turn"
+
+
+class TestMaxTokensOverride:
+    def test_env_overrides_routed_max_tokens(self, monkeypatch):
+        gw = LLMGateway()
+        _, _, default = gw._get_routing("fix")
+        monkeypatch.setenv("LLM_MAX_TOKENS_FIX", "32768")
+        _, _, overridden = gw._get_routing("fix")
+        assert overridden == 32768 and overridden != default

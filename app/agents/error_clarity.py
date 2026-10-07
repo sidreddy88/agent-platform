@@ -259,7 +259,9 @@ class ErrorClarityAgent:
                 logger.error("[ErrorClarity] LLM call failed (iteration %d): %s", iteration, exc)
                 break
 
-            if stop_reason == "end_turn" or not tool_calls:
+            # A cut-off response ("max_tokens") ends the loop as before: its tool
+            # calls may be truncated.
+            if stop_reason in ("end_turn", "max_tokens") or not tool_calls:
                 break
 
             messages.append({
