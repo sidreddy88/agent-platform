@@ -25,7 +25,7 @@ from datetime import datetime
 from app.agents.base import BaseAgent
 from app.core.config import settings
 from app.models.events import IncidentState
-from app.services.blast_radius import BlastRadiusGuard
+from app.services.blast_radius import BlastRadiusGuard, protected_patterns_for
 from app.services.github import GitHubError, GitHubService
 from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import HAIKU_MODEL, LLMService
@@ -542,7 +542,8 @@ class FixGenerationAgent(BaseAgent):
         files_to_touch = [file_path]
         additions = len(new_function.splitlines()) + sum(len(ns.splitlines()) for _, ns in patches)
         deletions = len(old_function.splitlines()) + sum(len(os_.splitlines()) for os_, _ in patches)
-        br_result = BlastRadiusGuard().check(files_to_touch, additions=additions, deletions=deletions)
+        br_result = BlastRadiusGuard(protected_patterns=protected_patterns_for()).check(
+            files_to_touch, additions=additions, deletions=deletions)
         if not br_result.allowed:
             steps.append(f"✗ Blast radius violated: {br_result.reason}")
             logger.warning("[FixGen] Blast radius violation: %s", br_result.reason)

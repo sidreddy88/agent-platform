@@ -93,6 +93,48 @@ DEFAULT_PROTECTED_PATTERNS: list[str] = [
 ]
 
 
+# Patterns that protect an *application's* migrations and auth code by folder
+# name. In a library or framework repo they match the library's own source:
+# on SWE-bench (2026-10-07) they blocked 24 Django fixes to
+# django/db/migrations/autodetector.py (the migration engine, not a migration)
+# and django/contrib/auth/*.py (the auth framework).
+_APP_FOLDER_PATTERNS = {
+    "migrations/**", "**/migrations/**", "**/*migration*",
+    "auth/**", "**/auth/**", "**/authentication/**", "**/authorization/**", "**/security/**",
+}
+
+# For library/framework repos: still never touch real migration files, secrets,
+# credentials, infra, lockfiles or CI, but don't block library source by folder name.
+LIBRARY_PROTECTED_PATTERNS: list[str] = [
+    p for p in DEFAULT_PROTECTED_PATTERNS if p not in _APP_FOLDER_PATTERNS
+] + [
+    "**/migrations/[0-9][0-9][0-9][0-9]_*.py",   # Django-style migration files
+    "migrations/[0-9][0-9][0-9][0-9]_*.py",
+]
+
+PROTECTED_PROFILES: dict[str, list[str]] = {
+    "default": DEFAULT_PROTECTED_PATTERNS,
+    "library": LIBRARY_PROTECTED_PATTERNS,
+}
+
+
+def protected_patterns_for(profile: str | None = None) -> list[str]:
+    """Protected patterns for a profile; `None` reads BLAST_RADIUS_PROFILE.
+
+    Unset or unknown names fall back to the strict default (fail closed), so
+    production keeps the full list unless a run opts in explicitly.
+    """
+    import logging
+    import os
+
+    name = (profile if profile is not None else os.environ.get("BLAST_RADIUS_PROFILE", "")).strip() or "default"
+    if name not in PROTECTED_PROFILES:
+        logging.getLogger(__name__).warning(
+            "[BlastRadius] unknown profile %r — using the default protected paths", name)
+        name = "default"
+    return list(PROTECTED_PROFILES[name])
+
+
 # ---------------------------------------------------------------------------
 # Result
 # ---------------------------------------------------------------------------
