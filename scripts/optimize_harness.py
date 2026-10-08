@@ -217,6 +217,13 @@ def main() -> int:
     parser.add_argument("--agent", choices=("diagnosis", "fix"), default="diagnosis",
                         help="which agent's harness to evolve; fix uses app/evals/fix_harness_split.json "
                              "and FixReplayEvaluator (resolved on the official SWE-bench harness)")
+    parser.add_argument("--transfer-model", default=None,
+                        help="fix agent: second fix model for two-model acceptance (e.g. a Qwen or Claude "
+                             "model id); off unless given")
+    parser.add_argument("--transfer-cases", type=int, default=20,
+                        help="how many evolve cases (evenly spaced) the second-model check runs")
+    parser.add_argument("--transfer-margin", type=int, default=2,
+                        help="veto when the candidate resolves more than this many fewer than the incumbent")
     args = parser.parse_args()
     args.rounds_given = any(a == "--rounds" or a.startswith("--rounds=") for a in sys.argv[1:])
 
@@ -238,7 +245,7 @@ def main() -> int:
         # for its reasoning, the library blast-radius profile, tests (not Haiku) as verifier.
         for key, value in (("LLM_MODEL_FIX", "together_ai/deepseek-ai/DeepSeek-V4.1-Flash"),
                            ("LLM_MAX_TOKENS_FIX", "32768"), ("BLAST_RADIUS_PROFILE", "library"),
-                           ("FIX_SELF_CRITIQUE", "off")):
+                           ("FIX_SELF_CRITIQUE", "off"), ("FIX_SELF_FEEDBACK", "1")):
             os.environ.setdefault(key, value)
     split = json.loads((FIX_SPLIT if args.agent == "fix" else SPLIT).read_text())
     if run.exists():
@@ -282,15 +289,28 @@ def main() -> int:
         cfg.cost_band = args.cost_band
         cfg.health_baseline = args.health_baseline or {}
         cfg.pass_rate_tripwire = not args.no_pass_rate_tripwire
+        if args.agent == "fix":
+            # Phase D: compare cost only where both versions resolved every trial, and
+            # keep in-band positive candidates as near misses for the proposer.
+            cfg.acceptance = {**cfg.acceptance, "cost_on_shared_successes": True, "near_miss_fraction": 0.5}
+            if args.transfer_model:
+                pool = sorted(cfg.evolve_cases + cfg.guard_cases)
+                n = min(args.transfer_cases, len(pool))
+                cfg.transfer_cases = [pool[int(k * len(pool) / n)] for k in range(n)]
+                cfg.transfer_margin = args.transfer_margin
         if args.seed_history:
             seed_history(args.seed_history, args.run_dir)
+    transfer = None
     if args.agent == "fix":
         from app.harness_optimizer.fix_evaluator import FixReplayEvaluator
         evaluator = FixReplayEvaluator(parallel=max(1, args.parallel or 5))
+        if args.transfer_model and cfg.transfer_cases:
+            transfer = FixReplayEvaluator(parallel=max(1, args.parallel or 5), fix_model=args.transfer_model)
     else:
         evaluator = ReplayEvaluator()
     opt = Optimizer(args.run_dir, args.harness or profiles.active().harness_root, cfg, evaluator,
-                    make_llm(args.model), make_llm(args.model), critic_patterns(split))
+                    make_llm(args.model), make_llm(args.model), critic_patterns(split),
+                    transfer_evaluator=transfer)
     state = asyncio.run(opt.run_until_stopped())
     print(f"\nstopped at round {state.round}, phase {state.phase}: {state.stop_reason}")
     print(f"spent ${state.spent_usd:.2f}; accepted {state.accepted or 'nothing'}", flush=True)

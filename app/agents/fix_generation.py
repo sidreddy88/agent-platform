@@ -68,6 +68,12 @@ _BUDGET_WARNING_TURNS = 3
 # hidden reasoning, so the model is told to keep it short and edit.
 _MAX_CUTOFFS = 3
 
+_SELF_FEEDBACK_QUESTION = (
+    "This was the end of the task. In two or three sentences, about the setup rather than this bug: "
+    "which instruction or tool slowed you down or misled you, and what information or tool was "
+    "missing? Don't restate the fix."
+)
+
 
 def _skills_section(harness) -> str:
     """skills.prompt as a prompt section, only once it has a "- " bullet (it starts as a
@@ -2174,6 +2180,18 @@ class FixGenerationAgent(BaseAgent):
                                         "output": str(result)[:2000]})
             if chose_no_edit and not edit_result and not patch_calls:
                 break
+
+        self._self_feedback = None
+        if os.environ.get("FIX_SELF_FEEDBACK") == "1":
+            # One closing question for the harness optimizer's evidence (HarnessCompass's
+            # "proactive first-person feedback"): offline evals only, never production.
+            try:
+                fb_text, _, _ = await self._llm.complete_with_tools(
+                    messages + [{"role": "user", "content": _SELF_FEEDBACK_QUESTION}],
+                    self._tools_with_descriptions(self._FIX_TOOLS), system=system, tool_choice="none")
+                self._self_feedback = (fb_text or "").strip()[:800] or None
+            except Exception as exc:
+                logger.info("[FixGen] self-feedback call failed: %s", exc)
 
         if _total_pruned_chars:
             logger.info("[FixGen] State pruning total: %d chars removed across %d iterations", _total_pruned_chars, iteration + 1)

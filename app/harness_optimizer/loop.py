@@ -64,6 +64,7 @@ from typing import Protocol
 
 from app.harness_optimizer import candidates, critic, evidence, health, profiles, proposer, report
 from app.harness_optimizer.acceptance import (
+    Decision,
     AcceptanceConfig,
     CaseResult,
     EvalResult,
@@ -71,7 +72,7 @@ from app.harness_optimizer.acceptance import (
     calibrate_delta,
     decide,
 )
-from app.harness_optimizer.budget import Budget, BudgetExceeded
+from app.harness_optimizer.budget import Budget, BudgetExceeded, estimate_eval_cost
 from app.harness_optimizer.evaluator import Evaluator, ProviderFailure, UnpricedModel
 from app.harness_optimizer.history import EditHistory, HistoryEntry
 from app.harness_optimizer.state import RunDir, RunState
@@ -90,6 +91,13 @@ class OptimizerConfig:
     calibration_trials: int = 2        # round 0; 2 gives the trial pairs for delta
     max_rounds: int = 5
     max_stall: int = 3                 # consecutive rounds without an acceptance
+    # Two-model acceptance: a candidate accepted on the primary model is re-run on
+    # these cases with a second model (the transfer evaluator) and vetoed if it
+    # resolves more than transfer_margin fewer than the incumbent there. The r9
+    # prompt edit helped DeepSeek and was neutral on Sonnet; retry transferred.
+    transfer_cases: list[str] = field(default_factory=list)
+    transfer_trials: int = 1
+    transfer_margin: int = 2
     repair_attempts: int = 2           # proposer retries after invalid/critic-rejected
     # Budget estimate per case per trial until one is measured. Round 0 on
     # Sonnet 5 with caching measured $0.121; 0.25 leaves room for failing
@@ -168,7 +176,8 @@ def _cases_key(cases: list[str]) -> str:
 class Optimizer:
     def __init__(self, run_dir: str | Path, base_harness: str | Path, cfg: OptimizerConfig,
                  evaluator: Evaluator, proposer_llm: LLM, critic_llm: LLM,
-                 critic_patterns: list[tuple[str, str]], publisher: Publisher | None = None):
+                 critic_patterns: list[tuple[str, str]], publisher: Publisher | None = None,
+                 transfer_evaluator: Evaluator | None = None):
         self.run = RunDir(run_dir)
         self.base = Path(base_harness)
         self.cfg = cfg
@@ -179,6 +188,7 @@ class Optimizer:
         self.critic_llm = critic_llm
         self.patterns = critic_patterns
         self.publisher = publisher or LocalPublisher()
+        self.transfer_evaluator = transfer_evaluator
         self.history = EditHistory(self.run.root / "history.jsonl")
 
     # ---- lifecycle ----------------------------------------------------------
@@ -316,6 +326,8 @@ class Optimizer:
             await self._evaluate_candidate(state, budget)
         elif state.phase == "decide":
             self._decide(state)
+        elif state.phase == "transfer":
+            await self._transfer(state, budget)
         else:
             raise RuntimeError(f"unknown phase {state.phase!r}")
 
@@ -640,10 +652,15 @@ class Optimizer:
                 errors.append(f"{prop.component}: {exc}")
         raise candidates.InvalidCandidate("; ".join(errors))
 
+    def _near_misses(self) -> list[str]:
+        """In-band gains that weren't proven: worth building on or combining."""
+        return [f"[{e.component}] {e.hypothesis[:220]} (dS {e.delta_S:+.3f}, dC {e.delta_C:+.1%})"
+                for e in self.history.entries() if e.outcome == "near_miss"][-6:]
+
     def _rejected_ideas(self) -> list[str]:
         out = []
         for e in self.history.entries():
-            if e.outcome == "accepted":
+            if e.outcome in ("accepted", "near_miss"):
                 continue
             meas = f", dS {e.delta_S:+.3f} dC {e.delta_C:+.1%}" if e.delta_S is not None else ""
             out.append(f"[{e.component}] {e.hypothesis[:220]} -> {e.outcome}{meas}")
@@ -660,6 +677,7 @@ class Optimizer:
                            f"budget that grows with the gain). Inside the band it must be cheaper by more "
                            f"than cost noise: {cost}. Vetoed if the no-answer (escalation) rate rises."),
             "rejected": self._rejected_ideas(),
+            "near_misses": self._near_misses(),
         }
 
     def _allowed_components(self) -> tuple[str, ...] | None:
@@ -731,12 +749,47 @@ class Optimizer:
                        max_escalation_rise=max(base.max_escalation_rise, state.delta_esc or 0.0),
                        cost_delta=(state.delta_cost or 0.0) if self.cfg.cost_band else 0.0)
         d = decide(inc_result, cand_result, state.S_star, acfg)
+        if d.accept and self.transfer_evaluator is not None and self.cfg.transfer_cases:
+            cand["decision"] = d.to_json()          # resumable: the transfer phase finishes it
+            state.phase = "transfer"
+            return
+        self._finish_decision(state, d)
+
+    async def _transfer(self, state: RunState, budget: Budget) -> None:
+        """Second-model check for a candidate the primary model accepted."""
+        cand = state.candidate
+        d = Decision(**cand["decision"])
+        cases, trials = list(self.cfg.transfer_cases), self.cfg.transfer_trials
+        passes = {}
+        for label, harness in (("incumbent", self.run.incumbent_dir), ("candidate", Path(cand["dir"]))):
+            held = budget.reserve(estimate_eval_cost(len(cases), trials, 0.10), f"transfer check ({label})")
+            out = await self.transfer_evaluator.evaluate(harness, cases, trials)
+            budget.release(held, out.cost_usd)
+            state.spent_usd = budget.spent_usd
+            passes[label] = sum(cr.passes for cr in out.result.per_case.values())
+        drop = passes["incumbent"] - passes["candidate"]
+        note = (f"second model: candidate {passes['candidate']} vs incumbent {passes['incumbent']} "
+                f"resolved on {len(cases)} cases x {trials}")
+        if drop > self.cfg.transfer_margin:
+            d.accept = False
+            d.vetoes.append(f"{note} (drop {drop} > margin {self.cfg.transfer_margin})")
+            d.reason = "vetoed by the second-model check: " + d.vetoes[-1] + "; primary: " + d.reason
+        else:
+            d.reason += f"; {note}, within margin {self.cfg.transfer_margin}"
+        self._finish_decision(state, d)
+
+    def _finish_decision(self, state: RunState, d: Decision) -> None:
+        cand = state.candidate
+        cand_result, _ = self._load_ref(json.loads(cand["eval"]))
         cand_dir = Path(cand["dir"])
         diff = candidates.diff(self.run.incumbent_dir, cand_dir)
         spent = sum(r.cost_usd for r in cand_result.per_case.values())
+        outcome = ("accepted" if d.accept else
+                   "transfer_rejected" if d.vetoes and "second-model" in d.reason else
+                   "near_miss" if d.near_miss else "rejected")
         self.history.append(HistoryEntry(
             state.round, cand["id"], cand["component"], cand["hypothesis"], diff,
-            "accepted" if d.accept else "rejected", d.reason, d.delta_S, d.delta_C,
+            outcome, d.reason, d.delta_S, d.delta_C,
             d.improved, d.regressed, round(spent, 4)))
         if d.accept:
             self.publisher.publish(self.run, state.round, cand_dir, diff, d.to_json(), cand["hypothesis"])

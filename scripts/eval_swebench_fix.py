@@ -128,7 +128,7 @@ def _git_diff(worktree: Path, files: dict[str, str]) -> str:
 
 
 async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None,
-                  harness_dir: str | None = None) -> dict[str, Any]:
+                  harness_dir: str | None = None, fix_model: str | None = None) -> dict[str, Any]:
     from app.agents import fix_generation
     from app.agents.diagnosis import DiagnosisAgent, DiagnosisResult, _pinned_graph
     from app.models.events import ErrorEvent, EventSource, IncidentState
@@ -178,7 +178,7 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None,
         # Per-agent call graph, never the module-level one: several cases run at
         # once. Shares DiagnosisAgent's cache (keyed by repo and pinned SHA).
         agent._code_graph = await _pinned_graph(owner, repo, pinned)
-        agent._llm = llm_gateway.get_llm_service_for("fix")
+        agent._llm = llm_gateway.get_llm_service_for("fix", model=fix_model)
         with cost_meter.metered() as m:
             t0 = time.monotonic()
             result, steps = await agent.fix_with_steps(incident, patch_only=True)
@@ -190,6 +190,7 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None,
             "cost_usd": m.summary()["cost_usd"], "seconds": round(time.monotonic() - t0, 1),
             "meter": m.summary(),
             "trajectory_steps": list(getattr(agent, "_fix_steps", []) or []),
+            "self_feedback": getattr(agent, "_self_feedback", None),
         }
         rec["model_patch"] = patch
         return rec

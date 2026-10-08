@@ -53,9 +53,12 @@ def load_saved_diagnoses(path: Path = RUN1) -> dict[str, dict]:
     return out
 
 
-async def _default_run_case(instance: dict, saved_diagnosis: dict, harness_dir: str) -> dict:
-    from scripts.eval_swebench_fix import run_one
-    return await run_one(instance, saved_diagnosis=saved_diagnosis, harness_dir=harness_dir)
+def _default_run_case(fix_model: str | None = None) -> RunCase:
+    async def run(instance: dict, saved_diagnosis: dict, harness_dir: str) -> dict:
+        from scripts.eval_swebench_fix import run_one
+        return await run_one(instance, saved_diagnosis=saved_diagnosis, harness_dir=harness_dir,
+                             fix_model=fix_model)
+    return run
 
 
 def modal_grade(predictions: list[dict], run_id: str, workdir: Path | None = None) -> dict[str, bool]:
@@ -83,7 +86,8 @@ def modal_grade(predictions: list[dict], run_id: str, workdir: Path | None = Non
 class FixReplayEvaluator:
     def __init__(self, saved_diagnoses: dict[str, dict] | None = None,
                  instances_path: Path = FULL, parallel: int = 5,
-                 run_case: RunCase | None = None, grade: Grade | None = None) -> None:
+                 run_case: RunCase | None = None, grade: Grade | None = None,
+                 fix_model: str | None = None) -> None:
         self.on_trial: Callable[[], None] | None = None
         self._diagnoses = saved_diagnoses if saved_diagnoses is not None else load_saved_diagnoses()
         self._instances = {}
@@ -93,7 +97,9 @@ class FixReplayEvaluator:
                     inst = json.loads(line)
                     self._instances[inst["instance_id"]] = inst
         self._parallel = parallel
-        self._run_case = run_case or _default_run_case
+        # fix_model overrides the routed fix model for this evaluator only: the
+        # optimizer's second-model check runs alongside the primary evaluator.
+        self._run_case = run_case or _default_run_case(fix_model)
         self._grade = grade or modal_grade
 
     def check_cases(self, case_ids: list[str]) -> None:
@@ -157,6 +163,7 @@ class FixReplayEvaluator:
                     "verdict": "PASS" if outcome == "resolved" else "FAIL",
                     "detail": OUTCOME_TEXT[outcome],
                     "steps": fix.get("trajectory_steps") or [],
+                    "self_feedback": fix.get("self_feedback"),
                     "llm_calls": [None] * int((rec["_meter"] or {}).get("calls") or 0),
                     "cost": rec["_meter"],
                 })

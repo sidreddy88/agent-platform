@@ -134,6 +134,10 @@ def build_prompt(harness_dir: Path, evidence: str, history: str, feedback: str =
     ctx = run_context or {}
     if ctx.get("acceptance"):
         parts.append(f"=== ACCEPTANCE RULES FOR THIS RUN ===\n{ctx['acceptance']}")
+    if ctx.get("near_misses"):
+        parts.append("=== NEAR MISSES (positive but within the noise band, so not accepted; you may "
+                     "build on one or combine it with a new mechanism, saying which) ===\n"
+                     + "\n".join(f"- {r}" for r in ctx["near_misses"]))
     if ctx.get("rejected"):
         parts.append("=== REJECTED IDEAS (measured; don't repeat without new evidence) ===\n"
                      + "\n".join(f"- {r}" for r in ctx["rejected"]))

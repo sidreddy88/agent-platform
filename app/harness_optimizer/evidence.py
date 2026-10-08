@@ -60,6 +60,12 @@ def build(result: EvalResult, trajectories: list[dict], max_failing: int = 3,
         lines += ["", "Cost by prompt source (share of spend):"]
         lines += [f"  {r['source']}: {r['share']:.1%} (${r.get('cost', 0):.2f})" for r in rep["by_source"][:10]]
 
+    feedback = [(r["instance_id"], r["self_feedback"]) for r in trajectories
+                if r.get("self_feedback") and r.get("verdict") != "PASS"][:6]
+    if feedback:
+        lines += ["", "Agent self-feedback after failing runs (the agent's own words about the setup):"]
+        lines += [f"  - {fb[:400]}" for _, fb in feedback]
+
     failing = [(r, g) for r, g in zip(trajectories, grades) if r.get("verdict") != "PASS"][:max_failing]
     for rec, g in failing:
         lines += ["", f"=== Failing trajectory: {rec['instance_id']} trial {rec.get('trial')} "
