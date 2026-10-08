@@ -43,6 +43,9 @@ sys.path.insert(0, str(ROOT))
 
 SPLIT = ROOT / "app" / "evals" / "harness_split.json"
 FIX_SPLIT = ROOT / "app" / "evals" / "fix_harness_split.json"
+# Second model for the fix agent's two-model acceptance: a different family from
+# DeepSeek, tool calls checked and priced on 2 real cases (~$0.035/case, 2026-10-08).
+FIX_TRANSFER_MODEL = "together_ai/zai-org/GLM-5.3-Flash"
 CASES = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"   # every split case, incl. the hard tier
 DEFAULT_LLM = "claude-opus-5"
 
@@ -218,13 +221,17 @@ def main() -> int:
                         help="which agent's harness to evolve; fix uses app/evals/fix_harness_split.json "
                              "and FixReplayEvaluator (resolved on the official SWE-bench harness)")
     parser.add_argument("--transfer-model", default=None,
-                        help="fix agent: second fix model for two-model acceptance (e.g. a Qwen or Claude "
-                             "model id); off unless given")
+                        help="fix agent: second fix model for two-model acceptance (default "
+                             f"{FIX_TRANSFER_MODEL}; 'none' turns the check off)")
     parser.add_argument("--transfer-cases", type=int, default=20,
                         help="how many evolve cases (evenly spaced) the second-model check runs")
     parser.add_argument("--transfer-margin", type=int, default=2,
                         help="veto when the candidate resolves more than this many fewer than the incumbent")
     args = parser.parse_args()
+    if args.agent == "fix" and args.transfer_model is None:
+        args.transfer_model = FIX_TRANSFER_MODEL
+    if args.transfer_model == "none":
+        args.transfer_model = None
     args.rounds_given = any(a == "--rounds" or a.startswith("--rounds=") for a in sys.argv[1:])
 
     if args.status:
