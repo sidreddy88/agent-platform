@@ -245,7 +245,9 @@ class GatewayLLMService:
         Returns:
             (text_content, tool_calls, stop_reason)
             tool_calls: list of {"id": str, "name": str, "input": dict}
-            stop_reason: "tool_use" | "end_turn"
+            stop_reason: "tool_use" | "max_tokens" | "end_turn"
+                "max_tokens" means the response was cut off at the output limit
+                (finish_reason "length"); any tool call in it may be truncated.
         """
         import json
         import litellm
@@ -280,7 +282,16 @@ class GatewayLLMService:
         choice = response.choices[0]
         message = choice.message
         text: str = message.content or ""
-        stop_reason = "tool_use" if choice.finish_reason == "tool_calls" else "end_turn"
+        # "length" used to fall through to "end_turn", so callers couldn't tell a
+        # response cut off at the output limit from a finished one. Reasoning models
+        # (DeepSeek-V4.1-Flash) spend the limit on hidden reasoning: 22 SWE-bench fix
+        # runs on 2026-10-07 ended with no edit after being cut off at 8,192 tokens.
+        if choice.finish_reason == "tool_calls":
+            stop_reason = "tool_use"
+        elif choice.finish_reason == "length":
+            stop_reason = "max_tokens"
+        else:
+            stop_reason = "end_turn"
 
         tool_calls: list[dict] = []
         if getattr(message, "tool_calls", None):
@@ -375,6 +386,11 @@ class LLMGateway:
         if override:
             entry["model"] = override
             entry.pop("provider", None)
+        # LLM_MAX_TOKENS_<TASK> overrides the output limit the same way, for evals
+        # that run a reasoning model whose hidden reasoning counts toward it.
+        max_tokens_override = os.environ.get(f"LLM_MAX_TOKENS_{task_type.upper()}")
+        if max_tokens_override:
+            entry["max_tokens"] = int(max_tokens_override)
         provider = entry.get("provider") or _infer_provider(entry.get("model", ""))
         # Fallback (routing entry missing/omits "model") reads from the same
         # config/llm_routing.json "defaults" section as llm.py's MODEL

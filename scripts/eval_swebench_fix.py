@@ -248,6 +248,9 @@ def main() -> int:
     ap.add_argument("--run", required=True, help="run name: writes runs/fix/<run>/")
     ap.add_argument("--diagnoses-from", help="reuse the full diagnoses saved by this earlier run")
     ap.add_argument("--fix-model", help="LiteLLM model id for the fix task (sets LLM_MODEL_FIX)")
+    ap.add_argument("--fix-max-tokens", type=int,
+                    help="output limit for the fix task (sets LLM_MAX_TOKENS_FIX); reasoning models "
+                         "spend it on hidden reasoning, so 8,192 cut off DeepSeek fixes")
     ap.add_argument("--parallel", type=int, default=1,
                     help="cases at once (API-bound; keep low on a laptop, e.g. 3)")
     args = ap.parse_args()
@@ -261,6 +264,8 @@ def main() -> int:
     faulthandler.dump_traceback_later(300, repeat=True, file=log)
     if args.fix_model:
         os.environ["LLM_MODEL_FIX"] = args.fix_model
+    if args.fix_max_tokens:
+        os.environ["LLM_MAX_TOKENS_FIX"] = str(args.fix_max_tokens)
     if args.pilot:
         ids = PILOT
     elif args.heldout:
