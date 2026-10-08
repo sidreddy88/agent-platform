@@ -1955,6 +1955,8 @@ class FixGenerationAgent(BaseAgent):
         patch_calls: list[dict] = []
         verdict: dict | None = None
         nudges = 0
+        # Step log for the harness optimizer's evidence (same shape as DiagnosisAgent's steps).
+        self._fix_steps = []
         cutoffs = 0
         force_edit = False
         chose_no_edit = False
@@ -2160,6 +2162,9 @@ class FixGenerationAgent(BaseAgent):
                 else:
                     result = f"Unknown tool: {name}"
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                self._fix_steps.append({"iteration": iteration, "name": name,
+                                        "input": {k: str(v)[:300] for k, v in tc["input"].items()},
+                                        "output": str(result)[:2000]})
             if chose_no_edit and not edit_result and not patch_calls:
                 break
 

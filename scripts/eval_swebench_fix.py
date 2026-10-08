@@ -127,7 +127,8 @@ def _git_diff(worktree: Path, files: dict[str, str]) -> str:
         subprocess.run(["git", "-C", str(worktree), "checkout", "--", *files], check=True)
 
 
-async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None) -> dict[str, Any]:
+async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None,
+                  harness_dir: str | None = None) -> dict[str, Any]:
     from app.agents import fix_generation
     from app.agents.diagnosis import DiagnosisAgent, DiagnosisResult, _pinned_graph
     from app.models.events import ErrorEvent, EventSource, IncidentState
@@ -172,7 +173,7 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None)
 
         # ── fix, patch only, tools pointed at the pinned checkout ──
         _apply_diagnosis(incident, diagnosis)
-        agent = fix_generation.FixGenerationAgent(github=github)
+        agent = fix_generation.FixGenerationAgent(github=github, harness_dir=harness_dir)
         agent._owner, agent._repo, agent._local_repo, agent._rag = owner, repo, pinned, None
         # Per-agent call graph, never the module-level one: several cases run at
         # once. Shares DiagnosisAgent's cache (keyed by repo and pinned SHA).
@@ -188,6 +189,7 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None)
             "patch_lines": patch.count("\n"), "steps": steps,
             "cost_usd": m.summary()["cost_usd"], "seconds": round(time.monotonic() - t0, 1),
             "meter": m.summary(),
+            "trajectory_steps": list(getattr(agent, "_fix_steps", []) or []),
         }
         rec["model_patch"] = patch
         return rec
