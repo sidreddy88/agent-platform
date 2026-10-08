@@ -69,6 +69,26 @@ _BUDGET_WARNING_TURNS = 3
 _MAX_FIX_TURNS_TEST_LOOP = 36
 # Turns left when the test loop is told to stop exploring and edit, so there's room to test.
 _TEST_LOOP_EDIT_BY_TURNS = 14
+# Turn by which the test loop should have a registered, failing reproduction.
+_REPRO_BY_TURN = 8
+# Times the final check may send the model back because its reproduction still fails.
+_MAX_FINAL_CHECK_RETRIES = 2
+
+_SET_REPRODUCTION_TOOL = {
+    "name": "set_reproduction",
+    "description": (
+        "Register the command that reproduces the bug, e.g. `python /tmp/repro.py` after writing the "
+        "script with run_command. The script must ASSERT the behaviour the issue expects: exit non-zero "
+        "(an AssertionError or the reported exception) while the bug is present, and exit 0 once fixed. "
+        "It is run immediately on the UNFIXED file and only accepted if it fails there; it is rerun on "
+        "your edited file before you finish."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"command": {"type": "string", "description": "Shell command that runs the reproduction"}},
+        "required": ["command"],
+    },
+}
 
 _RUN_COMMAND_TOOL = {
     "name": "run_command",
@@ -102,23 +122,23 @@ _RESET_EDITS_TOOL = {
 
 _TEST_LOOP_PROMPT = (
     "\nTEST LOOP (you can run code):\n"
-    "You have run_command, which runs in this repository's own environment with your current edits "
-    "applied. Work like this:\n"
-    "1. Reproduce first: write a minimal script from the issue's own example and run it BEFORE editing. "
-    "It should show the bug (wrong output or an error). If it doesn't, you haven't understood the bug yet.\n"
+    "You have run_command (runs in this repository's own environment with your current edits applied) "
+    "and set_reproduction. Work like this:\n"
+    "1. Reproduce first, within your first few turns: write a minimal script from the issue's own example "
+    "that ASSERTS the expected behaviour (assert / raise on the wrong result), so it exits non-zero while "
+    "the bug is present and 0 once fixed. A script that only prints is not a reproduction. Register it "
+    "with set_reproduction; it is run on the unfixed file and only accepted if it fails there.\n"
     "2. Make the fix with apply_edit / patch_line.\n"
-    "3. Rerun the reproduction: it must now show the correct behaviour, not just stop crashing.\n"
-    "4. Run the existing tests closest to the code you changed (the matching tests/ file or module) and "
-    "make sure you didn't break anything. If you changed a function's signature or behaviour, check its "
-    "callers and sibling methods too.\n"
-    "5. Decide: all good -> end your turn. Reproduction still wrong -> refine with patch_line, or "
-    "reset_edits and try another approach. Existing tests broke -> fix the side effect.\n"
+    "3. Rerun the reproduction (it must now exit 0) and the existing tests closest to the code you changed. "
+    "If you changed a function's signature or behaviour, check its callers and sibling methods too.\n"
+    "4. Decide: all good -> end your turn (your reproduction is rerun automatically first). Reproduction "
+    "still fails -> refine with patch_line, or reset_edits and try another approach. Existing tests broke "
+    "-> fix the side effect.\n"
     "Rules: there is no network (don't pip install or fetch anything). Don't edit test files to make "
     "them pass. Only the target file's edits are submitted; scratch files you create are not. "
     "Don't look for the answer outside the repository's current code: no git history (git log/show/"
     "blame), no caches, no other installed copies, no whole-filesystem searches; such commands are "
-    "refused. Use read_file to read code; use run_command to run things. Reproduce within your first "
-    "few turns, leave enough turns to edit and test, and after every edit rerun your reproduction.\n"
+    "refused. Read code with read_file, not the shell; use run_command to run things.\n"
 )
 
 # Responses cut off at the output limit in a row before the loop gives up. A cut-off
@@ -606,8 +626,13 @@ class FixGenerationAgent(BaseAgent):
             before = sum(1 for r in runs if not r["edited"])
             resets = len(test_runs) - len(runs)
             last = runs[-1]["exit"] if runs else None
+            accepted = [r for r in test_runs if r["command"].startswith("<repro on unfixed>")
+                        and r["exit"] not in (0, -1, 124)]
+            finals = [r["exit"] for r in test_runs if r["command"] == "<repro on final edit>"]
+            repro = (f"repro failed on unfixed (exit {accepted[0]['exit']})" if accepted else "no accepted repro")
+            final = (f"final check {'passed' if finals[-1] == 0 else 'failed'}" if finals else "no final check")
             steps.append(f"✓ Test loop: {len(runs)} commands ({before} before the first edit), "
-                         f"{resets} resets, last exit {last}")
+                         f"{resets} resets, last exit {last}; {repro}; {final}")
         if not old_function and not patches:
             steps.append(f"✗ LLM could not locate {function_name} in the file")
             return _fail(f"{function_name} not found in {file_path}", branch=branch_name)
@@ -2044,6 +2069,9 @@ class FixGenerationAgent(BaseAgent):
         max_turns = _MAX_FIX_TURNS_TEST_LOOP if sandbox is not None else _MAX_FIX_TURNS
         last_edit_iter = last_run_iter = -1
         verify_nudged = False
+        repro_cmd: str | None = None
+        repro_nudged = False
+        final_checks = 0
         if sandbox is not None:
             initial_prompt += _TEST_LOOP_PROMPT
         messages: list[dict] = [{"role": "user", "content": initial_prompt}]
@@ -2073,6 +2101,12 @@ class FixGenerationAgent(BaseAgent):
                     "old_snippet copied verbatim from the file. If you have confirmed this file "
                     f"has nothing to fix, reply with exactly '{_NO_EDIT_MARKER}: <one-sentence reason>'."
                 )})
+            if sandbox is not None and repro_cmd is None and not repro_nudged and iteration == _REPRO_BY_TURN:
+                repro_nudged = True
+                messages.append({"role": "user", "content": (
+                    "You haven't registered a reproduction yet. Before exploring further, write a script "
+                    "that asserts the issue's expected behaviour and register it with set_reproduction."
+                )})
             if (sandbox is not None and iteration == max_turns - _TEST_LOOP_EDIT_BY_TURNS
                     and not edit_result and not patch_calls):
                 logger.warning("[FixGen] Agentic: %d turns left and no edit yet (test loop)", _TEST_LOOP_EDIT_BY_TURNS)
@@ -2088,7 +2122,7 @@ class FixGenerationAgent(BaseAgent):
                     logger.debug("[FixGen] State pruning at iteration %d: removed %d chars", iteration, pruned)
             if (iteration == max_turns - 1 and not edit_result and not patch_calls):
                 force_edit = True
-            tools = self._FIX_TOOLS + ([_RUN_COMMAND_TOOL, _RESET_EDITS_TOOL] if sandbox is not None else [])
+            tools = self._FIX_TOOLS + ([_RUN_COMMAND_TOOL, _SET_REPRODUCTION_TOOL, _RESET_EDITS_TOOL] if sandbox is not None else [])
             call_kwargs = {}
             forced_turn = force_edit
             if force_edit:
@@ -2150,6 +2184,28 @@ class FixGenerationAgent(BaseAgent):
                         continue
                     else:
                         logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
+                elif (sandbox is not None and repro_cmd is not None and final_checks < _MAX_FINAL_CHECK_RETRIES
+                      and iteration < max_turns - 1):
+                    current = _working_content(content, extracted_old, edit_result, patch_calls)
+                    try:
+                        await sandbox.write_file(file_path, current)
+                        code, out = await sandbox.run(repro_cmd)
+                    except Exception as exc:
+                        code, out = -1, f"[sandbox error: {exc!r}]"
+                    self._test_log.append({"iteration": iteration, "command": "<repro on final edit>",
+                                           "exit": code, "edited": True, "seconds": 0})
+                    if code == 0:
+                        logger.info("[FixGen] final check: reproduction passes with the edit (iteration %d)", iteration)
+                        break
+                    final_checks += 1
+                    logger.info("[FixGen] final check: reproduction still fails (exit %s, iteration %d)", code, iteration)
+                    if text:
+                        messages.append({"role": "assistant", "content": text})
+                    messages.append({"role": "user", "content": wrap_untrusted(
+                        f"Your reproduction still fails with your edit (exit {code}), so the fix isn't done. "
+                        f"Refine it (patch_line), or reset_edits and try another approach.\n{out}",
+                        source="test-sandbox")})
+                    continue
                 elif (sandbox is not None and last_run_iter < last_edit_iter and not verify_nudged
                       and iteration < max_turns - 1):
                     # It edited but never ran anything afterwards (smoke run 2026-10-08).
@@ -2280,6 +2336,36 @@ class FixGenerationAgent(BaseAgent):
                     logger.info("[FixGen] run_command (iteration %d, edited=%s) exit=%s: %s",
                                 iteration, bool(edit_result or patch_calls), code, cmd[:120])
                     result = wrap_untrusted(f"exit code: {code}\n{out}", source="test-sandbox")
+                elif name == "set_reproduction" and sandbox is not None:
+                    cmd = str(tc["input"].get("command", "")).strip()
+                    why = refused_command(cmd)
+                    if not cmd or why:
+                        result = why or "ERROR: command is required."
+                    else:
+                        try:
+                            await sandbox.write_file(file_path, content)       # the unfixed file
+                            code, out = await sandbox.run(cmd)
+                        except Exception as exc:
+                            logger.warning("[FixGen] set_reproduction sandbox error: %r", exc)
+                            code, out = -1, f"[sandbox error: {exc!r}]"
+                        self._test_log.append({"iteration": iteration, "command": f"<repro on unfixed> {cmd[:250]}",
+                                               "exit": code, "edited": False, "seconds": 0})
+                        if code == 0:
+                            result = wrap_untrusted(
+                                "REJECTED: this reproduction exits 0 on the UNFIXED file, so it doesn't capture "
+                                "the bug. Make it assert the behaviour the issue expects (exit non-zero while "
+                                f"the bug is present), then register it again.\nexit code: 0\n{out}",
+                                source="test-sandbox")
+                        elif code in (-1, 124):
+                            result = wrap_untrusted(f"REJECTED: the reproduction errored or timed out (exit {code}); "
+                                                    f"fix the script and register it again.\n{out}", source="test-sandbox")
+                        else:
+                            repro_cmd = cmd
+                            result = wrap_untrusted(
+                                f"✓ Reproduction registered: it fails on the unfixed file (exit {code}). It will be "
+                                f"rerun on your edited file before you finish.\n{out}", source="test-sandbox")
+                        logger.info("[FixGen] set_reproduction (iteration %d) exit=%s accepted=%s",
+                                    iteration, code, repro_cmd == cmd)
                 elif name == "reset_edits" and sandbox is not None:
                     edit_result, patch_calls = None, []
                     last_edit_iter = iteration

@@ -170,3 +170,75 @@ async def test_edit_by_warning_leaves_turns_to_test():
     await _run(agent)
     k = fix_generation._MAX_FIX_TURNS_TEST_LOOP - fix_generation._TEST_LOOP_EDIT_BY_TURNS
     assert "turns left and no edit yet" in seen[k][-1]["content"]
+
+
+class ReproSandbox(FakeSandbox):
+    """`python /tmp/repro.py` exits 1 unless the last file written contains `fixed_marker`."""
+
+    def __init__(self, fixed_marker="x ? x.value"):
+        super().__init__()
+        self.marker = fixed_marker
+
+    async def run(self, command, timeout=180):
+        self.commands.append(command)
+        if "repro" in command:
+            fixed = bool(self.files) and self.marker in self.files[-1][1]
+            return (0 if fixed else 1), ("ok" if fixed else "AssertionError")
+        return 0, "ran"
+
+
+@pytest.mark.asyncio
+async def test_reproduction_accepted_only_if_it_fails_on_the_unfixed_file():
+    sb = ReproSandbox()
+    agent, seen, calls = _agent([
+        _tool("set_reproduction", command="python /tmp/repro.py"),
+        _tool("apply_edit", new_text=FIXED),
+        ("done", [], "end_turn"),
+    ], sandbox=sb)
+    _, new, _, _ = await _run(agent)
+    assert new == FIXED
+    assert sb.files[0] == ("src/target.js", CONTENT)                     # run on the unfixed file
+    log = [r["command"] for r in agent._test_log]
+    assert log[0].startswith("<repro on unfixed>") and log[-1] == "<repro on final edit>"
+    assert agent._test_log[-1]["exit"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reproduction_that_passes_on_unfixed_code_is_rejected():
+    sb = ReproSandbox(fixed_marker="return x.value")                      # "passes" already
+    agent, seen, calls = _agent([
+        _tool("set_reproduction", command="python /tmp/repro.py"),
+        ("done", [], "end_turn"),
+    ], sandbox=sb)
+    await _run(agent)
+    tool_msgs = [m["content"] for m in seen[1] if m.get("role") == "tool"]
+    assert any("REJECTED" in t and "doesn't capture the bug" in t for t in tool_msgs)
+
+
+@pytest.mark.asyncio
+async def test_final_check_sends_the_model_back_while_the_reproduction_fails():
+    wrong = "function target(x) {\n  return x.value || null;\n}"
+    sb = ReproSandbox()
+    agent, seen, calls = _agent([
+        _tool("set_reproduction", command="python /tmp/repro.py"),
+        _tool("apply_edit", new_text=wrong),
+        ("done", [], "end_turn"),                                         # final check fails
+        _tool("reset_edits", reason="still failing"),
+        _tool("apply_edit", new_text=FIXED),
+        ("done", [], "end_turn"),                                         # final check passes
+    ], sandbox=sb)
+    _, new, _, _ = await _run(agent)
+    assert new == FIXED
+    assert "still fails with your edit" in seen[3][-1]["content"]
+    finals = [r for r in agent._test_log if r["command"] == "<repro on final edit>"]
+    assert [r["exit"] for r in finals] == [1, 0]
+
+
+@pytest.mark.asyncio
+async def test_reproduce_early_nudge():
+    reads = [_tool("read_file", path="src/other.js")] * 12
+    agent, seen, calls = _agent(reads, sandbox=FakeSandbox())
+    agent._read_file = AsyncMock(return_value=("const other = 1;", "sha"))
+    await _run(agent)
+    k = fix_generation._REPRO_BY_TURN
+    assert "haven't registered a reproduction" in seen[k][-1]["content"]
