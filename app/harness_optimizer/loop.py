@@ -385,6 +385,18 @@ class Optimizer:
     async def _evaluate(self, state: RunState, budget: Budget, harness_dir: Path,
                         cases: list[str], trials: int, round0: bool = False) -> tuple[EvalResult, list[dict]]:
         todo = [c for c in cases if self.run.load_eval(self._case_key(harness_dir, trials, c)) is None]
+        batch = int(getattr(self.evaluator, "batch_size", 1) or 1)
+        if batch > 1 and todo:
+            # Batched evaluators (the fix evaluator grades a whole batch in one Modal run
+            # per trial) get cases in chunks; results are still cached per case, so resume,
+            # budget and tripwires behave as in the per-case path. Lanes don't apply: the
+            # evaluator runs a chunk's cases concurrently itself.
+            self._recent = deque(maxlen=max(1, self.cfg.health_window))
+            self._since_check = 0
+            self._health_round0 = round0 and self.cfg.pass_rate_tripwire
+            for i in range(0, len(todo), batch):
+                await self._evaluate_chunk(state, budget, harness_dir, todo[i:i + batch], trials)
+            todo = []                      # all cached now; assembled below
         by_repo: dict[str, list[str]] = {}
         for case in todo:
             by_repo.setdefault(self.cfg.case_lanes.get(case, "_default"), []).append(case)
@@ -524,6 +536,39 @@ class Optimizer:
         self._progress(state)
         self.run.save(state)
         self._record_health(state, case, record)
+
+    async def _evaluate_chunk(self, state: RunState, budget: Budget, harness_dir: Path,
+                              chunk: list[str], trials: int) -> None:
+        held = await self._reserve(budget, self._per_case_estimate() * trials * len(chunk),
+                                   f"round {state.round}: {len(chunk)} cases x{trials}")
+        try:
+            outcome = await self.evaluator.evaluate(harness_dir, chunk, trials)
+        except ProviderFailure as exc:
+            budget.release(held, exc.cost_usd)
+            self._notify_released()
+            state.spent_usd = budget.spent_usd
+            raise
+        except BaseException:
+            budget.release(held, 0.0)
+            self._notify_released()
+            raise
+        budget.release(held, outcome.cost_usd)
+        self._notify_released()
+        state.spent_usd = budget.spent_usd
+        stats = getattr(self, "_cost_stats", None)
+        for case in chunk:
+            record = {"case": asdict(outcome.result.per_case[case]),
+                      "trajectories": [t for t in outcome.trajectories if t.get("instance_id") == case]}
+            self.run.save_eval(self._case_key(harness_dir, trials, case), record)
+            if stats is not None and record["case"]["trials"]:
+                stats[0] += record["case"]["cost_usd"] / record["case"]["trials"]
+                stats[1] += 1
+            sess = state.timing.get("sessions")
+            if sess:
+                sess[-1]["replays"] = sess[-1].get("replays", 0) + record["case"]["trials"]
+            self._record_health(state, case, record)
+        self._progress(state)
+        self.run.save(state)
 
     def _eval_ref(self, harness_dir: Path, trials: int) -> dict:
         return {"hash": candidates.content_hash(harness_dir), "trials": trials,

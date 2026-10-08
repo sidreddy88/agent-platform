@@ -84,6 +84,10 @@ def modal_grade(predictions: list[dict], run_id: str, workdir: Path | None = Non
 
 
 class FixReplayEvaluator:
+    # The loop hands batched evaluators chunks of cases; each trial of a chunk is
+    # graded in one Modal run (per-case grading took ~1 min per case-trial).
+    batch_size = 25
+
     def __init__(self, saved_diagnoses: dict[str, dict] | None = None,
                  instances_path: Path = FULL, parallel: int = 5,
                  run_case: RunCase | None = None, grade: Grade | None = None,

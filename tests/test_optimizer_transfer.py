@@ -54,3 +54,36 @@ def test_transfer_check_is_counted_in_the_budget(tmp_path):
     opt = _opt(tmp_path, SecondModel(n_inc=6, n_cand=6))
     state = asyncio.run(opt.run_until_stopped())
     assert abs(state.spent_usd - (4 * 2 * 1.0 + 4 * 1 * 0.6 + 2 * 0.5)) < 1e-6
+
+
+class BatchEvaluator:
+    """Declares batch_size; records the chunks it was called with."""
+    batch_size = 3
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+
+    async def evaluate(self, harness_dir, case_ids, trials):
+        self.calls.append(list(case_ids))
+        terse = "TERSE" in (Path(harness_dir) / "log_context_missing.prompt").read_text()
+        per = {c: CaseResult(trials, trials, 0, (0.6 if terse else 1.0) * trials, ["PASS"] * trials)
+               for c in case_ids}
+        trajs = [{"instance_id": c, "verdict": "PASS", "steps": [{"name": "read_file", "input": {}, "output": "x"}]}
+                 for c in case_ids]
+        return EvalOutcome(EvalResult(per), sum(cr.cost_usd for cr in per.values()), trajs)
+
+
+def test_batched_evaluator_gets_chunks_and_results_are_cached_per_case(tmp_path):
+    ev = BatchEvaluator()
+    cfg = OptimizerConfig(evolve_cases=CASES, guard_cases=GUARDS, budget_usd=100.0, max_rounds=1)
+    opt = Optimizer(tmp_path / "run", BASE, cfg, ev, terse_proposer(), accept_all, PATTERNS)
+    state = asyncio.run(opt.run_until_stopped())
+    n = len(CASES + GUARDS)
+    assert all(len(c) <= 3 for c in ev.calls)
+    assert sum(len(c) for c in ev.calls) == 2 * n                # round 0 + one candidate, no repeats
+    assert state.phase == "done"
+    again = Optimizer(tmp_path / "run", BASE, cfg, ev, terse_proposer(), accept_all, PATTERNS)
+    before = len(ev.calls)
+    asyncio.run(again._evaluate(state, __import__("app.harness_optimizer.budget", fromlist=["Budget"]).Budget(100.0),
+                                tmp_path / "run" / "incumbent", CASES + GUARDS, 1))
+    assert len(ev.calls) == before                                # served from the per-case cache

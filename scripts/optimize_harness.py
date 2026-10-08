@@ -293,6 +293,9 @@ def main() -> int:
             # Phase D: compare cost only where both versions resolved every trial, and
             # keep in-band positive candidates as near misses for the proposer.
             cfg.acceptance = {**cfg.acceptance, "cost_on_shared_successes": True, "near_miss_fraction": 0.5}
+            # In band, a saving must beat measured cost noise: the phase E smoke run
+            # accepted a candidate for being 0.6% cheaper with the band off.
+            cfg.cost_band = True
             if args.transfer_model:
                 pool = sorted(cfg.evolve_cases + cfg.guard_cases)
                 n = min(args.transfer_cases, len(pool))
