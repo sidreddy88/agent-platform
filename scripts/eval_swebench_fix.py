@@ -178,9 +178,24 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None)
         # once. Shares DiagnosisAgent's cache (keyed by repo and pinned SHA).
         agent._code_graph = await _pinned_graph(owner, repo, pinned)
         agent._llm = llm_gateway.get_llm_service_for("fix")
-        with cost_meter.metered() as m:
-            t0 = time.monotonic()
-            result, steps = await agent.fix_with_steps(incident, patch_only=True)
+        sandbox = None
+        if os.environ.get("FIX_TEST_LOOP") == "1":
+            # The same SWE-bench image the harness grades in, network blocked. A case
+            # whose sandbox won't start is an error, not a silent run without tests.
+            from app.services.test_sandbox import ModalTestSandbox, swebench_image
+            try:
+                sandbox = await ModalTestSandbox(swebench_image(instance["instance_id"])).start()
+            except Exception as exc:
+                rec["fix"] = {"error": f"test sandbox failed to start: {exc}"}
+                return rec
+            agent._sandbox = sandbox
+        try:
+            with cost_meter.metered() as m:
+                t0 = time.monotonic()
+                result, steps = await agent.fix_with_steps(incident, patch_only=True)
+        finally:
+            if sandbox is not None:
+                await sandbox.close()
         patch = _git_diff(pinned.local_path, result.patched_files) if result.patched_files else ""
         rec["fix"] = {
             "target_file": result.target_file, "target_function": result.target_function,
@@ -188,6 +203,7 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None)
             "patch_lines": patch.count("\n"), "steps": steps,
             "cost_usd": m.summary()["cost_usd"], "seconds": round(time.monotonic() - t0, 1),
             "meter": m.summary(),
+            "test_runs": list(getattr(agent, "_test_log", []) or []),
         }
         rec["model_patch"] = patch
         return rec
@@ -248,6 +264,9 @@ def main() -> int:
     ap.add_argument("--run", required=True, help="run name: writes runs/fix/<run>/")
     ap.add_argument("--diagnoses-from", help="reuse the full diagnoses saved by this earlier run")
     ap.add_argument("--fix-model", help="LiteLLM model id for the fix task (sets LLM_MODEL_FIX)")
+    ap.add_argument("--test-loop", action="store_true",
+                    help="give the fix agent a sandbox (the case's SWE-bench image on Modal, no network) "
+                         "to reproduce the bug and run tests (sets FIX_TEST_LOOP=1)")
     ap.add_argument("--no-self-critique", action="store_true",
                     help="skip the Haiku self-critique (sets FIX_SELF_CRITIQUE=off); on SWE-bench it was "
                          "no better than chance, and tests are the verifier")
@@ -272,6 +291,8 @@ def main() -> int:
         os.environ["LLM_MODEL_FIX"] = args.fix_model
     if args.no_self_critique:
         os.environ["FIX_SELF_CRITIQUE"] = "off"
+    if args.test_loop:
+        os.environ["FIX_TEST_LOOP"] = "1"
     if args.fix_max_tokens:
         os.environ["LLM_MAX_TOKENS_FIX"] = str(args.fix_max_tokens)
     if args.blast_radius_profile:

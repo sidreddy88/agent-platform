@@ -16,11 +16,11 @@ Output (FixResult):
 """
 from __future__ import annotations
 
-import os
-
 import difflib
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -30,6 +30,7 @@ from app.models.events import IncidentState
 from app.services.blast_radius import BlastRadiusGuard, protected_patterns_for
 from app.services.github import GitHubError, GitHubService
 from app.services.ipi_guard import scan_for_injection, wrap_untrusted
+from app.services.test_sandbox import refused_command
 from app.services.llm import HAIKU_MODEL, LLMService
 from app.services.repo import LocalRepoService
 from app.services.session_logger import session_logger
@@ -62,6 +63,63 @@ _NO_EDIT_MARKER = "NO_EDIT"
 # and searched for all 20 turns without editing (sphinx-10614).
 _MAX_FIX_TURNS = 20
 _BUDGET_WARNING_TURNS = 3
+
+# With a test sandbox attached (offline evals: scripts/eval_swebench_fix.py
+# --test-loop), the loop also reproduces the bug and runs tests, which takes turns.
+_MAX_FIX_TURNS_TEST_LOOP = 36
+# Turns left when the test loop is told to stop exploring and edit, so there's room to test.
+_TEST_LOOP_EDIT_BY_TURNS = 14
+
+_RUN_COMMAND_TOOL = {
+    "name": "run_command",
+    "description": (
+        "Run a shell command in the repository's own environment (repo root, its Python and test "
+        "dependencies installed, no network). Your current edits to the target file are written "
+        "into the repository before every command, so you test exactly what you would submit. "
+        "Use it to reproduce the bug with a short script (e.g. write it with "
+        "`cat > /tmp/repro.py <<'EOF' ... EOF` then `python /tmp/repro.py`) and to run existing tests "
+        "(e.g. `python -m pytest path/to/test_file.py -x -q`). Output is trimmed to the start and end."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "Shell command, run with bash in the repo root"},
+            "timeout": {"type": "integer", "description": "Seconds, default 180, max 600"},
+        },
+        "required": ["command"],
+    },
+}
+
+_RESET_EDITS_TOOL = {
+    "name": "reset_edits",
+    "description": (
+        "Discard every edit recorded so far (apply_edit and patch_line), returning the target file to "
+        "its original content, so you can make a different fix. Use it when your tests show the "
+        "current approach is wrong."
+    ),
+    "input_schema": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]},
+}
+
+_TEST_LOOP_PROMPT = (
+    "\nTEST LOOP (you can run code):\n"
+    "You have run_command, which runs in this repository's own environment with your current edits "
+    "applied. Work like this:\n"
+    "1. Reproduce first: write a minimal script from the issue's own example and run it BEFORE editing. "
+    "It should show the bug (wrong output or an error). If it doesn't, you haven't understood the bug yet.\n"
+    "2. Make the fix with apply_edit / patch_line.\n"
+    "3. Rerun the reproduction: it must now show the correct behaviour, not just stop crashing.\n"
+    "4. Run the existing tests closest to the code you changed (the matching tests/ file or module) and "
+    "make sure you didn't break anything. If you changed a function's signature or behaviour, check its "
+    "callers and sibling methods too.\n"
+    "5. Decide: all good -> end your turn. Reproduction still wrong -> refine with patch_line, or "
+    "reset_edits and try another approach. Existing tests broke -> fix the side effect.\n"
+    "Rules: there is no network (don't pip install or fetch anything). Don't edit test files to make "
+    "them pass. Only the target file's edits are submitted; scratch files you create are not. "
+    "Don't look for the answer outside the repository's current code: no git history (git log/show/"
+    "blame), no caches, no other installed copies, no whole-filesystem searches; such commands are "
+    "refused. Use read_file to read code; use run_command to run things. Reproduce within your first "
+    "few turns, leave enough turns to edit and test, and after every edit rerun your reproduction.\n"
+)
 
 # Responses cut off at the output limit in a row before the loop gives up. A cut-off
 # response has no usable tool call; on reasoning models the limit is usually spent on
@@ -248,6 +306,9 @@ class FixResult:
     # path -> full new file content. Only set by fix_with_steps(patch_only=True),
     # which stops before the sandbox, the Issue and the PR (offline evals).
     patched_files: dict[str, str] = field(default_factory=dict)
+    # run_command / reset_edits calls from the test loop (offline evals only):
+    # iteration, command, exit code, whether an edit existed yet, seconds.
+    test_runs: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +600,14 @@ class FixGenerationAgent(BaseAgent):
             logger.error("[FixGen] LLM error: %s", exc)
             return _fail(f"LLM error: {exc}", branch=branch_name)
 
+        test_runs = list(getattr(self, "_test_log", []) or [])
+        if test_runs:
+            runs = [r for r in test_runs if r["command"] != "<reset_edits>"]
+            before = sum(1 for r in runs if not r["edited"])
+            resets = len(test_runs) - len(runs)
+            last = runs[-1]["exit"] if runs else None
+            steps.append(f"✓ Test loop: {len(runs)} commands ({before} before the first edit), "
+                         f"{resets} resets, last exit {last}")
         if not old_function and not patches:
             steps.append(f"✗ LLM could not locate {function_name} in the file")
             return _fail(f"{function_name} not found in {file_path}", branch=branch_name)
@@ -628,6 +697,7 @@ class FixGenerationAgent(BaseAgent):
                 files_changed=[file_path] if new_content != content else [],
                 target_file=file_path, target_function=function_name,
                 patched_files={file_path: new_content} if new_content != content else {},
+                test_runs=test_runs,
             ), steps
 
         # ── 3d. Sandbox validation with retry ─────────────────────────
@@ -1969,6 +2039,13 @@ class FixGenerationAgent(BaseAgent):
             "Call end_turn only when the file would pass your review."
         )
 
+        sandbox = getattr(self, "_sandbox", None)
+        self._test_log = []
+        max_turns = _MAX_FIX_TURNS_TEST_LOOP if sandbox is not None else _MAX_FIX_TURNS
+        last_edit_iter = last_run_iter = -1
+        verify_nudged = False
+        if sandbox is not None:
+            initial_prompt += _TEST_LOOP_PROMPT
         messages: list[dict] = [{"role": "user", "content": initial_prompt}]
         edit_result: dict | None = None
         patch_calls: list[dict] = []
@@ -1985,8 +2062,8 @@ class FixGenerationAgent(BaseAgent):
         # exploring files this loop has no ability to edit (see additional_fix_section
         # comment). Legitimate single-file work — read tests/callers, patch, then scan
         # for adjacent issues — can still reasonably need more than 14 turns.
-        for iteration in range(_MAX_FIX_TURNS):
-            if (iteration == _MAX_FIX_TURNS - _BUDGET_WARNING_TURNS
+        for iteration in range(max_turns):
+            if (iteration == max_turns - _BUDGET_WARNING_TURNS
                     and not edit_result and not patch_calls):
                 logger.warning("[FixGen] Agentic: %d turns left and no edit yet — warning the model",
                                _BUDGET_WARNING_TURNS)
@@ -1996,14 +2073,22 @@ class FixGenerationAgent(BaseAgent):
                     "old_snippet copied verbatim from the file. If you have confirmed this file "
                     f"has nothing to fix, reply with exactly '{_NO_EDIT_MARKER}: <one-sentence reason>'."
                 )})
+            if (sandbox is not None and iteration == max_turns - _TEST_LOOP_EDIT_BY_TURNS
+                    and not edit_result and not patch_calls):
+                logger.warning("[FixGen] Agentic: %d turns left and no edit yet (test loop)", _TEST_LOOP_EDIT_BY_TURNS)
+                messages.append({"role": "user", "content": (
+                    f"You have {_TEST_LOOP_EDIT_BY_TURNS} turns left and no edit yet. Make your fix now "
+                    "with apply_edit or patch_line, then use the remaining turns to rerun your reproduction "
+                    "and the closest existing tests."
+                )})
             if iteration > 0 and iteration % 3 == 0:
                 messages, pruned = _prune_tool_results(messages)
                 _total_pruned_chars += pruned
                 if pruned:
                     logger.debug("[FixGen] State pruning at iteration %d: removed %d chars", iteration, pruned)
-            if (iteration == _MAX_FIX_TURNS - 1 and not edit_result and not patch_calls):
+            if (iteration == max_turns - 1 and not edit_result and not patch_calls):
                 force_edit = True
-            tools = self._FIX_TOOLS
+            tools = self._FIX_TOOLS + ([_RUN_COMMAND_TOOL, _RESET_EDITS_TOOL] if sandbox is not None else [])
             call_kwargs = {}
             forced_turn = force_edit
             if force_edit:
@@ -2065,6 +2150,19 @@ class FixGenerationAgent(BaseAgent):
                         continue
                     else:
                         logger.warning("[FixGen] Agentic: LLM stopped without apply_edit (iteration %d)", iteration)
+                elif (sandbox is not None and last_run_iter < last_edit_iter and not verify_nudged
+                      and iteration < max_turns - 1):
+                    # It edited but never ran anything afterwards (smoke run 2026-10-08).
+                    verify_nudged = True
+                    logger.info("[FixGen] Agentic: edit not tested yet (iteration %d) — asking to verify", iteration)
+                    if text:
+                        messages.append({"role": "assistant", "content": text})
+                    messages.append({"role": "user", "content": (
+                        "You haven't run anything since your last edit. Before finishing, rerun your "
+                        "reproduction and the closest existing tests with run_command, then refine or "
+                        "end your turn."
+                    )})
+                    continue
                 break
 
             messages.append({
@@ -2096,6 +2194,7 @@ class FixGenerationAgent(BaseAgent):
                     else:
                         if edit_result is None:
                             edit_result = tc["input"]
+                            last_edit_iter = iteration
                         result = (
                             "✓ Primary function fix recorded. "
                             "Now scan the ENTIRE file for adjacent issues — wrong model IDs, "
@@ -2114,6 +2213,7 @@ class FixGenerationAgent(BaseAgent):
                         logger.info("[FixGen] patch_line rejected at call: snippet not in %s", file_path)
                     else:
                         patch_calls.append(tc)
+                        last_edit_iter = iteration
                         snip = old_snip[:60].replace("\n", "↵")
                         result = f"✓ patch_line recorded ({snip}). Continue scanning for more issues or call end_turn."
                 elif name == "read_file":
@@ -2154,6 +2254,39 @@ class FixGenerationAgent(BaseAgent):
                     except Exception as exc:
                         result = f"Call graph lookup failed: {exc}"
                     logger.debug("[FixGen] find_callers: %s → %d results", fn_name, len(callers) if "callers" in dir() else 0)
+                elif name == "run_command" and sandbox is not None and refused_command(
+                        str(tc["input"].get("command", ""))):
+                    cmd = str(tc["input"].get("command", ""))
+                    self._test_log.append({"iteration": iteration, "command": cmd[:300], "exit": "refused",
+                                           "edited": bool(edit_result or patch_calls), "seconds": 0})
+                    logger.info("[FixGen] run_command refused (iteration %d): %s", iteration, cmd[:120])
+                    result = refused_command(cmd)
+                elif name == "run_command" and sandbox is not None:
+                    cmd = str(tc["input"].get("command", ""))
+                    last_run_iter = iteration
+                    current = _working_content(content, extracted_old, edit_result, patch_calls)
+                    t_run = time.monotonic()
+                    try:
+                        await sandbox.write_file(file_path, current)
+                        code, out = await sandbox.run(cmd, timeout=tc["input"].get("timeout") or 180)
+                    except Exception as exc:
+                        logger.warning("[FixGen] run_command sandbox error: %r", exc, exc_info=True)
+                        code, out = -1, f"[sandbox error: {exc!r}]"
+                    self._test_log.append({
+                        "iteration": iteration, "command": cmd[:300], "exit": code,
+                        "edited": bool(edit_result or patch_calls),
+                        "seconds": round(time.monotonic() - t_run, 1),
+                    })
+                    logger.info("[FixGen] run_command (iteration %d, edited=%s) exit=%s: %s",
+                                iteration, bool(edit_result or patch_calls), code, cmd[:120])
+                    result = wrap_untrusted(f"exit code: {code}\n{out}", source="test-sandbox")
+                elif name == "reset_edits" and sandbox is not None:
+                    edit_result, patch_calls = None, []
+                    last_edit_iter = iteration
+                    self._test_log.append({"iteration": iteration, "command": "<reset_edits>",
+                                           "exit": None, "edited": False, "seconds": 0})
+                    logger.info("[FixGen] reset_edits: %s", str(tc["input"].get("reason", ""))[:200])
+                    result = "✓ All edits discarded; the target file is back to its original content."
                 elif name == "no_edit":
                     chose_no_edit = True
                     logger.info("[FixGen] Agentic: model chose no edit: %s",
