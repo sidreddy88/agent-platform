@@ -4,11 +4,11 @@ from app.services.llm_gateway import llm_gateway
 
 
 def test_env_override_replaces_the_routed_model(monkeypatch):
-    _, routed, _ = llm_gateway._get_routing("diagnosis")
+    _, routed, routed_max_tokens = llm_gateway._get_routing("diagnosis")
     monkeypatch.setenv("LLM_MODEL_DIAGNOSIS", "together_ai/Qwen/Qwen3-Coder-Next-FP8")
     provider, model, max_tokens = llm_gateway._get_routing("diagnosis")
     assert model == "together_ai/Qwen/Qwen3-Coder-Next-FP8" and provider == "together_ai"
-    assert max_tokens == 8192                               # the rest of the routing entry is kept
+    assert max_tokens == routed_max_tokens                  # the rest of the routing entry is kept
     monkeypatch.delenv("LLM_MODEL_DIAGNOSIS")
     assert llm_gateway._get_routing("diagnosis")[1] == routed
 
