@@ -426,3 +426,33 @@ class TestMaxTokensOverride:
         monkeypatch.setenv("LLM_MAX_TOKENS_FIX", "32768")
         _, _, overridden = gw._get_routing("fix")
         assert overridden == 32768 and overridden != default
+
+
+class TestCompleteStopReason:
+    """complete() (the ReAct path DiagnosisAgent uses) never checked finish_reason:
+    on 30 SWE-bench cases at max_tokens=8192, DeepSeek replies were cut off 73 times."""
+
+    @pytest.mark.asyncio
+    async def test_length_is_reported_and_logged(self, caplog):
+        usage = MagicMock(prompt_tokens=10, completion_tokens=8192, prompt_tokens_details=None,
+                          cache_creation_input_tokens=0)
+        message = MagicMock(content="Thought: a very long thought that never finishes")
+        resp = MagicMock(choices=[MagicMock(message=message, finish_reason="length")], usage=usage)
+        with patch("litellm.acompletion", new=AsyncMock(return_value=resp)):
+            out = await LiteLLMProvider().complete([{"role": "user", "content": "x"}], model="m", max_tokens=8192)
+        assert out.stop_reason == "max_tokens"
+        assert "cut off at max_tokens=8192" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_normal_stop_is_end_turn(self):
+        usage = MagicMock(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None,
+                          cache_creation_input_tokens=0)
+        resp = MagicMock(choices=[MagicMock(message=MagicMock(content="ok"), finish_reason="stop")], usage=usage)
+        with patch("litellm.acompletion", new=AsyncMock(return_value=resp)):
+            out = await LiteLLMProvider().complete([{"role": "user", "content": "x"}], model="m", max_tokens=100)
+        assert out.stop_reason == "end_turn"
+
+
+def test_diagnosis_output_cap_leaves_room_for_reasoning():
+    _, _, max_tokens = LLMGateway()._get_routing("diagnosis")
+    assert max_tokens >= 32768
