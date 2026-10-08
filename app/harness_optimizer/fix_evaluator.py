@@ -164,7 +164,10 @@ class FixReplayEvaluator:
                     "detail": OUTCOME_TEXT[outcome],
                     "steps": fix.get("trajectory_steps") or [],
                     "self_feedback": fix.get("self_feedback"),
-                    "llm_calls": [None] * int((rec["_meter"] or {}).get("calls") or 0),
+                    # No per-call records (the fix loop doesn't capture prompt segments), so
+                    # cost-by-source analysis skips these; the turn count is kept separately.
+                    "llm_calls": [],
+                    "turns": int((rec["_meter"] or {}).get("calls") or 0),
                     "cost": rec["_meter"],
                 })
                 if self.on_trial is not None:

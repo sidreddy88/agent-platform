@@ -69,3 +69,19 @@ async def test_infrastructure_error_stops_the_evaluation():
     ev = _evaluator({"a": "error"}, {}, [])
     with pytest.raises(ProviderFailure):
         await ev.evaluate(Path("/cand"), ["a"], trials=1)
+
+
+@pytest.mark.asyncio
+async def test_evaluator_trajectories_feed_the_evidence_builder():
+    """The smoke run crashed here: llm_calls held None placeholders, which the
+    cost-by-source analysis indexes. Build evidence from the real record shape."""
+    from app.harness_optimizer import evidence, profiles
+
+    ev = _evaluator({"a": "patch", "b": "none"}, {"a": True}, [])
+    out = await ev.evaluate(Path("/cand"), ["a", "b"], trials=1)
+    profiles.use("fix")
+    try:
+        text = evidence.build(out.result, out.trajectories)
+    finally:
+        profiles.use("diagnosis")
+    assert "Graded 2 fix runs." in text and "Failing trajectory: b" in text

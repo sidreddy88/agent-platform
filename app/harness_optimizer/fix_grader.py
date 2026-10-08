@@ -59,7 +59,7 @@ def grade(rec: dict) -> Grade:
 
     g = Grade(
         instance_id=rec.get("instance_id", "?"), trial=rec.get("trial"), verdict=rec.get("verdict", "?"),
-        turns=len(rec.get("llm_calls") or []) or len(steps),
+        turns=rec.get("turns") or len(rec.get("llm_calls") or []) or len(steps),
         cost_usd=float((rec.get("cost") or {}).get("cost_usd") or 0.0),
         tool_calls=dict(Counter(n for n, _ in outs)),
         edits_recorded=recorded, edits_rejected=len(rejected), repeated_rejections=repeated,
