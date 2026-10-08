@@ -69,6 +69,13 @@ _BUDGET_WARNING_TURNS = 3
 _MAX_CUTOFFS = 3
 
 
+def _skills_section(harness) -> str:
+    """skills.prompt as a prompt section, only once it has a "- " bullet (it starts as a
+    header line the harness optimizer adds bullets under)."""
+    text = harness.render("skills")
+    return text + "\n" if any(line.startswith("- ") for line in text.splitlines()) else ""
+
+
 # The Haiku self-critique can be switched off (FIX_SELF_CRITIQUE=off) where tests do
 # the verifying. On 346 graded SWE-bench patches (2026-10-07) it was no better than
 # chance: flagged patches resolved 72% vs 74% unflagged, it caught 5 of 90 failures,
@@ -1945,7 +1952,7 @@ class FixGenerationAgent(BaseAgent):
             f"{harness.render('root_cause_rules')}"
             f"{harness.render('target_not_here', function_name=function_name)}"
             f"{harness.render('multi_edit_workflow')}"
-            f"{harness.render('skills')}"
+            f"{_skills_section(harness)}"
         )
 
         system = self._with_harness(harness.render("system"))

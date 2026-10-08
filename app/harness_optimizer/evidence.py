@@ -24,7 +24,6 @@ round's signals).
 """
 from __future__ import annotations
 
-from app.harness_optimizer import grader
 from app.harness_optimizer.acceptance import EvalResult
 
 
@@ -51,8 +50,10 @@ def build(result: EvalResult, trajectories: list[dict], max_failing: int = 3,
     for cid, cr in sorted(result.per_case.items()):
         lines.append(f"  {cid}: {cr.verdicts} turns={turns.get(cid, [])} cost=${cr.cost_usd:.2f}")
 
-    grades = [grader.grade(rec) for rec in trajectories]
-    lines += ["", "Trajectory checks (app/harness_optimizer/grader.py):", grader.render(grader.summarize(grades))]
+    from app.harness_optimizer import profiles
+    g_mod = profiles.active().grader
+    grades = [g_mod.grade(rec) for rec in trajectories]
+    lines += ["", f"Trajectory checks ({g_mod.__name__}):", g_mod.render(g_mod.summarize(grades))]
 
     if trajectories:
         rep = analyze(trajectories)

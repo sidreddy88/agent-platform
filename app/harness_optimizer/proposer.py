@@ -84,6 +84,11 @@ Return STRICT JSON only:
 Each "find" must occur exactly once in its file.""" % (list(COMPONENTS),)
 
 
+def _profile():
+    from app.harness_optimizer import profiles
+    return profiles.active()
+
+
 @dataclass
 class Proposal:
     component: str
@@ -106,14 +111,13 @@ def settings_table(harness_dir: Path) -> str:
     proposer reads settings as behaviour. r7's proposer never touched settings,
     even one that targeted the exact failure its evidence named."""
     import json as _json
-    from app.harness_optimizer.candidates import SETTING_BOUNDS
     raw = _json.loads((Path(harness_dir) / "settings.json").read_text())
     docs = raw.get("_doc", {})
     lines = []
     for key, value in raw.items():
         if key.startswith("_"):
             continue
-        bounds = SETTING_BOUNDS.get(key)
+        bounds = _profile().setting_bounds.get(key)
         rng = f", allowed {bounds[0]}-{bounds[1]}" if bounds else ""
         lines.append(f"- {key} = {value!r}{rng}: {docs.get(key, '(undocumented)')}")
     return "\n".join(lines)
@@ -180,8 +184,9 @@ def parse(text: str) -> Proposal:
 
 def _one(data: dict) -> Proposal:
     comp = data.get("component")
-    if comp not in COMPONENTS:
-        raise InvalidCandidate(f"component must be one of {COMPONENTS}, got {comp!r}")
+    components = _profile().components
+    if comp not in components:
+        raise InvalidCandidate(f"component must be one of {components}, got {comp!r}")
     edits = data.get("edits") or []
     if not edits or not all(isinstance(e, dict) and {"file", "find", "replace"} <= set(e) for e in edits):
         raise InvalidCandidate("edits must be a non-empty list of {file, find, replace}")
@@ -211,7 +216,7 @@ def _check(harness_dir: Path, proposal: Proposal,
         raise InvalidCandidate(f"this round must edit one of {list(allowed_components)}, "
                                f"got {proposal.component!r}")
     if allowed_components:
-        owns = COMPONENT_FILES[proposal.component]
+        owns = _profile().component_files[proposal.component]
         stray = sorted({e["file"] for e in proposal.edits if not owns(e["file"])})
         if stray:
             raise InvalidCandidate(f"component {proposal.component!r} can't edit {stray}")
@@ -222,7 +227,7 @@ async def propose_all(harness_dir: Path, evidence: str, history: str, llm: LLM,
                       feedback: str = "", allowed_components: tuple[str, ...] | None = None,
                       run_context: dict | None = None) -> list[tuple[Proposal, dict[str, str]]]:
     """Every valid candidate from one proposer call, preferred first."""
-    text = await llm(SYSTEM, build_prompt(harness_dir, evidence, history, feedback,
+    text = await llm(_profile().proposer_system, build_prompt(harness_dir, evidence, history, feedback,
                                           allowed_components, run_context))
     out, errors = [], []
     for proposal in parse_all(text):

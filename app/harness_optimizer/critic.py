@@ -133,7 +133,8 @@ async def review(diff: str, component: str, hypothesis: str, llm: LLM,
         payload += f"\n\n=== CURRENT TOOL DESCRIPTIONS ===\n{tool_descriptions[:12_000]}"
     last = ""
     for _ in range(attempts):
-        last = await llm(SYSTEM, payload)
+        from app.harness_optimizer import profiles
+        last = await llm(profiles.active().critic_system, payload)
         try:
             v = json.loads(_strip_fences(last))
         except json.JSONDecodeError:

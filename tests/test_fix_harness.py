@@ -33,7 +33,7 @@ def test_default_settings_equal_the_module_constants():
 def test_a_candidate_harness_changes_the_request(tmp_path, monkeypatch):
     cand = tmp_path / "fix"
     shutil.copytree(DEFAULT_ROOT / "fix", cand)
-    (cand / "skills.prompt").write_text("LESSONS:\n- Check sibling methods after fixing one.\n")
+    (cand / "skills.prompt").write_text("LESSONS FROM PAST FIXES (general):\n- Check sibling methods after fixing one.\n")
     (cand / "system.prompt").write_text("You fix bugs carefully.")
     monkeypatch.setenv("HARNESS_DIR_FIX", str(cand))
     calls = capture_all()["function"]["calls"]
@@ -41,5 +41,7 @@ def test_a_candidate_harness_changes_the_request(tmp_path, monkeypatch):
     assert "Check sibling methods after fixing one." in calls[0]["last"]
 
 
-def test_skills_prompt_is_empty_by_default():
-    assert load_harness("fix").render("skills") == ""
+def test_skills_header_alone_adds_nothing_to_the_prompt():
+    h = load_harness("fix")
+    assert h.render("skills").startswith("LESSONS FROM PAST FIXES")
+    assert fix_generation._skills_section(h) == ""

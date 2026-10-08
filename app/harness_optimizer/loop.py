@@ -62,7 +62,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
-from app.harness_optimizer import candidates, critic, evidence, health, proposer, report
+from app.harness_optimizer import candidates, critic, evidence, health, profiles, proposer, report
 from app.harness_optimizer.acceptance import (
     AcceptanceConfig,
     CaseResult,
@@ -152,7 +152,7 @@ class LocalPublisher:
             f"# Proposed harness edit, round {round_no}\n\n**Hypothesis:** {hypothesis}\n\n"
             f"**Decision:** {decision['reason']}\n\n"
             f"Improved: {decision['improved'] or '-'}  \nRegressed: {decision['regressed'] or '-'}\n\n"
-            f"Apply `harness.diff` to `app/agents/harness/diagnosis/` and open a PR; the "
+            f"Apply `harness.diff` to `app/agents/harness/{profiles.active().name}/` and open a PR; the "
             f"PR's gate run is the held-out-independent check.\n")
         return out
 
@@ -441,7 +441,7 @@ class Optimizer:
                 w.costs.extend([cr["cost_usd"] / cr["trials"]] * cr["trials"])
             if c in guards:
                 w.guard_verdicts.extend(cr["verdicts"])
-        baseline = {**health.BASELINE, **self.cfg.health_baseline}
+        baseline = {**profiles.active().health_baseline, **self.cfg.health_baseline}
         problems = health.check(w, round0=self._health_round0, baseline=baseline)
         h = state.health
         h["checks"] = h.get("checks", 0) + 1
@@ -538,7 +538,7 @@ class Optimizer:
         # The escalation guard gets its own noise band, from the same trial
         # pairs: did each trial ever reach an accepted submit_diagnosis? A
         # fixed 5pp was 2 trials in 34 on rounds 1-2, close to pure noise.
-        from app.harness_optimizer import grader
+        grader = profiles.active().grader
         never: dict[str, dict[int, bool]] = {}
         for t in trajs:
             never.setdefault(t["instance_id"], {})[t.get("trial")] = not grader.grade(t).accepted
@@ -662,9 +662,6 @@ class Optimizer:
             "rejected": self._rejected_ideas(),
         }
 
-    _FAMILIES = {"task_prompt": "prompt", "prompt_fragments": "prompt",
-                 "tool_descriptions": "tools", "settings": "settings"}
-
     def _allowed_components(self) -> tuple[str, ...] | None:
         """Exploration rule: if this run's last `diversity_after` judged
         candidates were all rejected, only component families none of them
@@ -676,8 +673,9 @@ class Optimizer:
         recent = mine[-n:]
         if len(recent) < n or any(e.outcome == "accepted" for e in recent):
             return None
-        tried = {self._FAMILIES.get(e.component) for e in recent}
-        allowed = tuple(c for c, fam in self._FAMILIES.items() if fam not in tried)
+        families = profiles.active().component_families
+        tried = {families.get(e.component) for e in recent}
+        allowed = tuple(c for c, fam in families.items() if fam not in tried)
         return allowed or None
 
     async def _screen(self, state: RunState, budget: Budget) -> None:

@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -41,6 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 SPLIT = ROOT / "app" / "evals" / "harness_split.json"
+FIX_SPLIT = ROOT / "app" / "evals" / "fix_harness_split.json"
 CASES = ROOT / "app" / "evals" / "swebench_verified_sample.jsonl"   # every split case, incl. the hard tier
 DEFAULT_LLM = "claude-opus-5"
 
@@ -212,6 +214,9 @@ def main() -> int:
                         help="measuring a PR's harness (the diagnosis gate): a low round-0 pass "
                              "rate is the result, not a broken run")
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--agent", choices=("diagnosis", "fix"), default="diagnosis",
+                        help="which agent's harness to evolve; fix uses app/evals/fix_harness_split.json "
+                             "and FixReplayEvaluator (resolved on the official SWE-bench harness)")
     args = parser.parse_args()
     args.rounds_given = any(a == "--rounds" or a.startswith("--rounds=") for a in sys.argv[1:])
 
@@ -220,14 +225,22 @@ def main() -> int:
 
     from dotenv import load_dotenv
 
-    from app.agents.harness import DEFAULT_ROOT
     from app.harness_optimizer.evaluator import ReplayEvaluator
     from app.harness_optimizer.loop import Optimizer
     from app.harness_optimizer.state import RunDir
 
     load_dotenv()
     run = RunDir(args.run_dir)
-    split = json.loads(SPLIT.read_text())
+    from app.harness_optimizer import profiles
+    profiles.use(args.agent)
+    if args.agent == "fix":
+        # The fix step as run 2 measured it, unless the caller overrides: DeepSeek, room
+        # for its reasoning, the library blast-radius profile, tests (not Haiku) as verifier.
+        for key, value in (("LLM_MODEL_FIX", "together_ai/deepseek-ai/DeepSeek-V4.1-Flash"),
+                           ("LLM_MAX_TOKENS_FIX", "32768"), ("BLAST_RADIUS_PROFILE", "library"),
+                           ("FIX_SELF_CRITIQUE", "off")):
+            os.environ.setdefault(key, value)
+    split = json.loads((FIX_SPLIT if args.agent == "fix" else SPLIT).read_text())
     if run.exists():
         from app.harness_optimizer.loop import OptimizerConfig
         cfg = OptimizerConfig(**run.load().config)
@@ -271,7 +284,12 @@ def main() -> int:
         cfg.pass_rate_tripwire = not args.no_pass_rate_tripwire
         if args.seed_history:
             seed_history(args.seed_history, args.run_dir)
-    opt = Optimizer(args.run_dir, args.harness or DEFAULT_ROOT / "diagnosis", cfg, ReplayEvaluator(),
+    if args.agent == "fix":
+        from app.harness_optimizer.fix_evaluator import FixReplayEvaluator
+        evaluator = FixReplayEvaluator(parallel=max(1, args.parallel or 5))
+    else:
+        evaluator = ReplayEvaluator()
+    opt = Optimizer(args.run_dir, args.harness or profiles.active().harness_root, cfg, evaluator,
                     make_llm(args.model), make_llm(args.model), critic_patterns(split))
     state = asyncio.run(opt.run_until_stopped())
     print(f"\nstopped at round {state.round}, phase {state.phase}: {state.stop_reason}")
