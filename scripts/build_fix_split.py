@@ -33,7 +33,7 @@ RUN2 = ROOT / "runs" / "fix" / "all500-run2"
 REMEASURE = [ROOT / "runs" / "fix" / "remeasure-a", ROOT / "runs" / "fix" / "remeasure-b"]
 OUT = ROOT / "app" / "evals" / "fix_harness_split.json"
 HELDOUT_REPOS = ["pydata/xarray", "sphinx-doc/sphinx"]
-N_HARD = 30
+N_HARD = 1000                      # all systematic failures (re-measurement: the fix step is near-deterministic)
 N_GUARDS = 6
 
 
