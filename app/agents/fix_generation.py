@@ -16,6 +16,8 @@ Output (FixResult):
 """
 from __future__ import annotations
 
+import os
+
 import difflib
 import logging
 import re
@@ -65,6 +67,15 @@ _BUDGET_WARNING_TURNS = 3
 # response has no usable tool call; on reasoning models the limit is usually spent on
 # hidden reasoning, so the model is told to keep it short and edit.
 _MAX_CUTOFFS = 3
+
+
+# The Haiku self-critique can be switched off (FIX_SELF_CRITIQUE=off) where tests do
+# the verifying. On 346 graded SWE-bench patches (2026-10-07) it was no better than
+# chance: flagged patches resolved 72% vs 74% unflagged, it caught 5 of 90 failures,
+# and its alternate-frame retry never fired (no stack frames). It stays on by default:
+# it was built for production incidents with stack traces.
+def _self_critique_enabled() -> bool:
+    return os.environ.get("FIX_SELF_CRITIQUE", "on").strip().lower() not in ("off", "0", "false", "no")
 
 # Asking in text wasn't enough: on 66 held-out cases DeepSeek ignored the
 # no-edit nudge 13 times of 17 and never answered NO_EDIT. So the nudge turn,
@@ -555,10 +566,14 @@ class FixGenerationAgent(BaseAgent):
         steps.append(f"✓ Blast radius OK ({len(files_to_touch)} files, +{additions}/-{deletions} lines)")
 
         # ── 3c. Self-critique — verify fix addresses root cause ────────
-        critique_old, critique_new = self._critique_content(old_function, new_function, patches)
-        critique = await self._critique_fix(critique_old, critique_new, incident, file_path)
-        steps.append(f"✓ Self-critique: {critique[:120]}")
-        logger.info("[FixGen] Self-critique: %s", critique[:200])
+        if _self_critique_enabled():
+            critique_old, critique_new = self._critique_content(old_function, new_function, patches)
+            critique = await self._critique_fix(critique_old, critique_new, incident, file_path)
+            steps.append(f"✓ Self-critique: {critique[:120]}")
+            logger.info("[FixGen] Self-critique: %s", critique[:200])
+        else:
+            critique = "Self-critique skipped (FIX_SELF_CRITIQUE=off)."
+            steps.append("– Self-critique skipped (FIX_SELF_CRITIQUE=off)")
 
         # ── 3c-retry. If critique says LIKELY WRONG, switch to alternate frame ──
         if "LIKELY WRONG" in critique.upper():
