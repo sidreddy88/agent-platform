@@ -166,6 +166,9 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None)
             "meter": m.summary(), "reused": saved_diagnosis is not None,
             "full": _jsonable(dataclasses.asdict(diagnosis)),
         }
+        if os.environ.get("EVAL_DIAGNOSIS_ONLY") == "1":
+            rec["fix"] = {"skipped": "diagnosis only"}
+            return rec
         if rec["diagnosis"]["verdict"] != "PASS":
             rec["fix"] = {"skipped": "diagnosis did not localize"}
             return rec
@@ -248,6 +251,8 @@ def main() -> int:
     ap.add_argument("--run", required=True, help="run name: writes runs/fix/<run>/")
     ap.add_argument("--diagnoses-from", help="reuse the full diagnoses saved by this earlier run")
     ap.add_argument("--fix-model", help="LiteLLM model id for the fix task (sets LLM_MODEL_FIX)")
+    ap.add_argument("--diagnosis-only", action="store_true",
+                    help="run and grade diagnosis only, skip the fix step (sets EVAL_DIAGNOSIS_ONLY=1)")
     ap.add_argument("--no-self-critique", action="store_true",
                     help="skip the Haiku self-critique (sets FIX_SELF_CRITIQUE=off); on SWE-bench it was "
                          "no better than chance, and tests are the verifier")
@@ -272,6 +277,8 @@ def main() -> int:
         os.environ["LLM_MODEL_FIX"] = args.fix_model
     if args.no_self_critique:
         os.environ["FIX_SELF_CRITIQUE"] = "off"
+    if args.diagnosis_only:
+        os.environ["EVAL_DIAGNOSIS_ONLY"] = "1"
     if args.fix_max_tokens:
         os.environ["LLM_MAX_TOKENS_FIX"] = str(args.fix_max_tokens)
     if args.blast_radius_profile:
