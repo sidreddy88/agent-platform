@@ -1,0 +1,12 @@
+{
+ "_doc": {
+  "max_fix_turns": "fix loop turn budget (no test sandbox)",
+  "budget_warning_turns": "turns before the end when a model with no edit yet is told to make one",
+  "no_edit_nudges": "times a model that ends its turn without an edit is pushed back",
+  "max_cutoffs": "responses cut off at the output limit in a row before the loop gives up"
+ },
+ "max_fix_turns": 20,
+ "budget_warning_turns": 3,
+ "no_edit_nudges": 1,
+ "max_cutoffs": 3
+}

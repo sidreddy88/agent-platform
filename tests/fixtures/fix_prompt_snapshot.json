@@ -1,0 +1,106 @@
+{
+ "function": {
+  "calls": [
+   {
+    "system": "You are a senior software engineer fixing production bugs. Read the code carefully, explore related files as needed, then call apply_edit with the minimum precise change. After apply_edit, review the file as you would in a code review \u2014 apply the same quality bar you'd hold a junior engineer to. Call patch_line for every issue you'd flag. Always fix root causes \u2014 never symptoms. Call end_turn only when the file would pass your review.",
+    "last": "Fix this production bug.\n\nERROR TYPE: TypeError\nERROR: d\nROOT CAUSE: None\nTARGET FUNCTION: target in src/target.js\n\n## TIER 1 \u2014 Code you are changing (most important)\nFILE: src/target.js\nfunction target(x) {\n  return x.value;\n}\n\n\nCURRENT FUNCTION (do NOT reproduce this in apply_edit \u2014 it is already known):\n<OLD_REFERENCE>\nfunction target(x) {\n  return x.value;\n}\n</OLD_REFERENCE>\n\nCall apply_edit(new_text=<your fixed version>) when ready.\nROOT CAUSE RULES (violation = wrong fix):\n1. Fix the cause, not the symptom. No null guards / optional chaining / try-catch at crash sites.\n2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value \u2014 every return path must include the complete structure callers depend on.\n3. The fix must handle ALL invalid inputs, not just the one that triggered this error.\n4. No unrelated cleanup, logging, or comments.\n5. Never invent a new function, route, or endpoint that doesn't already exist as your 'fix' for an existing bug. Find and edit the REAL vulnerable code. If you cannot locate it in this file after actually searching, make no edit and call end_turn \u2014 that is correct; fabricating unrelated new code is not.\n6. When validating that input matches an expected narrow shape (e.g. a numeric ID), reason about what the ACTUAL valid shape looks like \u2014 don't reach for a loose type-coercion check out of habit. `isNaN(Number(x))` looks like numeric validation but isn't strict: Number('1e5') is 100000 (scientific notation), Number('0x1A') is 26 (hex), Number('  5  ') trims whitespace, Number('') is 0 \u2014 all pass as 'valid numbers' even though none of them are the plain digit string the field actually expects. If the value should be a plain positive integer, validate that exact shape (e.g. a digits-only regex, or Number.isInteger() plus a range check \u2014 whichever fits the actual domain) instead of trusting Number()'s permissive coercion to reject what it won't.\n\nIF THE TARGET FUNCTION IS NOT IN THIS FILE:\nThe function 'target' may be defined in a different file than the one shown above (e.g. it may be a backend service called by this frontend component, or a helper in a sibling directory). If you cannot find it here:\n1. Use search_code to search for 'target' \u2014 this will find where it is actually defined.\n2. Use read_file on the correct file.\n3. Apply your fix there using patch_line or apply_edit.\nDo not spin in place \u2014 if the function is not here, find where it is.\n\nMULTI-EDIT WORKFLOW:\n1. Call apply_edit or patch_line ONCE for the primary function fix.\n2. After the fix, review the file as a senior engineer doing code review.\n   Fix every issue you would flag \u2014 not just the primary bug.\n3. Call patch_line for each additional issue found (can call multiple times).\n4. Only call end_turn when ALL issues in the file are addressed.\n",
+    "tools": [
+     [
+      "read_file",
+      "Read any file from the repository. Use this to understand imports, callers, type definitions, or any related code before writing the fix."
+     ],
+     [
+      "search_code",
+      "Search for a symbol or string across the repository. Returns matching file paths."
+     ],
+     [
+      "find_callers",
+      "Query the call graph to find every function that calls the target function. Use this BEFORE generating a fix to understand the blast radius \u2014 if callers exist, include updates to them in the same patch when needed. Returns file paths, caller function names, and line numbers. Returns an empty list if the function has no known callers or is not in the index."
+     ],
+     [
+      "apply_edit",
+      "Replace the primary target function with the fixed version. If the old function text was pre-extracted, only supply new_text. If not pre-extracted, supply both old_text (verbatim from file) and new_text. Call this ONCE for the main function fix."
+     ],
+     [
+      "patch_line",
+      "Make a targeted replacement anywhere in the file \u2014 for issues OUTSIDE the primary function: wrong model IDs, missing error handling, stale comments, adjacent bugs, etc.\nRules for old_snippet:\n- Copy EXACT verbatim text from the file (1\u20135 lines). Short and unique.\n- Do NOT use this to replace the primary function \u2014 use apply_edit for that.\nYou can call this multiple times for different issues in the file."
+     ],
+     [
+      "final_verdict",
+      "OPTIONAL last call \u2014 emit your self-assessed verdict on the fix you just made. Call this AFTER apply_edit + any patch_line calls, RIGHT BEFORE end_turn. If you skip it, the runtime defaults to confidence=0.75, escalate=false. Use confidence < 0.70 OR escalate=true when you're unsure: a shaky fix opens a human approval gate instead of a PR. Be honest \u2014 escalation is correct, guessing is not."
+     ]
+    ]
+   },
+   {
+    "system": "You are a senior software engineer fixing production bugs. Read the code carefully, explore related files as needed, then call apply_edit with the minimum precise change. After apply_edit, review the file as you would in a code review \u2014 apply the same quality bar you'd hold a junior engineer to. Call patch_line for every issue you'd flag. Always fix root causes \u2014 never symptoms. Call end_turn only when the file would pass your review.",
+    "last": "You ended your turn without calling apply_edit or patch_line, so no change has been recorded. If you worked out a fix (including one you described in text above), make it now: call apply_edit, or patch_line with old_snippet copied verbatim from the file. If you have confirmed this file has nothing to fix, call no_edit with the reason.",
+    "tools": [
+     [
+      "apply_edit",
+      "Replace the primary target function with the fixed version. If the old function text was pre-extracted, only supply new_text. If not pre-extracted, supply both old_text (verbatim from file) and new_text. Call this ONCE for the main function fix."
+     ],
+     [
+      "patch_line",
+      "Make a targeted replacement anywhere in the file \u2014 for issues OUTSIDE the primary function: wrong model IDs, missing error handling, stale comments, adjacent bugs, etc.\nRules for old_snippet:\n- Copy EXACT verbatim text from the file (1\u20135 lines). Short and unique.\n- Do NOT use this to replace the primary function \u2014 use apply_edit for that.\nYou can call this multiple times for different issues in the file."
+     ],
+     [
+      "no_edit",
+      "Call ONLY if you have confirmed this file has nothing to fix for this incident. Give the reason. Making no change is then the recorded outcome."
+     ]
+    ]
+   }
+  ]
+ },
+ "module": {
+  "calls": [
+   {
+    "system": "You are a senior software engineer fixing production bugs. Read the code carefully, explore related files as needed, then call apply_edit with the minimum precise change. After apply_edit, review the file as you would in a code review \u2014 apply the same quality bar you'd hold a junior engineer to. Call patch_line for every issue you'd flag. Always fix root causes \u2014 never symptoms. Call end_turn only when the file would pass your review.",
+    "last": "Fix this production bug.\n\nERROR TYPE: TypeError\nERROR: d\nROOT CAUSE: None\nTARGET FUNCTION: <module> in pkg/settings.py\n\n## TIER 1 \u2014 Code you are changing (most important)\nFILE: pkg/settings.py\nimport os\nVALUE = os.environ['X']\n\n\nThe function '<module>' could not be pre-extracted (may be a class method, arrow function, or React component method).\nRead the file above, find the specific code that needs changing, then:\n  \u2022 For a small targeted change (wrapping a call, changing a value): use patch_line(old_snippet=<verbatim 1-5 lines from file>, new_snippet=<replacement>).\n  \u2022 For replacing a whole function: use apply_edit(old_text=<verbatim function from file>, new_text=<fixed version>).\nDo NOT guess at text \u2014 copy it exactly from the file content shown above.\nROOT CAUSE RULES (violation = wrong fix):\n1. Fix the cause, not the symptom. No null guards / optional chaining / try-catch at crash sites.\n2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value \u2014 every return path must include the complete structure callers depend on.\n3. The fix must handle ALL invalid inputs, not just the one that triggered this error.\n4. No unrelated cleanup, logging, or comments.\n5. Never invent a new function, route, or endpoint that doesn't already exist as your 'fix' for an existing bug. Find and edit the REAL vulnerable code. If you cannot locate it in this file after actually searching, make no edit and call end_turn \u2014 that is correct; fabricating unrelated new code is not.\n6. When validating that input matches an expected narrow shape (e.g. a numeric ID), reason about what the ACTUAL valid shape looks like \u2014 don't reach for a loose type-coercion check out of habit. `isNaN(Number(x))` looks like numeric validation but isn't strict: Number('1e5') is 100000 (scientific notation), Number('0x1A') is 26 (hex), Number('  5  ') trims whitespace, Number('') is 0 \u2014 all pass as 'valid numbers' even though none of them are the plain digit string the field actually expects. If the value should be a plain positive integer, validate that exact shape (e.g. a digits-only regex, or Number.isInteger() plus a range check \u2014 whichever fits the actual domain) instead of trusting Number()'s permissive coercion to reject what it won't.\n\nIF THE TARGET FUNCTION IS NOT IN THIS FILE:\nThe function '<module>' may be defined in a different file than the one shown above (e.g. it may be a backend service called by this frontend component, or a helper in a sibling directory). If you cannot find it here:\n1. Use search_code to search for '<module>' \u2014 this will find where it is actually defined.\n2. Use read_file on the correct file.\n3. Apply your fix there using patch_line or apply_edit.\nDo not spin in place \u2014 if the function is not here, find where it is.\n\nMULTI-EDIT WORKFLOW:\n1. Call apply_edit or patch_line ONCE for the primary function fix.\n2. After the fix, review the file as a senior engineer doing code review.\n   Fix every issue you would flag \u2014 not just the primary bug.\n3. Call patch_line for each additional issue found (can call multiple times).\n4. Only call end_turn when ALL issues in the file are addressed.\n",
+    "tools": [
+     [
+      "read_file",
+      "Read any file from the repository. Use this to understand imports, callers, type definitions, or any related code before writing the fix."
+     ],
+     [
+      "search_code",
+      "Search for a symbol or string across the repository. Returns matching file paths."
+     ],
+     [
+      "find_callers",
+      "Query the call graph to find every function that calls the target function. Use this BEFORE generating a fix to understand the blast radius \u2014 if callers exist, include updates to them in the same patch when needed. Returns file paths, caller function names, and line numbers. Returns an empty list if the function has no known callers or is not in the index."
+     ],
+     [
+      "apply_edit",
+      "Replace the primary target function with the fixed version. If the old function text was pre-extracted, only supply new_text. If not pre-extracted, supply both old_text (verbatim from file) and new_text. Call this ONCE for the main function fix."
+     ],
+     [
+      "patch_line",
+      "Make a targeted replacement anywhere in the file \u2014 for issues OUTSIDE the primary function: wrong model IDs, missing error handling, stale comments, adjacent bugs, etc.\nRules for old_snippet:\n- Copy EXACT verbatim text from the file (1\u20135 lines). Short and unique.\n- Do NOT use this to replace the primary function \u2014 use apply_edit for that.\nYou can call this multiple times for different issues in the file."
+     ],
+     [
+      "final_verdict",
+      "OPTIONAL last call \u2014 emit your self-assessed verdict on the fix you just made. Call this AFTER apply_edit + any patch_line calls, RIGHT BEFORE end_turn. If you skip it, the runtime defaults to confidence=0.75, escalate=false. Use confidence < 0.70 OR escalate=true when you're unsure: a shaky fix opens a human approval gate instead of a PR. Be honest \u2014 escalation is correct, guessing is not."
+     ]
+    ]
+   },
+   {
+    "system": "You are a senior software engineer fixing production bugs. Read the code carefully, explore related files as needed, then call apply_edit with the minimum precise change. After apply_edit, review the file as you would in a code review \u2014 apply the same quality bar you'd hold a junior engineer to. Call patch_line for every issue you'd flag. Always fix root causes \u2014 never symptoms. Call end_turn only when the file would pass your review.",
+    "last": "You ended your turn without calling apply_edit or patch_line, so no change has been recorded. If you worked out a fix (including one you described in text above), make it now: call apply_edit, or patch_line with old_snippet copied verbatim from the file. If you have confirmed this file has nothing to fix, call no_edit with the reason.",
+    "tools": [
+     [
+      "apply_edit",
+      "Replace the primary target function with the fixed version. If the old function text was pre-extracted, only supply new_text. If not pre-extracted, supply both old_text (verbatim from file) and new_text. Call this ONCE for the main function fix."
+     ],
+     [
+      "patch_line",
+      "Make a targeted replacement anywhere in the file \u2014 for issues OUTSIDE the primary function: wrong model IDs, missing error handling, stale comments, adjacent bugs, etc.\nRules for old_snippet:\n- Copy EXACT verbatim text from the file (1\u20135 lines). Short and unique.\n- Do NOT use this to replace the primary function \u2014 use apply_edit for that.\nYou can call this multiple times for different issues in the file."
+     ],
+     [
+      "no_edit",
+      "Call ONLY if you have confirmed this file has nothing to fix for this incident. Give the reason. Making no change is then the recorded outcome."
+     ]
+    ]
+   }
+  ]
+ }
+}

@@ -1,0 +1,8 @@
+ROOT CAUSE RULES (violation = wrong fix):
+1. Fix the cause, not the symptom. No null guards / optional chaining / try-catch at crash sites.
+2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value — every return path must include the complete structure callers depend on.
+3. The fix must handle ALL invalid inputs, not just the one that triggered this error.
+4. No unrelated cleanup, logging, or comments.
+5. Never invent a new function, route, or endpoint that doesn't already exist as your 'fix' for an existing bug. Find and edit the REAL vulnerable code. If you cannot locate it in this file after actually searching, make no edit and call end_turn — that is correct; fabricating unrelated new code is not.
+6. When validating that input matches an expected narrow shape (e.g. a numeric ID), reason about what the ACTUAL valid shape looks like — don't reach for a loose type-coercion check out of habit. `isNaN(Number(x))` looks like numeric validation but isn't strict: Number('1e5') is 100000 (scientific notation), Number('0x1A') is 26 (hex), Number('  5  ') trims whitespace, Number('') is 0 — all pass as 'valid numbers' even though none of them are the plain digit string the field actually expects. If the value should be a plain positive integer, validate that exact shape (e.g. a digits-only regex, or Number.isInteger() plus a range check — whichever fits the actual domain) instead of trusting Number()'s permissive coercion to reject what it won't.
+

@@ -16,15 +16,15 @@ Output (FixResult):
 """
 from __future__ import annotations
 
-import os
-
 import difflib
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.agents.base import BaseAgent
+from app.agents.harness import Harness, load_harness
 from app.core.config import settings
 from app.models.events import IncidentState
 from app.services.blast_radius import BlastRadiusGuard, protected_patterns_for
@@ -267,8 +267,11 @@ class FixGenerationAgent(BaseAgent):
         print(result.pr_url)
     """
 
-    def __init__(self, github: GitHubService | None = None) -> None:
+    def __init__(self, github: GitHubService | None = None, harness_dir: str | None = None) -> None:
         super().__init__(llm=LLMService())
+        # Prompts, tool descriptions and loop settings the harness optimizer may edit
+        # (app/agents/harness/fix/); HARNESS_DIR_FIX points a process at a candidate.
+        self._harness = load_harness("fix", harness_dir)
         self._llm_haiku = LLMService(model=HAIKU_MODEL)
         self._github = github or GitHubService()
         self._owner, self._repo = settings.fix_target_repo.split("/", 1)
@@ -1623,6 +1626,19 @@ class FixGenerationAgent(BaseAgent):
     # Agentic fix tools
     # ------------------------------------------------------------------
 
+    @property
+    def _fix_harness(self) -> Harness:
+        """The fix harness; agents built with __new__ (tests) load the default."""
+        h = getattr(self, "_harness", None)
+        if h is None:
+            h = self._harness = load_harness("fix")
+        return h
+
+    def _tools_with_descriptions(self, tools: list[dict]) -> list[dict]:
+        """Tool schemas with the harness's descriptions (names and schemas unchanged)."""
+        descs = self._fix_harness.tool_descriptions
+        return [{**t, "description": descs.get(t["name"], t["description"])} for t in tools]
+
     _FIX_TOOLS = [
         {
             "name": "read_file",
@@ -1913,6 +1929,7 @@ class FixGenerationAgent(BaseAgent):
             if _is_module_level else
             f"TARGET FUNCTION: {function_name} in {file_path}"
         )
+        harness = self._fix_harness
         initial_prompt = (
             f"Fix this production bug.\n\n"
             f"ERROR TYPE: {incident.error_event.error_type or 'unknown'}\n"
@@ -1925,49 +1942,13 @@ class FixGenerationAgent(BaseAgent):
             f"{function_ref}"
             f"{tier2_section}"
             f"{tier3_section}"
-            f"ROOT CAUSE RULES (violation = wrong fix):\n"
-            f"1. Fix the cause, not the symptom. No null guards / optional chaining / try-catch at crash sites.\n"
-            f"2. For 'Cannot read properties of undefined/null': fix the function that RETURNS the undefined value — "
-            f"every return path must include the complete structure callers depend on.\n"
-            f"3. The fix must handle ALL invalid inputs, not just the one that triggered this error.\n"
-            f"4. No unrelated cleanup, logging, or comments.\n"
-            f"5. Never invent a new function, route, or endpoint that doesn't already exist as your "
-            f"'fix' for an existing bug. Find and edit the REAL vulnerable code. If you cannot locate "
-            f"it in this file after actually searching, make no edit and call end_turn — that is "
-            f"correct; fabricating unrelated new code is not.\n"
-            f"6. When validating that input matches an expected narrow shape (e.g. a numeric ID), reason "
-            f"about what the ACTUAL valid shape looks like — don't reach for a loose type-coercion check "
-            f"out of habit. `isNaN(Number(x))` looks like numeric validation but isn't strict: "
-            f"Number('1e5') is 100000 (scientific notation), Number('0x1A') is 26 (hex), Number('  5  ') "
-            f"trims whitespace, Number('') is 0 — all pass as 'valid numbers' even though none of them are "
-            f"the plain digit string the field actually expects. If the value should be a plain positive "
-            f"integer, validate that exact shape (e.g. a digits-only regex, or Number.isInteger() plus a "
-            f"range check — whichever fits the actual domain) instead of trusting Number()'s permissive "
-            f"coercion to reject what it won't.\n\n"
-            f"IF THE TARGET FUNCTION IS NOT IN THIS FILE:\n"
-            f"The function '{function_name}' may be defined in a different file than the one shown above "
-            f"(e.g. it may be a backend service called by this frontend component, or a helper in a "
-            f"sibling directory). If you cannot find it here:\n"
-            f"1. Use search_code to search for '{function_name}' — this will find where it is actually defined.\n"
-            f"2. Use read_file on the correct file.\n"
-            f"3. Apply your fix there using patch_line or apply_edit.\n"
-            f"Do not spin in place — if the function is not here, find where it is.\n\n"
-            f"MULTI-EDIT WORKFLOW:\n"
-            f"1. Call apply_edit or patch_line ONCE for the primary function fix.\n"
-            f"2. After the fix, review the file as a senior engineer doing code review.\n"
-            f"   Fix every issue you would flag — not just the primary bug.\n"
-            f"3. Call patch_line for each additional issue found (can call multiple times).\n"
-            f"4. Only call end_turn when ALL issues in the file are addressed.\n"
+            f"{harness.render('root_cause_rules')}"
+            f"{harness.render('target_not_here', function_name=function_name)}"
+            f"{harness.render('multi_edit_workflow')}"
+            f"{harness.render('skills')}"
         )
 
-        system = self._with_harness(
-            "You are a senior software engineer fixing production bugs. "
-            "Read the code carefully, explore related files as needed, then call apply_edit "
-            "with the minimum precise change. After apply_edit, review the file as you would "
-            "in a code review — apply the same quality bar you'd hold a junior engineer to. "
-            "Call patch_line for every issue you'd flag. Always fix root causes — never symptoms. "
-            "Call end_turn only when the file would pass your review."
-        )
+        system = self._with_harness(harness.render("system"))
 
         messages: list[dict] = [{"role": "user", "content": initial_prompt}]
         edit_result: dict | None = None
@@ -1985,13 +1966,17 @@ class FixGenerationAgent(BaseAgent):
         # exploring files this loop has no ability to edit (see additional_fix_section
         # comment). Legitimate single-file work — read tests/callers, patch, then scan
         # for adjacent issues — can still reasonably need more than 14 turns.
-        for iteration in range(_MAX_FIX_TURNS):
-            if (iteration == _MAX_FIX_TURNS - _BUDGET_WARNING_TURNS
+        max_turns = harness.setting("max_fix_turns")
+        warn_turns = harness.setting("budget_warning_turns")
+        max_nudges = harness.setting("no_edit_nudges")
+        max_cutoffs = harness.setting("max_cutoffs")
+        for iteration in range(max_turns):
+            if (iteration == max_turns - warn_turns
                     and not edit_result and not patch_calls):
                 logger.warning("[FixGen] Agentic: %d turns left and no edit yet — warning the model",
-                               _BUDGET_WARNING_TURNS)
+                               warn_turns)
                 messages.append({"role": "user", "content": (
-                    f"You have {_BUDGET_WARNING_TURNS} turns left and have not made an edit yet. "
+                    f"You have {warn_turns} turns left and have not made an edit yet. "
                     "Stop exploring: make your fix now with apply_edit, or patch_line with "
                     "old_snippet copied verbatim from the file. If you have confirmed this file "
                     f"has nothing to fix, reply with exactly '{_NO_EDIT_MARKER}: <one-sentence reason>'."
@@ -2001,13 +1986,14 @@ class FixGenerationAgent(BaseAgent):
                 _total_pruned_chars += pruned
                 if pruned:
                     logger.debug("[FixGen] State pruning at iteration %d: removed %d chars", iteration, pruned)
-            if (iteration == _MAX_FIX_TURNS - 1 and not edit_result and not patch_calls):
+            if (iteration == max_turns - 1 and not edit_result and not patch_calls):
                 force_edit = True
-            tools = self._FIX_TOOLS
+            tools = self._tools_with_descriptions(self._FIX_TOOLS)
             call_kwargs = {}
             forced_turn = force_edit
             if force_edit:
-                tools = [t for t in self._FIX_TOOLS if t["name"] in _FORCED_EDIT_TOOLS] + [_NO_EDIT_TOOL]
+                tools = self._tools_with_descriptions(
+                    [t for t in self._FIX_TOOLS if t["name"] in _FORCED_EDIT_TOOLS] + [_NO_EDIT_TOOL])
                 call_kwargs = {"tool_choice": "required"}
                 logger.info("[FixGen] Agentic: forcing an edit-or-no_edit tool call (iteration %d)", iteration)
                 force_edit = False
@@ -2022,13 +2008,13 @@ class FixGenerationAgent(BaseAgent):
             if stop_reason == "max_tokens":
                 # Any tool call in a cut-off response may be truncated, so none is used.
                 cutoffs += 1
-                if cutoffs > _MAX_CUTOFFS:
+                if cutoffs > max_cutoffs:
                     logger.warning("[FixGen] Agentic: cut off at the output limit %d times in a row "
                                    "(iteration %d) — giving up", cutoffs, iteration)
                     break
                 logger.warning(
                     "[FixGen] Agentic: response cut off at the output limit (iteration %d, %d/%d) "
-                    "— asking for a short response", iteration, cutoffs, _MAX_CUTOFFS,
+                    "— asking for a short response", iteration, cutoffs, max_cutoffs,
                 )
                 messages.append({
                     "role": "user",
@@ -2048,18 +2034,14 @@ class FixGenerationAgent(BaseAgent):
                 if not edit_result and not patch_calls:
                     if _NO_EDIT_MARKER in (text or ""):
                         logger.info("[FixGen] Agentic: model chose no edit: %s", (text or "")[:200])
-                    elif nudges < _NO_EDIT_NUDGES:
+                    elif nudges < max_nudges:
                         nudges += 1
                         logger.warning("[FixGen] Agentic: LLM stopped without an edit (iteration %d) "
-                                       "— nudging (%d/%d)", iteration, nudges, _NO_EDIT_NUDGES)
+                                       "— nudging (%d/%d)", iteration, nudges, max_nudges)
                         if text:
                             messages.append({"role": "assistant", "content": text})
                         messages.append({"role": "user", "content": (
-                            "You ended your turn without calling apply_edit or patch_line, so no "
-                            "change has been recorded. If you worked out a fix (including one you "
-                            "described in text above), make it now: call apply_edit, or patch_line "
-                            "with old_snippet copied verbatim from the file. If you have confirmed "
-                            "this file has nothing to fix, call no_edit with the reason."
+                            harness.render("no_edit_nudge")
                         )})
                         force_edit = True
                         continue
