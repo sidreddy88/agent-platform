@@ -117,3 +117,14 @@ def test_fix_provider_failure_classifier():
     assert _fix_provider_failure(E("Invalid API key provided")) == "auth"
     assert _fix_provider_failure(E("x", status=503)) == "provider_outage"
     assert _fix_provider_failure(E("some parse error")) is None
+
+
+@pytest.mark.asyncio
+async def test_progress_is_reported_per_finished_fix_run_not_only_after_grading():
+    """fix-r1's calibration: a 25-case chunk ran >14 min with no progress recorded, close
+    to the loop's 20-minute stall watchdog. Each finished fix run now counts as progress."""
+    ev = _evaluator({"a": "patch", "b": "patch", "c": "none"}, {}, [])
+    ticks = []
+    ev.on_trial = lambda: ticks.append(1)
+    await ev.evaluate(Path("/cand"), ["a", "b", "c"], trials=1)
+    assert len(ticks) >= 3 * 2          # once per fix run + once per case after grading

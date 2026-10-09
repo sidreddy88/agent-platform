@@ -130,6 +130,10 @@ class FixReplayEvaluator:
                         rec = await self._run_case(self._instances[cid], self._diagnoses[cid], str(harness_dir))
                     rec["_meter"] = meter.summary()
                     recs[cid] = rec
+                    # Progress per finished fix run, not only after a trial's batch is graded:
+                    # a 25-case chunk can take longer than the loop's 20-minute stall watchdog.
+                    if self.on_trial is not None:
+                        self.on_trial()
 
             await asyncio.gather(*(one(c) for c in case_ids))
 
