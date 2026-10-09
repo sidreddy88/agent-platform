@@ -560,19 +560,24 @@ class Optimizer:
         self._notify_released()
         state.spent_usd = budget.spent_usd
         stats = getattr(self, "_cost_stats", None)
+        records = []
         for case in chunk:
             record = {"case": asdict(outcome.result.per_case[case]),
                       "trajectories": [t for t in outcome.trajectories if t.get("instance_id") == case]}
             self.run.save_eval(self._case_key(harness_dir, trials, case), record)
+            records.append((case, record))
             if stats is not None and record["case"]["trials"]:
                 stats[0] += record["case"]["cost_usd"] / record["case"]["trials"]
                 stats[1] += 1
             sess = state.timing.get("sessions")
             if sess:
                 sess[-1]["replays"] = sess[-1].get("replays", 0) + record["case"]["trials"]
-            self._record_health(state, case, record)
         self._progress(state)
         self.run.save(state)
+        # Tripwires only after the whole chunk is saved: fix-r1's first chunk tripped after
+        # 10 of 25 cases and lost the other 15, already paid for.
+        for case, record in records:
+            self._record_health(state, case, record)
 
     def _eval_ref(self, harness_dir: Path, trials: int) -> dict:
         return {"hash": candidates.content_hash(harness_dir), "trials": trials,

@@ -303,6 +303,9 @@ def main() -> int:
             # In band, a saving must beat measured cost noise: the phase E smoke run
             # accepted a candidate for being 0.6% cheaper with the band off.
             cfg.cost_band = True
+            # The evolve set is built from cases the current harness fails, so a low round-0
+            # pass rate is expected, not a sign of breakage (fix-r1 tripped on 2/20).
+            cfg.pass_rate_tripwire = False
             if args.transfer_model:
                 pool = sorted(cfg.evolve_cases + cfg.guard_cases)
                 n = min(args.transfer_cases, len(pool))

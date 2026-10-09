@@ -143,7 +143,10 @@ FIX_SETTING_BOUNDS = {
 FIX_HEALTH_BASELINE = {
     "tool_failure_rate": {"read_file": 0.05, "search_code": 0.30, "find_callers": 0.60},
     "cost_per_trial_usd": 0.05,
-    "pass_rate": 0.70,
+    # The fix evolve set is chosen from cases the current harness fails (re-measured at
+    # 5-9%), so round 0's pass rate is low by design; --agent fix also turns the pass-rate
+    # tripwire off (fix-r1 tripped on 2/20 against the old 0.70).
+    "pass_rate": 0.08,
 }
 
 
