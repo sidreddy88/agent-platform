@@ -1968,6 +1968,7 @@ class FixGenerationAgent(BaseAgent):
         patch_calls: list[dict] = []
         verdict: dict | None = None
         nudges = 0
+        self._llm_error = None
         # Step log for the harness optimizer's evidence (same shape as DiagnosisAgent's steps).
         self._fix_steps = []
         cutoffs = 0
@@ -2018,6 +2019,9 @@ class FixGenerationAgent(BaseAgent):
                 )
             except Exception as exc:
                 logger.error("[FixGen] Agentic LLM call failed (iteration %d): %s", iteration, exc)
+                # Kept so an offline eval can tell a provider failure (credit, auth,
+                # outage) from the model declining; it would otherwise score as no patch.
+                self._llm_error = exc
                 return "", "", [], None
 
             if stop_reason == "max_tokens":

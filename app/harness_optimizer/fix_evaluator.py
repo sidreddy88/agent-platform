@@ -141,6 +141,11 @@ class FixReplayEvaluator:
                 fix = rec.get("fix") or {}
                 if "error" in fix:
                     raise ProviderFailure(f"{cid} trial {t + 1}: {str(fix['error'])[:300]}", cost_usd=total)
+                if fix.get("provider_failure"):
+                    # A credit/auth/outage error inside the fix loop would otherwise score as
+                    # "no patch". Pause instead: finished cases are cached, resume redoes the rest.
+                    raise ProviderFailure(f"{cid} trial {t + 1}: provider failure in the fix loop "
+                                          f"({fix['provider_failure']})", cost_usd=total)
                 if rec.get("model_patch"):
                     preds.append({"instance_id": cid, "model_name_or_path": "fix-optimizer",
                                   "model_patch": rec["model_patch"]})

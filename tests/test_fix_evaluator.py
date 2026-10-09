@@ -85,3 +85,35 @@ async def test_evaluator_trajectories_feed_the_evidence_builder():
     finally:
         profiles.use("diagnosis")
     assert "Graded 2 fix runs." in text and "Failing trajectory: b" in text
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_inside_the_fix_loop_pauses_instead_of_scoring_no_patch():
+    seen = []
+    ev = _evaluator({"a": "none"}, {}, seen)
+    inner = ev._run_case
+
+    async def run_case(inst, diag, harness_dir):
+        rec = await inner(inst, diag, harness_dir)
+        rec["fix"]["provider_failure"] = "billing"
+        return rec
+
+    ev._run_case = run_case
+    with pytest.raises(ProviderFailure, match="billing"):
+        await ev.evaluate(Path("/cand"), ["a"], trials=1)
+
+
+def test_fix_provider_failure_classifier():
+    from scripts.eval_swebench_fix import _fix_provider_failure
+
+    class E(Exception):
+        def __init__(self, msg, status=None):
+            super().__init__(msg)
+            self.status_code = status
+
+    assert _fix_provider_failure(None) is None
+    assert _fix_provider_failure(E("Credit limit exceeded")) == "billing"
+    assert _fix_provider_failure(E("x", status=402)) == "billing"
+    assert _fix_provider_failure(E("Invalid API key provided")) == "auth"
+    assert _fix_provider_failure(E("x", status=503)) == "provider_outage"
+    assert _fix_provider_failure(E("some parse error")) is None
