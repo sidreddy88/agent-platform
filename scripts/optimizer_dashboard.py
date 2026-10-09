@@ -76,22 +76,44 @@ def run_detail(name: str) -> dict:
     cases = (cfg.get("evolve_cases") or []) + (cfg.get("guard_cases") or [])
 
     incumbent_ref = json.loads(st["incumbent_eval"]) if st.get("incumbent_eval") else None
-    # The evaluation in progress: the most recently written eval directory.
+    # The evaluation for the current phase: which harness and how many trials. Falls back
+    # to the newest eval directory when the phase isn't an evaluation.
+    phase, rnd = st.get("phase"), st.get("round")
+    label, target = None, None
+    try:
+        import sys
+        sys.path.insert(0, str(ROOT))
+        from app.harness_optimizer.candidates import content_hash
+        cand_dir = (st.get("candidate") or {}).get("dir")
+        if phase == "smoke":
+            label, target = "Original harness (smoke check)", (content_hash(run / "original"), 1)
+        elif phase == "evaluate" and rnd == 0:
+            label, target = "Original harness (calibration)", (content_hash(run / "original"), cfg.get("calibration_trials") or 2)
+        elif phase == "evaluate" and cand_dir:
+            label, target = "Candidate harness", (content_hash(ROOT / cand_dir if not Path(cand_dir).is_absolute() else Path(cand_dir)), cfg.get("trials") or 1)
+    except Exception:
+        target = None
     latest, latest_t = None, 0.0
-    for d in (run / "evals").glob("*/k*") if (run / "evals").exists() else []:
-        files = list(d.glob("*.json"))
-        t = max((f.stat().st_mtime for f in files), default=d.stat().st_mtime)
-        if t > latest_t:
-            latest, latest_t = d, t
+    if target:
+        latest = run / "evals" / target[0] / f"k{target[1]}"
+        files = list(latest.glob("*.json")) if latest.exists() else []
+        latest_t = max((f.stat().st_mtime for f in files), default=0.0)
+    else:
+        for d in (run / "evals").glob("*/k*") if (run / "evals").exists() else []:
+            files = list(d.glob("*.json"))
+            t = max((f.stat().st_mtime for f in files), default=d.stat().st_mtime)
+            if t > latest_t:
+                latest, latest_t = d, t
     current = None
     if latest is not None:
-        done = {f.stem for f in latest.glob("*.json")}
+        done = {f.stem for f in latest.glob("*.json")} if latest.exists() else set()
         final = st.get("phase") == "final" or (st.get("phase") == "done" and not (done & set(cases)))
         of = len(cfg.get("final_cases") or []) if final else len(cases)
         current = {"hash": latest.parent.name, "trials": latest.name,
                    "done": len(done) if final else (len(done & set(cases)) or len(done)), "of": of, "is_incumbent": bool(incumbent_ref and incumbent_ref["hash"] == latest.parent.name),
                    "last_write": latest_t}
         current["cases"] = _case_table(run, {"hash": latest.parent.name, "trials": latest.name[1:]})
+        current["label"] = label
 
     history = []
     hp = run / "history.jsonl"
@@ -133,6 +155,7 @@ def run_detail(name: str) -> dict:
         "n_transfer": len(cfg.get("transfer_cases") or []), "n_final": len(cfg.get("final_cases") or []),
         "running": _alive(hb.get("pid")) if hb.get("pid") else False,
         "heartbeat_age_s": hb_age, "seconds_since_progress": hb.get("seconds_since_progress"),
+        "trials_finished_this_session": hb.get("trials_finished_this_session"),
         "candidate": {k: cand.get(k) for k in ("id", "component", "hypothesis")} if cand else None,
         "incumbent_cases": _case_table(run, incumbent_ref),
         "current": current, "history": history,

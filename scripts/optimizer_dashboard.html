@@ -120,8 +120,11 @@ async function refresh() {
   if (d.stop_reason) now += `<div><b>Stopped:</b> ${esc(d.stop_reason)}</div>`;
   if (d.current && (d.phase === "evaluate" || d.phase === "smoke" || d.phase === "final")) {
     const f = d.current.of ? d.current.done / d.current.of : 0;
-    now += `<div>${d.current.is_incumbent ? "Incumbent harness" : "Candidate harness"} <span class="mono muted">${esc(d.current.hash)}</span>: ${d.current.done} / ${d.current.of} cases written (${esc(d.current.trials)})
-            <div class="bar"><div style="width:${100*f}%"></div></div><span class="muted">last case finished ${dur((Date.now()/1000) - d.current.last_write)} ago · heartbeat ${dur(d.heartbeat_age_s)} ago</span></div>`;
+    const label = d.current.label || (d.current.is_incumbent ? "Incumbent harness" : "Candidate harness");
+    now += `<div>${esc(label)} <span class="mono muted">${esc(d.current.hash)}</span>: ${d.current.done} / ${d.current.of} cases saved (${esc(d.current.trials)} = trials per case)
+            <div class="bar"><div style="width:${100*f}%"></div></div><span class="muted">results are saved in chunks of 25 cases, so this count moves in steps ·
+            ${d.trials_finished_this_session != null ? `<b>${d.trials_finished_this_session}</b> fix runs finished this session · ` : ""}
+            last progress ${dur(d.seconds_since_progress)} ago · heartbeat ${dur(d.heartbeat_age_s)} ago</span></div>`;
   }
   if (d.candidate && d.candidate.id) {
     now += `<div style="margin-top:8px"><b>Candidate ${esc(d.candidate.id)}</b> <span class="badge b-other">${esc(d.candidate.component)}</span><div class="explain">${esc(d.candidate.hypothesis)}</div></div>`;

@@ -271,6 +271,7 @@ class Optimizer:
         """Liveness only: a trial finished. Keeps the watchdog quiet during long
         cases without touching session accounting (that's _progress, per case)."""
         self._last_progress = time.monotonic()
+        self._trials_finished = getattr(self, "_trials_finished", 0) + 1
 
     def _progress(self, state: RunState) -> None:
         self._last_progress = time.monotonic()
@@ -282,7 +283,10 @@ class Optimizer:
         idle = time.monotonic() - self._last_progress
         data = {"time": _now(), "pid": os.getpid(), "round": state.round, "phase": state.phase,
                 "spent_usd": round(state.spent_usd, 4), "seconds_since_progress": round(idle, 1),
-                "session_seconds": round(time.monotonic() - self._session_t0, 1)}
+                "session_seconds": round(time.monotonic() - self._session_t0, 1),
+                # trials finished this session (counted as each one ends, so a dashboard can
+                # show movement inside a batched chunk before its results are saved)
+                "trials_finished_this_session": getattr(self, "_trials_finished", 0)}
         (self.run.root / "heartbeat.json").write_text(json.dumps(data))
 
     async def _watchdog(self, state: RunState, interval: float = 60.0) -> None:
