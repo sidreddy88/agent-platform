@@ -86,7 +86,7 @@ def modal_grade(predictions: list[dict], run_id: str, workdir: Path | None = Non
 class FixReplayEvaluator:
     # The loop hands batched evaluators chunks of cases; each trial of a chunk is
     # graded in one Modal run (per-case grading took ~1 min per case-trial).
-    batch_size = 25
+    batch_size = 50
 
     def __init__(self, saved_diagnoses: dict[str, dict] | None = None,
                  instances_path: Path = FULL, parallel: int = 5,
@@ -121,22 +121,26 @@ class FixReplayEvaluator:
         total = 0.0
         sem = asyncio.Semaphore(self._parallel)
 
+        # Every (case, trial) fix run starts at once, limited by `parallel`: the work waits
+        # on the API, and running trials one after another made a 25-case chunk take ~60 min
+        # (fix-r1 calibration). Each trial is then graded as one batch.
+        by_trial: list[dict[str, dict]] = [{} for _ in range(trials)]
+
+        async def one(cid: str, t: int) -> None:
+            async with sem:
+                with cost_meter.metered() as meter:
+                    rec = await self._run_case(self._instances[cid], self._diagnoses[cid], str(harness_dir))
+                rec["_meter"] = meter.summary()
+                by_trial[t][cid] = rec
+                # Progress per finished fix run, not only after a batch is graded: a chunk
+                # can take longer than the loop's 20-minute stall watchdog.
+                if self.on_trial is not None:
+                    self.on_trial()
+
+        await asyncio.gather(*(one(c, t) for t in range(trials) for c in case_ids))
+
         for t in range(trials):
-            recs: dict[str, dict] = {}
-
-            async def one(cid: str) -> None:
-                async with sem:
-                    with cost_meter.metered() as meter:
-                        rec = await self._run_case(self._instances[cid], self._diagnoses[cid], str(harness_dir))
-                    rec["_meter"] = meter.summary()
-                    recs[cid] = rec
-                    # Progress per finished fix run, not only after a trial's batch is graded:
-                    # a 25-case chunk can take longer than the loop's 20-minute stall watchdog.
-                    if self.on_trial is not None:
-                        self.on_trial()
-
-            await asyncio.gather(*(one(c) for c in case_ids))
-
+            recs = by_trial[t]
             preds = []
             for cid, rec in recs.items():
                 summary = rec["_meter"]
