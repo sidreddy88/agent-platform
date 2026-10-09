@@ -61,18 +61,35 @@ def _default_run_case(fix_model: str | None = None) -> RunCase:
     return run
 
 
-def modal_grade(predictions: list[dict], run_id: str, workdir: Path | None = None) -> dict[str, bool]:
-    """Grade predictions with the official SWE-bench harness on Modal; instance_id -> resolved."""
+def modal_grade(predictions: list[dict], run_id: str, workdir: Path | None = None,
+                tick: Callable[[], None] | None = None) -> dict[str, bool]:
+    """Grade predictions with the official SWE-bench harness on Modal; instance_id -> resolved.
+    `tick` is called about once a minute while grading is still running: slow test suites
+    (sympy) kept one batch grading past the optimizer's 20-minute stall watchdog (fix-r1)."""
     if not predictions:
         return {}
     work = Path(workdir or ROOT / "runs" / "fix" / "_optimizer_grading") / run_id
     work.mkdir(parents=True, exist_ok=True)
     (work / "predictions.jsonl").write_text("".join(json.dumps(p) + "\n" for p in predictions))
-    proc = subprocess.run(
+    log = (work / "grade.log").open("w")
+    proc = subprocess.Popen(
         [SWEBENCH_PY, str(GRADE_SCRIPT), "--dataset_name", "princeton-nlp/SWE-bench_Verified",
          "--predictions_path", "predictions.jsonl", "--run_id", run_id, "--max_workers", "8",
-         "--modal", "true"], cwd=work, capture_output=True, text=True, timeout=3 * 3600)
-    (work / "grade.log").write_text(proc.stdout[-200_000:] + proc.stderr[-50_000:])
+         "--modal", "true"], cwd=work, stdout=log, stderr=subprocess.STDOUT, text=True)
+    deadline = time.monotonic() + 3 * 3600          # the harness's own per-sandbox timeouts are shorter
+    try:
+        while True:
+            try:
+                proc.wait(timeout=60)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    raise ProviderFailure(f"grading {run_id} ran past 3 hours; see {work / 'grade.log'}")
+                if tick is not None:
+                    tick()                          # still grading: alive, not stalled
+    finally:
+        log.close()
     reports = {}
     for f in glob.glob(str(work / "logs" / "run_evaluation" / run_id / "*" / "*" / "report.json")):
         reports.update(json.loads(Path(f).read_text()))
@@ -159,7 +176,10 @@ class FixReplayEvaluator:
                                   "model_patch": rec["model_patch"]})
 
             run_id = f"fixopt-{time.strftime('%Y%m%d-%H%M%S')}-t{t + 1}-{uuid.uuid4().hex[:6]}"
-            resolved = await asyncio.to_thread(self._grade, preds, run_id)
+            if self._grade is modal_grade:
+                resolved = await asyncio.to_thread(modal_grade, preds, run_id, None, self.on_trial)
+            else:
+                resolved = await asyncio.to_thread(self._grade, preds, run_id)
 
             for cid, rec in recs.items():
                 cost = rec["_meter"].get("cost_usd") or 0.0
