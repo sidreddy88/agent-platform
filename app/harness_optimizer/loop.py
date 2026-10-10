@@ -62,8 +62,9 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
-from app.harness_optimizer import candidates, critic, evidence, health, proposer, report
+from app.harness_optimizer import candidates, critic, evidence, health, profiles, proposer, report
 from app.harness_optimizer.acceptance import (
+    Decision,
     AcceptanceConfig,
     CaseResult,
     EvalResult,
@@ -71,7 +72,7 @@ from app.harness_optimizer.acceptance import (
     calibrate_delta,
     decide,
 )
-from app.harness_optimizer.budget import Budget, BudgetExceeded
+from app.harness_optimizer.budget import Budget, BudgetExceeded, estimate_eval_cost
 from app.harness_optimizer.evaluator import Evaluator, ProviderFailure, UnpricedModel
 from app.harness_optimizer.history import EditHistory, HistoryEntry
 from app.harness_optimizer.state import RunDir, RunState
@@ -90,6 +91,13 @@ class OptimizerConfig:
     calibration_trials: int = 2        # round 0; 2 gives the trial pairs for delta
     max_rounds: int = 5
     max_stall: int = 3                 # consecutive rounds without an acceptance
+    # Two-model acceptance: a candidate accepted on the primary model is re-run on
+    # these cases with a second model (the transfer evaluator) and vetoed if it
+    # resolves more than transfer_margin fewer than the incumbent there. The r9
+    # prompt edit helped DeepSeek and was neutral on Sonnet; retry transferred.
+    transfer_cases: list[str] = field(default_factory=list)
+    transfer_trials: int = 1
+    transfer_margin: int = 2
     repair_attempts: int = 2           # proposer retries after invalid/critic-rejected
     # Budget estimate per case per trial until one is measured. Round 0 on
     # Sonnet 5 with caching measured $0.121; 0.25 leaves room for failing
@@ -152,7 +160,7 @@ class LocalPublisher:
             f"# Proposed harness edit, round {round_no}\n\n**Hypothesis:** {hypothesis}\n\n"
             f"**Decision:** {decision['reason']}\n\n"
             f"Improved: {decision['improved'] or '-'}  \nRegressed: {decision['regressed'] or '-'}\n\n"
-            f"Apply `harness.diff` to `app/agents/harness/diagnosis/` and open a PR; the "
+            f"Apply `harness.diff` to `app/agents/harness/{profiles.active().name}/` and open a PR; the "
             f"PR's gate run is the held-out-independent check.\n")
         return out
 
@@ -168,7 +176,8 @@ def _cases_key(cases: list[str]) -> str:
 class Optimizer:
     def __init__(self, run_dir: str | Path, base_harness: str | Path, cfg: OptimizerConfig,
                  evaluator: Evaluator, proposer_llm: LLM, critic_llm: LLM,
-                 critic_patterns: list[tuple[str, str]], publisher: Publisher | None = None):
+                 critic_patterns: list[tuple[str, str]], publisher: Publisher | None = None,
+                 transfer_evaluator: Evaluator | None = None):
         self.run = RunDir(run_dir)
         self.base = Path(base_harness)
         self.cfg = cfg
@@ -179,6 +188,7 @@ class Optimizer:
         self.critic_llm = critic_llm
         self.patterns = critic_patterns
         self.publisher = publisher or LocalPublisher()
+        self.transfer_evaluator = transfer_evaluator
         self.history = EditHistory(self.run.root / "history.jsonl")
 
     # ---- lifecycle ----------------------------------------------------------
@@ -261,6 +271,7 @@ class Optimizer:
         """Liveness only: a trial finished. Keeps the watchdog quiet during long
         cases without touching session accounting (that's _progress, per case)."""
         self._last_progress = time.monotonic()
+        self._trials_finished = getattr(self, "_trials_finished", 0) + 1
 
     def _progress(self, state: RunState) -> None:
         self._last_progress = time.monotonic()
@@ -272,7 +283,10 @@ class Optimizer:
         idle = time.monotonic() - self._last_progress
         data = {"time": _now(), "pid": os.getpid(), "round": state.round, "phase": state.phase,
                 "spent_usd": round(state.spent_usd, 4), "seconds_since_progress": round(idle, 1),
-                "session_seconds": round(time.monotonic() - self._session_t0, 1)}
+                "session_seconds": round(time.monotonic() - self._session_t0, 1),
+                # trials finished this session (counted as each one ends, so a dashboard can
+                # show movement inside a batched chunk before its results are saved)
+                "trials_finished_this_session": getattr(self, "_trials_finished", 0)}
         (self.run.root / "heartbeat.json").write_text(json.dumps(data))
 
     async def _watchdog(self, state: RunState, interval: float = 60.0) -> None:
@@ -316,6 +330,8 @@ class Optimizer:
             await self._evaluate_candidate(state, budget)
         elif state.phase == "decide":
             self._decide(state)
+        elif state.phase == "transfer":
+            await self._transfer(state, budget)
         else:
             raise RuntimeError(f"unknown phase {state.phase!r}")
 
@@ -373,6 +389,18 @@ class Optimizer:
     async def _evaluate(self, state: RunState, budget: Budget, harness_dir: Path,
                         cases: list[str], trials: int, round0: bool = False) -> tuple[EvalResult, list[dict]]:
         todo = [c for c in cases if self.run.load_eval(self._case_key(harness_dir, trials, c)) is None]
+        batch = int(getattr(self.evaluator, "batch_size", 1) or 1)
+        if batch > 1 and todo:
+            # Batched evaluators (the fix evaluator grades a whole batch in one Modal run
+            # per trial) get cases in chunks; results are still cached per case, so resume,
+            # budget and tripwires behave as in the per-case path. Lanes don't apply: the
+            # evaluator runs a chunk's cases concurrently itself.
+            self._recent = deque(maxlen=max(1, self.cfg.health_window))
+            self._since_check = 0
+            self._health_round0 = round0 and self.cfg.pass_rate_tripwire
+            for i in range(0, len(todo), batch):
+                await self._evaluate_chunk(state, budget, harness_dir, todo[i:i + batch], trials)
+            todo = []                      # all cached now; assembled below
         by_repo: dict[str, list[str]] = {}
         for case in todo:
             by_repo.setdefault(self.cfg.case_lanes.get(case, "_default"), []).append(case)
@@ -441,7 +469,7 @@ class Optimizer:
                 w.costs.extend([cr["cost_usd"] / cr["trials"]] * cr["trials"])
             if c in guards:
                 w.guard_verdicts.extend(cr["verdicts"])
-        baseline = {**health.BASELINE, **self.cfg.health_baseline}
+        baseline = {**profiles.active().health_baseline, **self.cfg.health_baseline}
         problems = health.check(w, round0=self._health_round0, baseline=baseline)
         h = state.health
         h["checks"] = h.get("checks", 0) + 1
@@ -513,6 +541,44 @@ class Optimizer:
         self.run.save(state)
         self._record_health(state, case, record)
 
+    async def _evaluate_chunk(self, state: RunState, budget: Budget, harness_dir: Path,
+                              chunk: list[str], trials: int) -> None:
+        held = await self._reserve(budget, self._per_case_estimate() * trials * len(chunk),
+                                   f"round {state.round}: {len(chunk)} cases x{trials}")
+        try:
+            outcome = await self.evaluator.evaluate(harness_dir, chunk, trials)
+        except ProviderFailure as exc:
+            budget.release(held, exc.cost_usd)
+            self._notify_released()
+            state.spent_usd = budget.spent_usd
+            raise
+        except BaseException:
+            budget.release(held, 0.0)
+            self._notify_released()
+            raise
+        budget.release(held, outcome.cost_usd)
+        self._notify_released()
+        state.spent_usd = budget.spent_usd
+        stats = getattr(self, "_cost_stats", None)
+        records = []
+        for case in chunk:
+            record = {"case": asdict(outcome.result.per_case[case]),
+                      "trajectories": [t for t in outcome.trajectories if t.get("instance_id") == case]}
+            self.run.save_eval(self._case_key(harness_dir, trials, case), record)
+            records.append((case, record))
+            if stats is not None and record["case"]["trials"]:
+                stats[0] += record["case"]["cost_usd"] / record["case"]["trials"]
+                stats[1] += 1
+            sess = state.timing.get("sessions")
+            if sess:
+                sess[-1]["replays"] = sess[-1].get("replays", 0) + record["case"]["trials"]
+        self._progress(state)
+        self.run.save(state)
+        # Tripwires only after the whole chunk is saved: fix-r1's first chunk tripped after
+        # 10 of 25 cases and lost the other 15, already paid for.
+        for case, record in records:
+            self._record_health(state, case, record)
+
     def _eval_ref(self, harness_dir: Path, trials: int) -> dict:
         return {"hash": candidates.content_hash(harness_dir), "trials": trials,
                 "cases": self.cfg.evolve_cases + self.cfg.guard_cases}
@@ -538,7 +604,7 @@ class Optimizer:
         # The escalation guard gets its own noise band, from the same trial
         # pairs: did each trial ever reach an accepted submit_diagnosis? A
         # fixed 5pp was 2 trials in 34 on rounds 1-2, close to pure noise.
-        from app.harness_optimizer import grader
+        grader = profiles.active().grader
         never: dict[str, dict[int, bool]] = {}
         for t in trajs:
             never.setdefault(t["instance_id"], {})[t.get("trial")] = not grader.grade(t).accepted
@@ -640,10 +706,15 @@ class Optimizer:
                 errors.append(f"{prop.component}: {exc}")
         raise candidates.InvalidCandidate("; ".join(errors))
 
+    def _near_misses(self) -> list[str]:
+        """In-band gains that weren't proven: worth building on or combining."""
+        return [f"[{e.component}] {e.hypothesis[:220]} (dS {e.delta_S:+.3f}, dC {e.delta_C:+.1%})"
+                for e in self.history.entries() if e.outcome == "near_miss"][-6:]
+
     def _rejected_ideas(self) -> list[str]:
         out = []
         for e in self.history.entries():
-            if e.outcome == "accepted":
+            if e.outcome in ("accepted", "near_miss"):
                 continue
             meas = f", dS {e.delta_S:+.3f} dC {e.delta_C:+.1%}" if e.delta_S is not None else ""
             out.append(f"[{e.component}] {e.hypothesis[:220]} -> {e.outcome}{meas}")
@@ -660,10 +731,8 @@ class Optimizer:
                            f"budget that grows with the gain). Inside the band it must be cheaper by more "
                            f"than cost noise: {cost}. Vetoed if the no-answer (escalation) rate rises."),
             "rejected": self._rejected_ideas(),
+            "near_misses": self._near_misses(),
         }
-
-    _FAMILIES = {"task_prompt": "prompt", "prompt_fragments": "prompt",
-                 "tool_descriptions": "tools", "settings": "settings"}
 
     def _allowed_components(self) -> tuple[str, ...] | None:
         """Exploration rule: if this run's last `diversity_after` judged
@@ -676,8 +745,9 @@ class Optimizer:
         recent = mine[-n:]
         if len(recent) < n or any(e.outcome == "accepted" for e in recent):
             return None
-        tried = {self._FAMILIES.get(e.component) for e in recent}
-        allowed = tuple(c for c, fam in self._FAMILIES.items() if fam not in tried)
+        families = profiles.active().component_families
+        tried = {families.get(e.component) for e in recent}
+        allowed = tuple(c for c, fam in families.items() if fam not in tried)
         return allowed or None
 
     async def _screen(self, state: RunState, budget: Budget) -> None:
@@ -733,12 +803,47 @@ class Optimizer:
                        max_escalation_rise=max(base.max_escalation_rise, state.delta_esc or 0.0),
                        cost_delta=(state.delta_cost or 0.0) if self.cfg.cost_band else 0.0)
         d = decide(inc_result, cand_result, state.S_star, acfg)
+        if d.accept and self.transfer_evaluator is not None and self.cfg.transfer_cases:
+            cand["decision"] = d.to_json()          # resumable: the transfer phase finishes it
+            state.phase = "transfer"
+            return
+        self._finish_decision(state, d)
+
+    async def _transfer(self, state: RunState, budget: Budget) -> None:
+        """Second-model check for a candidate the primary model accepted."""
+        cand = state.candidate
+        d = Decision(**cand["decision"])
+        cases, trials = list(self.cfg.transfer_cases), self.cfg.transfer_trials
+        passes = {}
+        for label, harness in (("incumbent", self.run.incumbent_dir), ("candidate", Path(cand["dir"]))):
+            held = budget.reserve(estimate_eval_cost(len(cases), trials, 0.10), f"transfer check ({label})")
+            out = await self.transfer_evaluator.evaluate(harness, cases, trials)
+            budget.release(held, out.cost_usd)
+            state.spent_usd = budget.spent_usd
+            passes[label] = sum(cr.passes for cr in out.result.per_case.values())
+        drop = passes["incumbent"] - passes["candidate"]
+        note = (f"second model: candidate {passes['candidate']} vs incumbent {passes['incumbent']} "
+                f"resolved on {len(cases)} cases x {trials}")
+        if drop > self.cfg.transfer_margin:
+            d.accept = False
+            d.vetoes.append(f"{note} (drop {drop} > margin {self.cfg.transfer_margin})")
+            d.reason = "vetoed by the second-model check: " + d.vetoes[-1] + "; primary: " + d.reason
+        else:
+            d.reason += f"; {note}, within margin {self.cfg.transfer_margin}"
+        self._finish_decision(state, d)
+
+    def _finish_decision(self, state: RunState, d: Decision) -> None:
+        cand = state.candidate
+        cand_result, _ = self._load_ref(json.loads(cand["eval"]))
         cand_dir = Path(cand["dir"])
         diff = candidates.diff(self.run.incumbent_dir, cand_dir)
         spent = sum(r.cost_usd for r in cand_result.per_case.values())
+        outcome = ("accepted" if d.accept else
+                   "transfer_rejected" if d.vetoes and "second-model" in d.reason else
+                   "near_miss" if d.near_miss else "rejected")
         self.history.append(HistoryEntry(
             state.round, cand["id"], cand["component"], cand["hypothesis"], diff,
-            "accepted" if d.accept else "rejected", d.reason, d.delta_S, d.delta_C,
+            outcome, d.reason, d.delta_S, d.delta_C,
             d.improved, d.regressed, round(spent, 4)))
         if d.accept:
             self.publisher.publish(self.run, state.round, cand_dir, diff, d.to_json(), cand["hypothesis"])

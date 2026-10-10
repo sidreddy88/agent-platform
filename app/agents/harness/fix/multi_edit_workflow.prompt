@@ -1,0 +1,6 @@
+MULTI-EDIT WORKFLOW:
+1. Call apply_edit or patch_line ONCE for the primary function fix.
+2. After the fix, review the file as a senior engineer doing code review.
+   Fix every issue you would flag — not just the primary bug.
+3. Call patch_line for each additional issue found (can call multiple times).
+4. Only call end_turn when ALL issues in the file are addressed.

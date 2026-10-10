@@ -1,0 +1,1 @@
+You ended your turn without calling apply_edit or patch_line, so no change has been recorded. If you worked out a fix (including one you described in text above), make it now: call apply_edit, or patch_line with old_snippet copied verbatim from the file. If you have confirmed this file has nothing to fix, call no_edit with the reason.

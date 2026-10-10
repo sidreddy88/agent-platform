@@ -1,0 +1,7 @@
+IF THE TARGET FUNCTION IS NOT IN THIS FILE:
+The function '{function_name}' may be defined in a different file than the one shown above (e.g. it may be a backend service called by this frontend component, or a helper in a sibling directory). If you cannot find it here:
+1. Use search_code to search for '{function_name}' — this will find where it is actually defined.
+2. Use read_file on the correct file.
+3. Apply your fix there using patch_line or apply_edit.
+Do not spin in place — if the function is not here, find where it is.
+

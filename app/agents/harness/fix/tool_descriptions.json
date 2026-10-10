@@ -1,0 +1,9 @@
+{
+ "read_file": "Read any file from the repository. Use this to understand imports, callers, type definitions, or any related code before writing the fix.",
+ "search_code": "Search for a symbol or string across the repository. Returns matching file paths.",
+ "find_callers": "Query the call graph to find every function that calls the target function. Use this BEFORE generating a fix to understand the blast radius \u2014 if callers exist, include updates to them in the same patch when needed. Returns file paths, caller function names, and line numbers. Returns an empty list if the function has no known callers or is not in the index.",
+ "apply_edit": "Replace the primary target function with the fixed version. If the old function text was pre-extracted, only supply new_text. If not pre-extracted, supply both old_text (verbatim from file) and new_text. Call this ONCE for the main function fix.",
+ "patch_line": "Make a targeted replacement anywhere in the file \u2014 for issues OUTSIDE the primary function: wrong model IDs, missing error handling, stale comments, adjacent bugs, etc.\nRules for old_snippet:\n- Copy EXACT verbatim text from the file (1\u20135 lines). Short and unique.\n- Do NOT use this to replace the primary function \u2014 use apply_edit for that.\nYou can call this multiple times for different issues in the file.",
+ "final_verdict": "OPTIONAL last call \u2014 emit your self-assessed verdict on the fix you just made. Call this AFTER apply_edit + any patch_line calls, RIGHT BEFORE end_turn. If you skip it, the runtime defaults to confidence=0.75, escalate=false. Use confidence < 0.70 OR escalate=true when you're unsure: a shaky fix opens a human approval gate instead of a PR. Be honest \u2014 escalation is correct, guessing is not.",
+ "no_edit": "Call ONLY if you have confirmed this file has nothing to fix for this incident. Give the reason. Making no change is then the recorded outcome."
+}

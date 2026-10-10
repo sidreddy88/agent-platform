@@ -98,6 +98,14 @@ class AcceptanceConfig:
     # Noise band on the relative cost change, calibrated like delta from round
     # 0's trial pairs. 0 = the original rule (in band, any saving counts).
     cost_delta: float = 0.0
+    # Compare cost only on cases both harnesses resolved on every trial, so a
+    # cheaper failure never counts as a saving (multi-harness RL article: reward
+    # efficiency only on correct answers). Off = cost over all shared cases.
+    cost_on_shared_successes: bool = False
+    min_shared_successes: int = 5
+    # A rejected in-band candidate with dS >= this fraction of delta is kept as a
+    # near miss the proposer can build on (DGM/HGM archives). 0 = off.
+    near_miss_fraction: float = 0.0
 
 
 @dataclass
@@ -109,13 +117,17 @@ class Decision:
     improved: list[str] = field(default_factory=list)
     regressed: list[str] = field(default_factory=list)
     vetoes: list[str] = field(default_factory=list)
+    near_miss: bool = False
 
     def to_json(self) -> dict:
         return asdict(self)
 
 
-def paired_deltas(incumbent: EvalResult, candidate: EvalResult) -> tuple[float, float, list, list]:
-    """dS over the cases both evaluated, relative dC, and which cases moved."""
+def paired_deltas(incumbent: EvalResult, candidate: EvalResult,
+                  cfg: AcceptanceConfig | None = None) -> tuple[float, float, list, list]:
+    """dS over the cases both evaluated, relative dC, and which cases moved.
+    With cfg.cost_on_shared_successes, dC is over the cases both resolved on
+    every trial (0 if fewer than cfg.min_shared_successes)."""
     shared = sorted(set(incumbent.per_case) & set(candidate.per_case))
     if not shared:
         raise ValueError("candidate and incumbent share no evaluated cases")
@@ -123,6 +135,14 @@ def paired_deltas(incumbent: EvalResult, candidate: EvalResult) -> tuple[float, 
     cand = EvalResult({c: candidate.per_case[c] for c in shared})
     dS = cand.S - inc.S
     dC = (cand.C / inc.C - 1.0) if inc.C > 0 else 0.0
+    if cfg is not None and cfg.cost_on_shared_successes:
+        both = [c for c in shared if inc.per_case[c].score == 1.0 and cand.per_case[c].score == 1.0]
+        if len(both) < cfg.min_shared_successes:
+            dC = 0.0
+        else:
+            inc_s = EvalResult({c: inc.per_case[c] for c in both})
+            cand_s = EvalResult({c: cand.per_case[c] for c in both})
+            dC = (cand_s.C / inc_s.C - 1.0) if inc_s.C > 0 else 0.0
     improved = [c for c in shared if cand.per_case[c].score > inc.per_case[c].score]
     regressed = [c for c in shared if cand.per_case[c].score < inc.per_case[c].score]
     return dS, dC, improved, regressed
@@ -130,7 +150,7 @@ def paired_deltas(incumbent: EvalResult, candidate: EvalResult) -> tuple[float, 
 
 def decide(incumbent: EvalResult, candidate: EvalResult, S_star: float,
            cfg: AcceptanceConfig) -> Decision:
-    dS, dC, improved, regressed = paired_deltas(incumbent, candidate)
+    dS, dC, improved, regressed = paired_deltas(incumbent, candidate, cfg)
     d = Decision(False, "", dS, dC, improved, regressed)
 
     # A guard vetoes only when it fails EVERY trial of the candidate and the
@@ -168,6 +188,8 @@ def decide(incumbent: EvalResult, candidate: EvalResult, S_star: float,
     # from -1.8% to +4.8% across evaluations, so comparing with 0 let noise decide.
     shaped = cfg.w_s * dS - cfg.w_c * (dC + cfg.cost_delta)
     d.accept = shaped > 0
+    d.near_miss = (not d.accept and cfg.near_miss_fraction > 0 and dS > 0
+                   and dS >= cfg.near_miss_fraction * cfg.delta)
     band = f", cost band {cfg.cost_delta:.3f}" if cfg.cost_delta else ""
     d.reason = (f"within noise band (dS {dS:+.3f}, delta {cfg.delta:.3f}{band}); "
                 f"{cfg.w_s}*dS - {cfg.w_c}*(dC{' + band' if cfg.cost_delta else ''}) = {shaped:+.3f} "

@@ -82,7 +82,8 @@ def validate(base: Path, candidate: Path) -> None:
             continue
         if type(value) is not type(b_set[key]):
             raise InvalidCandidate(f"setting {key} changed type")
-        lo_hi = SETTING_BOUNDS.get(key)
+        from app.harness_optimizer import profiles
+        lo_hi = profiles.active().setting_bounds.get(key)
         if lo_hi and not lo_hi[0] <= value <= lo_hi[1]:
             raise InvalidCandidate(f"setting {key}={value} outside {lo_hi}")
     if set(c_tools) != set(b_tools):
