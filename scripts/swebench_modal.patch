@@ -1,0 +1,78 @@
+--- a/swebench/harness/modal_eval/run_evaluation_modal.py
++++ b/swebench/harness/modal_eval/run_evaluation_modal.py
+@@ -26,7 +26,8 @@
+ 
+ app = modal.App("swebench-evaluation")
+ 
+-swebench_image = modal.Image.debian_slim().pip_install("swebench", "tenacity")
++swebench_image = (modal.Image.debian_slim().pip_install("swebench==4.0.3", "tenacity")
++                  .add_local_python_source("swebench"))  # patched: run this exact local copy remotely
+ 
+ from swebench.harness.constants import (
+     APPLY_PATCH_FAIL,
+@@ -114,7 +115,13 @@
+             pass
+ 
+     def write_file(self, file_path: str, content: str):
+-        self.sandbox.open(file_path, "w").write(content)
++        # patched for Modal 1.x: Sandbox.open was removed; use the filesystem API,
++        # falling back to the shell for special files (e.g. cgroup settings).
++        try:
++            self.sandbox.filesystem.write_text(content, file_path)
++        except Exception:
++            import shlex
++            self.sandbox.exec("bash", "-c", f"printf %s {shlex.quote(content)} > {shlex.quote(file_path)}").wait()
+ 
+     def exec(self, command: str) -> tuple[str, int]:
+         """
+@@ -158,6 +165,14 @@
+ 
+     @staticmethod
+     def get_instance_image(test_spec: TestSpec) -> modal.Image:
++        # patched: use the same prebuilt SWE-bench image as local Docker grading
++        # (swebench/sweb.eval.x86_64.<id>), so Modal results match the official
++        # environments. Building from scratch picked up different library versions
++        # (sphinx-10323's gold patch failed 2 existing tests that pass in the image).
++        image_name = "docker.io/swebench/sweb.eval.x86_64." + test_spec.instance_id.lower().replace("__", "_1776_") + ":latest"
++        return modal.Image.from_registry(image_name, add_python="3.11").workdir("/testbed/")
++
++    def _build_instance_image_from_scratch(test_spec: TestSpec) -> modal.Image:  # original, unused
+         env_script = test_spec.setup_env_script
+         # add trusted host flag for Modal's PyPI mirror
+         env_script = env_script.replace(
+@@ -198,8 +213,8 @@
+                 "/opt/miniconda3/bin/conda config --append channels conda-forge",
+                 "adduser --disabled-password --gecos 'dog' nonroot",
+             )
+-            .copy_local_file(Path(remote_env_script_path), remote_env_script_path)
+-            .copy_local_file(Path(remote_repo_script_path), remote_repo_script_path)
++            .add_local_file(Path(remote_env_script_path), remote_env_script_path, copy=True)
++            .add_local_file(Path(remote_repo_script_path), remote_repo_script_path, copy=True)
+             .run_commands(
+                 f"chmod +x {remote_env_script_path}",
+                 f"/bin/bash -c 'source ~/.bashrc && {remote_env_script_path}'",
+@@ -309,7 +324,8 @@
+         # increase recursion limit for testing
+         run_command += " && python3 -c 'import sys; sys.setrecursionlimit(10000)'"
+         # run eval script
+-        run_command += " && /bin/bash /root/eval.sh"
++        # patched: merge stderr into stdout so the set -x test-output markers stay in order
++        run_command += " && /bin/bash /root/eval.sh 2>&1"
+         test_output, returncode = runner.exec(run_command)
+ 
+         total_runtime = time.time() - start_time
+@@ -385,6 +401,14 @@
+             log_dir=log_dir,
+             errored=True,
+         )
++    finally:
++        # patched: always shut the sandbox down. Upstream never terminates it (runner isn't used
++        # as a context manager), so each sandbox lived until its 30-min timeout and a run hit
++        # Modal's 100-container cap (2026-10-07).
++        try:
++            runner.sandbox.terminate()
++        except Exception:
++            pass
+ 
+ 
+ def run_instances_modal(
