@@ -7,7 +7,9 @@ name: Diagnosis gate v2
 # and validation: app/evals/gate_v2.py and harness-evolution-v2.md §0.11.
 #
 # "Changes diagnosis" = diagnosis.py, base.py (the shared ReAct loop), the
-# harness files, or the routed model (config/llm_routing.json). The path check
+# diagnosis harness (app/agents/harness/diagnosis/ and the shared loader
+# harness/__init__.py; the fix agent's harness/fix/ doesn't affect diagnosis),
+# or the routed model (config/llm_routing.json). The path check
 # runs inside the workflow, not as an on.paths filter, so the `gate` job always
 # reports and can be a required check: it passes fast when nothing relevant
 # changed or the PR is a draft, and gives the real verdict when it did.
@@ -43,7 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          relevant='^(app/agents/((diagnosis|base)\.py$|harness/)|config/llm_routing\.json$)'
+          relevant='^(app/agents/((diagnosis|base)\.py$|harness/(diagnosis/|__init__\.py$))|config/llm_routing\.json$)'
           echo "stale=false" >> "$GITHUB_OUTPUT"
           # The PR's live draft state, not the event payload's (see the v1 gate's history).
           draft=$(gh pr view "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
