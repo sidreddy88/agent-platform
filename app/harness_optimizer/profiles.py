@@ -140,7 +140,7 @@ FIX_SETTING_BOUNDS = {
     # and after a fix, regenerate on regressions. A frozenset lists allowed values.
     "test_mode": frozenset({"off", "existing_tests"}),
     "test_max_attempts": (1, 4),
-    "test_max_files": (1, 6),
+    "test_max_files": (1, 10),
     "test_timeout_s": (60, 600),
     "test_pick": frozenset({"fewest_broken", "last"}),
 }

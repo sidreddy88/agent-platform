@@ -6,7 +6,7 @@
   "max_cutoffs": "responses cut off at the output limit in a row before the loop gives up",
   "test_mode": "offline evals with a test sandbox: 'existing_tests' runs the repo's existing tests near the changed file before and after the fix and regenerates the fix when it breaks tests that passed before; 'off' submits the first fix untested",
   "test_max_attempts": "fix attempts in test mode, the first included (each retry is a full new fix run with the failures shown)",
-  "test_max_files": "existing test files run per fix (same module name first, then files that mention the changed function)",
+  "test_max_files": "existing test files run per fix, best-scoring first (module name, area and function in the test path; mentions of the changed function)",
   "test_timeout_s": "seconds allowed for one test run",
   "test_pick": "which attempt is submitted when every attempt still breaks tests: 'fewest_broken' or 'last'"
  },
@@ -16,7 +16,7 @@
  "max_cutoffs": 3,
  "test_mode": "off",
  "test_max_attempts": 3,
- "test_max_files": 3,
+ "test_max_files": 5,
  "test_timeout_s": 300,
  "test_pick": "fewest_broken"
 }

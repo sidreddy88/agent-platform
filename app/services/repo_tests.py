@@ -7,8 +7,9 @@ step (patch_only), so SWE-bench runs measured a configuration production never
 runs. Test mode closes the gap for evals: in the case's own SWE-bench image
 (app/services/test_sandbox.py) it
 
-  1. picks existing test files near the changed file (same module name first,
-     then test files that mention the changed function or class),
+  1. picks existing test files likely to exercise the change (score_test_file:
+     the module's name, its area and the changed function in the test's path,
+     and mentions of the changed function or class),
   2. runs them on the unchanged repo (the baseline: some tests fail already),
   3. runs them again with the fix and reports tests that passed before and
      don't now. Those are the fix's regressions.
@@ -22,6 +23,7 @@ reduced version of swebench.harness.log_parsers.
 """
 from __future__ import annotations
 
+import math
 import re
 import shlex
 import time
@@ -65,11 +67,14 @@ def module_stem(path: str) -> str:
 
 def search_symbol(function_name: str | None) -> str | None:
     """The identifier to look for in test files: the method or function name, or
-    the class for dunder methods. None if nothing specific enough is left."""
+    the class for dunder methods. None if nothing specific enough is left (also
+    for prose such as "the function handling this error")."""
     if not function_name:
         return None
-    parts = [x for x in re.split(r"[.:]", function_name) if x]
+    parts = [x for x in re.split(r"[.:]", function_name.strip()) if x]
     for name in reversed(parts):
+        if not re.fullmatch(r"[A-Za-z_]\w*", name):
+            return None
         if not (name.startswith("__") and name.endswith("__")) and len(name) >= 4:
             return name
     return None
@@ -85,12 +90,34 @@ def _distance(a: str, b: str) -> int:
     return len(pa) + len(pb) - 2 * common
 
 
+_TEST_TREES = ("tests", "test", "testing")
+_GENERIC = {"test", "tests", "testing", "src", "lib", "init", "core", "base", "util", "utils", "main",
+            "get", "set", "sql", "the", "handling", "this", "error", "function", "common", "misc"}
+
+
+def _key(word: str) -> str:
+    """Loose spelling key: models/model, transforms/transformations, ufunc/ufuncs."""
+    w = word.lower()
+    if len(w) > 4 and w.endswith("s"):
+        w = w[:-1]
+    return w[:7]
+
+
+def _tokens(parts) -> set[str]:
+    out = set()
+    for part in parts:
+        for t in re.split(r"[_\W]+", str(part)):
+            if len(t) >= 3 and t.lower() not in _GENERIC:
+                out.add(_key(t))
+    return out
+
+
 def _nearby(changed_path: str, test_path: str) -> bool:
     """A test file in a repo-level test tree (tests/, testing/), or in the same
     subpackage as the change (sharing its first two directories). Keeps a
     generic name like core.py from matching test_core.py across a whole repo."""
     tp = PurePosixPath(test_path).parts
-    if tp and tp[0] in ("tests", "test", "testing"):
+    if tp and tp[0] in _TEST_TREES:
         return True
     cp = PurePosixPath(changed_path).parent.parts
     common = 0
@@ -101,35 +128,53 @@ def _nearby(changed_path: str, test_path: str) -> bool:
     return common >= min(2, len(cp))
 
 
-def select_test_files(changed_path: str, test_files: list[str], symbol_hits: dict[str, int],
-                      max_files: int) -> list[str]:
-    """Test files for a change, in order:
-      1. nearby files named after the module (test_query.py, then test_query_*.py),
-      2. files that mention the changed function or class (nearby first, then by
-         number of mentions),
-      3. only if nothing else matched, a package-wide test file
-         (requests/models.py -> test_requests.py)."""
+def _area(changed_path: str) -> list[str]:
+    """Directories below the top-level package: django/db/models/fields -> db, models, fields."""
+    parts = [p for p in PurePosixPath(changed_path).parent.parts if p not in ("src", "lib")]
+    return parts[1:]
+
+
+def score_test_file(changed_path: str, function_name: str | None, test_path: str, hits: int) -> float:
+    """How likely a test file exercises a change. Signals, all general:
+    the module's own test file (test_query.py), the module name in the test's
+    name or folder (intermediate_rotation_transforms -> test_intermediate_
+    transformations; autodoc/__init__.py -> test_ext_autodoc_configs.py), the
+    change's area in the test's path (db/models/fields -> tests/model_fields/;
+    impute/ -> test_impute.py), the function name in the test's path, and how
+    often the test file mentions the changed function or class."""
+    t = PurePosixPath(test_path)
     stem = module_stem(changed_path)
-    exact = {f"test_{stem}", f"tests_{stem}", f"test{stem}"}
+    t_dirs = _tokens(p for p in t.parent.parts if p not in _TEST_TREES)
+    t_name = _tokens([t.stem])
+    where = t_dirs | t_name
+    score = 0.0
+    if t.stem in (f"test_{stem}", f"tests_{stem}", f"test{stem}"):
+        score += 4
+    score += 2 * len(_tokens([stem]) & where)
+    score += len(_tokens(_area(changed_path)) & where)
+    fn = search_symbol(function_name)
+    if fn:
+        score += len(_tokens([fn]) & where)
+    if hits > 0:
+        score += min(3.0, math.log2(1 + hits))
+    return score
 
-    def name_rank(f: str) -> int | None:
-        s = PurePosixPath(f).stem
-        if s in exact:
-            return 0
-        if stem and s.startswith(f"test_{stem}_"):
-            return 1
-        return None
 
-    by_name = sorted((f for f in test_files if name_rank(f) is not None and _nearby(changed_path, f)),
-                     key=lambda f: (name_rank(f), _distance(changed_path, f), f))
-    by_symbol = [f for f, n in sorted(symbol_hits.items(),
-                                      key=lambda kv: (not _nearby(changed_path, kv[0]), -kv[1],
-                                                      _distance(changed_path, kv[0]), kv[0]))
-                 if _is_test_file(f)]
-    out: list[str] = []
-    for f in by_name + by_symbol:
-        if f not in out:
-            out.append(f)
+def select_test_files(changed_path: str, test_files: list[str], symbol_hits: dict[str, int],
+                      max_files: int, function_name: str | None = None) -> list[str]:
+    """The highest-scoring test files for a change (score_test_file). Files in a
+    repo-wide test tree need more evidence (score 2) than files in the change's
+    own subpackage (score 1). If none qualify, a package-wide test file
+    (requests/models.py -> test_requests.py)."""
+    scored = []
+    for f in test_files:
+        if not _is_test_file(f) or not _nearby(changed_path, f):
+            continue
+        sc = score_test_file(changed_path, function_name, f, symbol_hits.get(f, 0))
+        need = 2.0 if PurePosixPath(f).parts[0] in _TEST_TREES else 1.0
+        if sc >= need:
+            scored.append((-sc, _distance(changed_path, f), f))
+    out = [f for _, _, f in sorted(scored)]
     if not out:
         pkg = [part.strip("_") for part in PurePosixPath(changed_path).parts[:-1] if part != "src"][:1]
         out = sorted((f for f in test_files if pkg and PurePosixPath(f).stem == f"test_{pkg[0]}"),
@@ -264,7 +309,7 @@ async def find_test_files(sandbox: TestSandbox, changed_path: str, function_name
             path, _, n = line.rpartition(":")
             if path in wanted and n.isdigit():
                 hits[path] = int(n)
-    return select_test_files(changed_path, test_files, hits, max_files)
+    return select_test_files(changed_path, test_files, hits, max_files, function_name)
 
 
 async def run_tests(sandbox: TestSandbox, framework: str, files: list[str], timeout: int) -> TestRun:

@@ -35,6 +35,7 @@ def test_module_stem(path, stem):
     ("QuerySet.bulk_create", "bulk_create"),
     ("Quantity.__array_ufunc__", "Quantity"),
     ("__init__", None),
+    ("the function handling this error", None),
     ("f", None),
     (None, None),
 ])
@@ -64,12 +65,28 @@ def test_select_falls_back_to_package_test_file():
 def test_select_ignores_same_name_in_unrelated_subpackages():
     files = ["astropy/cosmology/tests/test_core.py", "astropy/timeseries/tests/test_sampled.py",
              "astropy/units/tests/test_quantity.py", "astropy/units/tests/test_quantity_ufuncs.py"]
-    assert rt.select_test_files("astropy/timeseries/core.py", files, {}, 3) == []
-    assert rt.select_test_files("astropy/units/quantity.py", files, {}, 3) == \
-        ["astropy/units/tests/test_quantity.py", "astropy/units/tests/test_quantity_ufuncs.py"]
-    hits = {"astropy/cosmology/tests/test_core.py": 9, "astropy/timeseries/tests/test_sampled.py": 2}
-    assert rt.select_test_files("astropy/timeseries/core.py", files, hits, 3) == \
-        ["astropy/timeseries/tests/test_sampled.py", "astropy/cosmology/tests/test_core.py"]
+    # core.py is generic: no test_core.py from another subpackage, but the
+    # timeseries area matches its own tests folder
+    assert rt.select_test_files("astropy/timeseries/core.py", files, {}, 3) == \
+        ["astropy/timeseries/tests/test_sampled.py"]
+    got = rt.select_test_files("astropy/units/quantity.py", files, {}, 3, "Quantity.__array_ufunc__")
+    assert got[:2] == ["astropy/units/tests/test_quantity.py", "astropy/units/tests/test_quantity_ufuncs.py"]
+
+
+def test_select_matches_area_and_fuzzy_module_names():
+    files = ["tests/test_ext_autodoc_configs.py", "tests/test_build_html.py", "tests/test_pycode_ast.py"]
+    assert rt.select_test_files("sphinx/ext/autodoc/__init__.py", files, {}, 3)[0] == \
+        "tests/test_ext_autodoc_configs.py"
+    assert rt.select_test_files("sphinx/pycode/ast.py", files, {}, 3) == ["tests/test_pycode_ast.py"]
+    files = ["astropy/coordinates/tests/test_intermediate_transformations.py",
+             "astropy/coordinates/tests/test_sky_coord.py"]
+    assert rt.select_test_files("astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py",
+                                files, {}, 3, "the function handling this error")[0] == files[0]
+    files = ["tests/model_fields/test_jsonfield.py", "tests/serializers/test_json.py",
+             "tests/backends/tests.py"]
+    got = rt.select_test_files("django/db/models/fields/json.py", files, {}, 3, "KeyTransform.as_sql")
+    assert got[0] == "tests/serializers/test_json.py"          # the module's own name wins
+    assert "tests/model_fields/test_jsonfield.py" in got and "tests/backends/tests.py" not in got
 
 
 def test_package_file_only_when_nothing_else_matches():
