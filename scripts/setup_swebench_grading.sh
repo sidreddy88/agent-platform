@@ -6,7 +6,8 @@
 # swebench 4.0.3 with Modal 1.6.1 in its own venv and applies
 # scripts/swebench_modal.patch: Modal 1.x API changes, the official prebuilt
 # x86_64 images (so results match local Docker grading), stderr kept in order,
-# and sandboxes always terminated (upstream leaves them running).
+# and sandboxes always terminated (upstream leaves them running). Versions are
+# pinned to a known-good set (swebench_grading_constraints.txt).
 #
 #   bash scripts/setup_swebench_grading.sh        # venv at ~/.venvs/swebench
 #   ~/.venvs/swebench/bin/modal token new         # once, to log in to Modal
@@ -16,7 +17,10 @@ PY="${PYTHON:-python3.12}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 "$PY" -m venv "$VENV"
-"$VENV/bin/pip" install -q "swebench==4.0.3" "modal==1.6.1"
+# --no-deps: install the exact known-good set as is. It was assembled in stages
+# (swebench, then a newer Modal), so pip's resolver rejects it as a whole even
+# though it works.
+"$VENV/bin/pip" install -q --no-deps -r "$HERE/swebench_grading_constraints.txt"
 SITE="$("$VENV/bin/python" -c 'import os, swebench; print(os.path.dirname(os.path.dirname(swebench.__file__)))')"
 if patch -d "$SITE" -p1 --forward --dry-run < "$HERE/swebench_modal.patch" >/dev/null 2>&1; then
   patch -d "$SITE" -p1 --forward < "$HERE/swebench_modal.patch"
