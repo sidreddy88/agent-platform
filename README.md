@@ -37,6 +37,14 @@ It is also a research substrate: every LLM call and tool execution is captured a
 |---|---|
 | Resolved, DeepSeek-V4.1-Flash for both agents | **300/500 = 60.0%** (95% CI 55.6–64.2) at **$0.13 per resolved issue** |
 | Same run under the production edit-safety policy | 278/500 = 55.6% (the library policy lets fixes touch framework paths such as Django's `migrations/`, which production protects) |
+| **Same-model baseline: mini-swe-agent**, standard config, network-sandboxed (2026-10-10) | **399/500 = 79.8%** at $0.08 per resolved issue |
+
+The baseline matters: a ~100-line bash agent on the same model resolves 112 issues this pipeline misses
+(it misses 13 that this pipeline resolves). Of those 112, our diagnosis named the wrong file in 42, and
+the fix step wrote a wrong patch or none in 70, so most of the gap is the fix step, which has no shell to
+run code while it works. The baseline runs in Harbor with only the model API reachable and every patch
+graded by the official harness; tools in `scripts/build_harbor_swebench.py` and
+`scripts/grade_harbor_baseline.py` (PR #286).
 
 **Live pipeline** (from `GET /agents/pr-stats`, computed from every incident's actual PR outcome in the live deploy's Postgres `incidents` table, not reproducible from a fresh clone):
 
