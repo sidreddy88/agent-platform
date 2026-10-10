@@ -45,6 +45,9 @@ class LLMResponse:
     cost_usd: float
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    # "max_tokens" when the reply was cut off at the output limit (finish_reason
+    # "length"); reasoning models can spend the whole limit before any visible text.
+    stop_reason: str = "end_turn"
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +94,11 @@ class LiteLLMProvider(BaseProvider):
         ))
         usage = response.usage
         provider = _infer_provider(model)
+        finish = getattr(response.choices[0], "finish_reason", None)
+        if finish == "length":
+            logger.warning("[gateway] %s reply cut off at max_tokens=%d (output %s tokens, %d chars of text)",
+                           model, max_tokens, getattr(usage, "completion_tokens", "?"),
+                           len(response.choices[0].message.content or ""))
 
         cache_read = 0
         cache_creation = 0
@@ -101,6 +109,7 @@ class LiteLLMProvider(BaseProvider):
             cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
 
         return LLMResponse(
+            stop_reason="max_tokens" if finish == "length" else "end_turn",
             content=response.choices[0].message.content or "",
             input_tokens=usage.prompt_tokens if usage else 0,
             output_tokens=usage.completion_tokens if usage else 0,
