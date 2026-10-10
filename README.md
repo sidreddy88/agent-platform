@@ -31,6 +31,13 @@ It is also a research substrate: every LLM call and tool execution is captured a
 | DeepSeek + evolved harness vs Claude Sonnet 5 on the held-out cases | **89.9% vs 79.5%** at 4.7× lower cost |
 | Diagnosis CI gate (434 cases, paired test) | catches a 3.5-point drop **85%** of the time (old gate: under 10%) at a **5%** false-alarm rate |
 
+**End to end, diagnosis + fix, all 500 SWE-bench Verified issues** (official harness, graded on Modal; [reproduce it](#reproduce-the-swe-bench-verified-results)):
+
+| Metric | Value |
+|---|---|
+| Resolved, DeepSeek-V4.1-Flash for both agents | **300/500 = 60.0%** (95% CI 55.6–64.2) at **$0.13 per resolved issue** |
+| Same run under the production edit-safety policy | 278/500 = 55.6% (the library policy lets fixes touch framework paths such as Django's `migrations/`, which production protects) |
+
 **Live pipeline** (from `GET /agents/pr-stats`, computed from every incident's actual PR outcome in the live deploy's Postgres `incidents` table, not reproducible from a fresh clone):
 
 | Metric | Value | What it covers |
@@ -124,6 +131,46 @@ pytest tests/
 ```
 
 Full agent docs: [`CLAUDE.md`](CLAUDE.md).
+
+---
+
+## Reproduce the SWE-bench Verified results
+
+Reruns the fix step on all 500 SWE-bench Verified issues with the saved diagnoses from run 1, exactly as
+run 2 did, and grades it with the official harness on Modal. You need a [Together AI](https://together.ai)
+key (DeepSeek-V4.1-Flash) and a [Modal](https://modal.com) account. `GITHUB_TOKEN` is optional (it only
+raises GitHub's rate limits when cloning the 12 repos).
+
+```bash
+# 1. Agent environment (see Quick start); in .env or your shell:
+export TOGETHER_API_KEY=...
+
+# 2. Grading environment: swebench 4.0.3 + Modal 1.6.1 in their own venv, with
+#    scripts/swebench_modal.patch (the harness's Modal code predates Modal 1.0)
+bash scripts/setup_swebench_grading.sh
+~/.venvs/swebench/bin/modal token new
+
+# 3. Fix all 500 (~2 h at --parallel 6, ~$40 on Together)
+python scripts/eval_swebench_fix.py --all --run my-run2 \
+  --diagnoses-from app/evals/swebench_run1_diagnoses.jsonl.gz \
+  --fix-model together_ai/deepseek-ai/DeepSeek-V4.1-Flash \
+  --fix-max-tokens 32768 --blast-radius-profile library --no-self-critique --parallel 6
+
+# 4. Grade with the official harness on Modal (a few dollars of Modal time)
+~/.venvs/swebench/bin/python scripts/swebench_eval_x86.py \
+  --dataset_name princeton-nlp/SWE-bench_Verified \
+  --predictions_path runs/fix/my-run2/predictions.jsonl --run_id my-run2 --modal true
+```
+
+Expect about 300/500 resolved; a rerun moves by a few cases (the fix step is close to deterministic on
+DeepSeek). Notes:
+- **Try it small first:** `--pilot` (10 cases, under $1) or `--cases id1,id2` instead of `--all`.
+- **Without `--fix-model`** the fix model is Claude Sonnet (~20× the cost).
+- **Production policy:** drop `--blast-radius-profile library` (55.6% in run 2).
+- **Full pipeline:** drop `--diagnoses-from` to diagnose every issue too (~$0.04 more per issue;
+  results differ from run 2 by run-to-run noise).
+- Results land in `runs/fix/my-run2/` (`results.jsonl` per case, `predictions.jsonl` for grading); the
+  grading report is written by the harness in the current directory.
 
 ---
 

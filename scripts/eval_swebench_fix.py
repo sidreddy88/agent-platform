@@ -215,12 +215,30 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None,
         await pinned.remove_worktree()
 
 
+def _diagnoses_path(arg: str) -> Path:
+    """A run name under runs/fix/, or a file path."""
+    p = Path(arg)
+    return p if p.suffix in (".jsonl", ".gz") or p.is_file() else OUT / arg
+
+
+def _read_diagnoses(source: Path) -> str:
+    """Saved diagnoses: an earlier run's directory (its results.jsonl) or a
+    .jsonl / .jsonl.gz file such as app/evals/swebench_run1_diagnoses.jsonl.gz."""
+    if source.is_dir():
+        return (source / "results.jsonl").read_text()
+    if source.suffix == ".gz":
+        import gzip
+        with gzip.open(source, "rt") as f:
+            return f.read()
+    return source.read_text()
+
+
 async def main_async(ids: list[str], run_dir: Path, diagnoses_from: Path | None = None,
                      parallel: int = 1) -> None:
     rows = {r["instance_id"]: r for r in map(json.loads, FULL.read_text().splitlines()) if r}
     saved: dict[str, dict] = {}
     if diagnoses_from is not None:
-        for line in (diagnoses_from / "results.jsonl").read_text().splitlines():
+        for line in _read_diagnoses(diagnoses_from).splitlines():
             rec = json.loads(line)
             if (rec.get("diagnosis") or {}).get("full"):
                 saved[rec["instance_id"]] = rec["diagnosis"]["full"]
@@ -266,7 +284,9 @@ def main() -> int:
     group.add_argument("--all", action="store_true", help="all 500 SWE-bench Verified cases")
     group.add_argument("--cases", help="comma-separated instance ids")
     ap.add_argument("--run", required=True, help="run name: writes runs/fix/<run>/")
-    ap.add_argument("--diagnoses-from", help="reuse the full diagnoses saved by this earlier run")
+    ap.add_argument("--diagnoses-from",
+                    help="reuse saved diagnoses: an earlier run's name (runs/fix/<name>) or a .jsonl(.gz) "
+                         "file, e.g. app/evals/swebench_run1_diagnoses.jsonl.gz (run 1's, used by run 2)")
     ap.add_argument("--fix-model", help="LiteLLM model id for the fix task (sets LLM_MODEL_FIX)")
     ap.add_argument("--diagnosis-only", action="store_true",
                     help="run and grade diagnosis only, skip the fix step (sets EVAL_DIAGNOSIS_ONLY=1)")
@@ -309,7 +329,7 @@ def main() -> int:
         ids = [r["instance_id"] for r in map(json.loads, FULL.read_text().splitlines()) if r]
     else:
         ids = args.cases.split(",")
-    asyncio.run(main_async(ids, run_dir, OUT / args.diagnoses_from if args.diagnoses_from else None,
+    asyncio.run(main_async(ids, run_dir, _diagnoses_path(args.diagnoses_from) if args.diagnoses_from else None,
                            args.parallel))
     return 0
 
