@@ -195,9 +195,25 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None,
         # once. Shares DiagnosisAgent's cache (keyed by repo and pinned SHA).
         agent._code_graph = await _pinned_graph(owner, repo, pinned)
         agent._llm = llm_gateway.get_llm_service_for("fix", model=fix_model)
-        with cost_meter.metered() as m:
-            t0 = time.monotonic()
-            result, steps = await agent.fix_with_steps(incident, patch_only=True)
+        sandbox = None
+        if agent._fix_harness.settings.get("test_mode", "off") != "off":
+            # Test mode: the case's own SWE-bench image on Modal, network blocked, to
+            # run the repo's existing tests around the fix. A sandbox that won't start
+            # fails the case rather than silently running untested.
+            from app.services.test_sandbox import ModalTestSandbox, swebench_image
+            try:
+                sandbox = await ModalTestSandbox(swebench_image(instance["instance_id"])).start()
+            except Exception as exc:
+                rec["fix"] = {"error": f"test sandbox failed to start: {exc}"}
+                return rec
+            agent._sandbox = sandbox
+        try:
+            with cost_meter.metered() as m:
+                t0 = time.monotonic()
+                result, steps = await agent.fix_with_steps(incident, patch_only=True)
+        finally:
+            if sandbox is not None:
+                await sandbox.close()
         patch = _git_diff(pinned.local_path, result.patched_files) if result.patched_files else ""
         rec["fix"] = {
             "target_file": result.target_file, "target_function": result.target_function,
@@ -208,6 +224,7 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None,
             "trajectory_steps": list(getattr(agent, "_fix_steps", []) or []),
             "provider_failure": _fix_provider_failure(getattr(agent, "_llm_error", None)),
             "self_feedback": getattr(agent, "_self_feedback", None),
+            "test_runs": list(getattr(agent, "_test_log", []) or []),
         }
         rec["model_patch"] = patch
         return rec
@@ -299,6 +316,9 @@ def main() -> int:
     ap.add_argument("--blast-radius-profile", choices=["default", "library"],
                     help="protected-path policy (sets BLAST_RADIUS_PROFILE); 'library' stops the "
                          "app-oriented migrations/auth folder rules from blocking library source")
+    ap.add_argument("--harness-dir",
+                    help="fix harness directory to use (sets HARNESS_DIR_FIX); e.g. a copy with "
+                         "test_mode = existing_tests, which gives each case a Modal test sandbox")
     ap.add_argument("--parallel", type=int, default=1,
                     help="cases at once (API-bound; keep low on a laptop, e.g. 3)")
     args = ap.parse_args()
@@ -318,6 +338,8 @@ def main() -> int:
         os.environ["EVAL_DIAGNOSIS_ONLY"] = "1"
     if args.fix_max_tokens:
         os.environ["LLM_MAX_TOKENS_FIX"] = str(args.fix_max_tokens)
+    if args.harness_dir:
+        os.environ["HARNESS_DIR_FIX"] = str(Path(args.harness_dir).resolve())
     if args.blast_radius_profile:
         os.environ["BLAST_RADIUS_PROFILE"] = args.blast_radius_profile
     if args.pilot:

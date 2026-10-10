@@ -636,6 +636,14 @@ class FixGenerationAgent(BaseAgent):
                 steps.append("⚠ Critique LIKELY WRONG but no alternate frame available — proceeding")
 
         if patch_only:
+            # Test mode (offline evals with a test sandbox attached): the repo's own
+            # tests before and after the fix, regenerating on regressions, the way
+            # production's step 3d does with its sandbox.
+            if (getattr(self, "_sandbox", None) is not None
+                    and self._fix_harness.settings.get("test_mode", "off") == "existing_tests"):
+                old_function, new_function, patches = await self._existing_tests_retry(
+                    incident, file_path, function_name, content, context_bundle,
+                    old_function, new_function, patches, steps)
             new_content = self._apply_all_edits(content, old_function, new_function, patches)
             steps.append("✓ patch_only: stopping before sandbox, Issue and PR")
             return FixResult(
@@ -2247,6 +2255,89 @@ class FixGenerationAgent(BaseAgent):
             len(old_text), len(new_text), file_path, len(patches),
         )
         return old_text, new_text.strip(), patches, verdict
+
+    async def _existing_tests_retry(
+        self, incident: IncidentState, file_path: str, function_name: str, content: str,
+        context_bundle: dict | None, old_function: str, new_function: str,
+        patches: list[tuple[str, str]], steps: list[str],
+    ) -> tuple[str, str, list[tuple[str, str]]]:
+        """Run the repo's existing tests near `file_path` before and after the fix;
+        while the fix breaks tests that passed before, regenerate it with the
+        failures shown (up to test_max_attempts fixes in all). Returns the edits
+        to submit. Every test run is logged in self._test_log."""
+        import difflib
+        from app.services import repo_tests
+
+        h = self._fix_harness
+        sandbox = self._sandbox
+        log: list[dict] = []
+        self._test_log = log
+        framework = repo_tests.framework_for(f"{self._owner}/{self._repo}")
+        timeout = int(h.setting("test_timeout_s"))
+        files = await repo_tests.find_test_files(sandbox, file_path, function_name,
+                                                 int(h.setting("test_max_files")))
+        if not files:
+            log.append({"run": "select", "files": [], "note": "no existing tests found"})
+            steps.append(f"– Test mode: no existing tests found near {file_path}; submitting untested")
+            return old_function, new_function, patches
+        before = await repo_tests.run_tests(sandbox, framework, files, timeout)
+        log.append(before.summary("before"))
+        if before.infra_error or before.timed_out or before.passing == 0:
+            why = before.infra_error or ("timed out" if before.timed_out else "no passing tests")
+            steps.append(f"– Test mode: baseline run unusable ({why}); submitting untested")
+            return old_function, new_function, patches
+
+        attempts = max(1, int(h.setting("test_max_attempts")))
+        pick_last = h.settings.get("test_pick", "fewest_broken") == "last"
+        best: tuple[int, tuple] | None = None
+        current = (old_function, new_function, patches)
+        for attempt in range(1, attempts + 1):
+            new_content = self._apply_all_edits(content, *current)
+            try:
+                await sandbox.write_file(file_path, new_content)
+            except Exception as exc:
+                log.append({"run": f"attempt {attempt}", "infra_error": f"write failed: {exc}"[:300]})
+                steps.append(f"– Test mode: could not write the fix into the sandbox ({exc}); submitting as is")
+                break
+            after = await repo_tests.run_tests(sandbox, framework, files, timeout)
+            if after.infra_error:
+                log.append(after.summary(f"attempt {attempt}"))
+                steps.append(f"– Test mode: test run failed ({after.infra_error[:120]}); submitting as is")
+                break
+            broken = repo_tests.newly_failing(before.results, after.results)
+            log.append(after.summary(f"attempt {attempt}", broken))
+            if best is None or pick_last or len(broken) < best[0]:
+                best = (len(broken), current)
+            if not broken:
+                steps.append(f"✓ Test mode: {before.passing} existing tests still pass "
+                             f"(attempt {attempt}/{attempts})")
+                break
+            steps.append(f"✗ Test mode: fix breaks {len(broken)} existing test(s) "
+                         f"(attempt {attempt}/{attempts}): {', '.join(broken[:5])}")
+            if attempt == attempts:
+                break
+            diff = "".join(difflib.unified_diff(
+                content.splitlines(keepends=True), new_content.splitlines(keepends=True),
+                fromfile=f"a/{file_path}", tofile=f"b/{file_path}"))
+            feedback = h.render(
+                "test_failure_feedback", count=len(broken),
+                tests="\n".join(f"- {t}" for t in broken[:20]) + (
+                    f"\n- ... and {len(broken) - 20} more" if len(broken) > 20 else ""),
+                output=after.excerpt, previous_diff=repo_tests.trim_output(diff, head=2500, tail=1500))
+            steps.append(f"↻ Test mode: regenerating the fix with the failures shown "
+                         f"(attempt {attempt + 1}/{attempts})")
+            try:
+                o, n, p, _ = await self._generate_fix(content, function_name, incident, file_path,
+                                                      context_bundle, test_failures=feedback)
+            except Exception as exc:
+                steps.append(f"– Test mode: retry failed ({exc}); keeping the best attempt")
+                break
+            if not o:
+                steps.append("– Test mode: retry made no edit; keeping the best attempt")
+                break
+            current = (o, n, p)
+        chosen = best[1] if best is not None else current
+        return chosen
 
     def _extract_test_failures(self, output: str) -> str:
         """Extract the meaningful lines from jest test output for LLM context."""

@@ -169,6 +169,11 @@ DeepSeek). Notes:
 - **Production policy:** drop `--blast-radius-profile library` (55.6% in run 2).
 - **Full pipeline:** drop `--diagnoses-from` to diagnose every issue too (~$0.04 more per issue;
   results differ from run 2 by run-to-run noise).
+- **Test mode (optional):** run the repo's existing tests near each fix and regenerate the fix when it
+  breaks tests that passed before (production's sandbox test-and-retry, in the case's SWE-bench image on
+  Modal). Copy `app/agents/harness/fix/` somewhere, set `"test_mode": "existing_tests"` in its
+  `settings.json`, and pass `--harness-dir <copy>`. On a 93-case A/B it recovered 2 cases and lost 1 for
+  ~70% more cost, so it's off by default.
 - Results land in `runs/fix/my-run2/` (`results.jsonl` per case, `predictions.jsonl` for grading); the
   grading report is written by the harness in the current directory.
 

@@ -118,7 +118,10 @@ def settings_table(harness_dir: Path) -> str:
         if key.startswith("_"):
             continue
         bounds = _profile().setting_bounds.get(key)
-        rng = f", allowed {bounds[0]}-{bounds[1]}" if bounds else ""
+        if isinstance(bounds, frozenset):
+            rng = f", one of {sorted(bounds)}"
+        else:
+            rng = f", allowed {bounds[0]}-{bounds[1]}" if bounds else ""
         lines.append(f"- {key} = {value!r}{rng}: {docs.get(key, '(undocumented)')}")
     return "\n".join(lines)
 
