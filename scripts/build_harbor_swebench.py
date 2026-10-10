@@ -14,6 +14,13 @@ and changes two things, both so the agent sees what our fix agent sees:
      sandbox does (app/services/test_sandbox.py). With the network blocked, the
      agent hunted newer releases in those caches instead.
 
+And one addition for grading: the verifier first saves the agent's changes
+(`git add -A && git diff --cached`, new files included) to
+/logs/verifier/model.patch, so the same patches can also be graded by the
+official SWE-bench harness, exactly like our own runs. mini-swe-agent edits
+files in place under Harbor and leaves no diff otherwise, and Harbor's verifier
+runs `git clean -fd`, which would drop new files a fix creates.
+
 Everything else (instruction, image, tests, timeouts) is Harbor's.
 
     harbor datasets download swebench-verified -o /tmp/hb
@@ -52,6 +59,20 @@ def patch_task(task_dir: Path, allowed: list[str]) -> None:
     if CLEAN_CACHES not in d:
         dockerfile.write_text(d.rstrip("\n") + "\n# Package caches can hold newer releases of the code under test.\n"
                               + CLEAN_CACHES + "\n")
+
+
+CAPTURE = ("git -C /testbed add -A >/dev/null 2>&1 && git -C /testbed diff --cached > /logs/verifier/model.patch "
+           "2>/dev/null; git -C /testbed reset -q >/dev/null 2>&1; true  # saved for official grading")
+
+
+def capture_patch(task_dir: Path) -> None:
+    test_sh = task_dir / "tests" / "test.sh"
+    lines = test_sh.read_text().splitlines()
+    if any("model.patch" in ln for ln in lines):
+        return
+    i = next(k for k, ln in enumerate(lines) if ln.strip() == "cd /testbed")
+    lines.insert(i + 1, "        mkdir -p /logs/verifier; " + CAPTURE)
+    test_sh.write_text("\n".join(lines) + "\n")
 
 
 def network_check_task(template: Path, out: Path, allowed: list[str]) -> Path:
@@ -101,6 +122,7 @@ def main() -> int:
             shutil.rmtree(dest)
         shutil.copytree(src / i, dest)
         patch_task(dest, allowed)
+        capture_patch(dest)
     (out / "cases.json").write_text(json.dumps(ids, indent=1))
     print(f"{len(ids)} tasks in {out}")
     return 0
