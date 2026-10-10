@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Harness optimizer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --text:#e6e8ee; --muted:#9aa3b2;
+          --red:#ff6b6b; --amber:#f5b942; --green:#4cc38a; --blue:#6ea8fe; --violet:#b892ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 28px; border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:19px; }
+  select { background:#0f1218; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px 10px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .b-run { background:#163126; color:var(--green); } .b-stall { background:#3a2f12; color:var(--amber); }
+  .b-stop { background:#22262f; color:var(--muted); } .b-done { background:#1c2a40; color:var(--blue); }
+  .b-acc { background:#163126; color:var(--green); } .b-rej { background:#3a1616; color:var(--red); }
+  .b-near { background:#2a2040; color:var(--violet); } .b-other { background:#22262f; color:var(--muted); }
+  main { padding:18px 28px; }
+  .stats { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:18px; }
+  @media (max-width:1100px){ .stats { grid-template-columns:repeat(3,1fr); } }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .stat .v { font-size:22px; font-weight:600; } .stat .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+  .stat .s { color:var(--muted); font-size:12px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 18px; margin-bottom:18px; }
+  section h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .bar { height:8px; background:#0f1218; border-radius:6px; overflow:hidden; margin:6px 0; }
+  .bar > div { height:100%; background:var(--blue); }
+  .bar.spend > div { background:var(--amber); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  .muted { color:var(--muted); } .mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
+  pre { white-space:pre-wrap; background:#0f1218; border:1px solid var(--line); border-radius:8px; padding:10px; max-height:320px; overflow:auto; font-size:12px; margin:6px 0; }
+  details summary { cursor:pointer; color:var(--blue); }
+  .grid2 { display:grid; grid-template-columns:2fr 1fr; gap:18px; } @media (max-width:1100px){ .grid2 { grid-template-columns:1fr; } }
+  .v-pass { color:var(--green); } .v-fail { color:var(--red); }
+  .up { color:var(--green); font-weight:600; } .down { color:var(--red); font-weight:600; }
+  .explain { color:var(--muted); font-size:13px; margin:2px 0 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Harness optimizer</h1>
+  <select id="run"></select>
+  <span id="status"></span>
+  <span class="muted" id="updated"></span>
+</header>
+<main>
+  <div class="stats" id="stats"></div>
+  <section><h2>What it's doing now</h2><div id="now"></div></section>
+  <div class="grid2">
+    <div>
+      <section><h2>Rounds</h2><div id="rounds"></div></section>
+      <section><h2>Cases: incumbent vs evaluation in progress</h2><div id="cases"></div></section>
+    </div>
+    <div>
+      <section><h2>Timing</h2><div id="timing"></div></section>
+      <section><h2>Health checks</h2><div id="health"></div></section>
+      <section><h2>Log (last lines)</h2><pre id="log"></pre></section>
+    </div>
+  </div>
+  <section id="report-sec" style="display:none"><h2>Held-out report</h2><pre id="report"></pre></section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pct = x => x == null ? "–" : (100 * x).toFixed(1) + "%";
+const money = x => x == null ? "–" : "$" + Number(x).toFixed(2);
+const dur = s => s == null ? "–" : s < 90 ? Math.round(s) + "s" : s < 5400 ? Math.round(s / 60) + "m" : (s / 3600).toFixed(1) + "h";
+let current = null;
+
+const PHASE = {
+  smoke: "Smoke check: a few quick replays to make sure everything works before spending on calibration.",
+  evaluate0: "Round 0 (calibration): running the unchanged harness twice on every case to measure the baseline and how noisy results are (the noise band δ).",
+  propose: "Claude is reading the evidence (failing runs, the agent's own feedback, cost by source, past attempts) and writing two candidate harness edits.",
+  screen: "The critic is reviewing the chosen edit for leakage, gaming the tests, and other overfitting.",
+  evaluate: "Running the fix agent with the candidate harness on every evolve case, graded on Modal.",
+  decide: "Comparing candidate vs incumbent case by case against the noise band.",
+  transfer: "Second-model check: re-running candidate and incumbent with GLM-5.3-Flash; a big drop vetoes the edit.",
+  final: "Held-out test: original vs final harness on repos the optimizer never saw.",
+  done: "Finished.",
+};
+
+async function loadRuns() {
+  const rs = await (await fetch("/api/runs")).json();
+  const sel = $("run"), keep = sel.value;
+  sel.innerHTML = rs.map(r => `<option value="${esc(r.name)}">${esc(r.name)} · ${esc(r.phase)} · r${esc(r.round)} · ${money(r.spent_usd)}</option>`).join("");
+  sel.value = keep && rs.some(r => r.name === keep) ? keep : (rs[0] && rs[0].name);
+}
+
+function outcomeBadge(o) {
+  const cls = o === "accepted" ? "b-acc" : o === "near_miss" ? "b-near" : (o || "").includes("reject") ? "b-rej" : "b-other";
+  return `<span class="badge ${cls}">${esc(o)}</span>`;
+}
+
+async function refresh() {
+  const name = $("run").value; if (!name) return;
+  const d = await (await fetch("/api/run/" + encodeURIComponent(name))).json();
+  current = d;
+  const stalled = d.running && d.seconds_since_progress > 900;
+  $("status").innerHTML = d.phase === "done" ? `<span class="badge b-done">DONE</span>`
+    : d.running ? (stalled ? `<span class="badge b-stall">STALLED? no progress for ${dur(d.seconds_since_progress)}</span>` : `<span class="badge b-run">RUNNING</span>`)
+    : `<span class="badge b-stop">NOT RUNNING</span>`;
+  $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+
+  const spentFrac = d.budget_usd ? Math.min(1, d.spent_usd / d.budget_usd) : 0;
+  $("stats").innerHTML = [
+    ["Round", `${d.round ?? "–"} / ${d.max_rounds ?? "–"}`, `phase: ${d.phase}`],
+    ["Spent", `${money(d.spent_usd)}`, `of ${money(d.budget_usd)} cap<div class="bar spend"><div style="width:${100*spentFrac}%"></div></div>`],
+    ["Best pass rate S*", pct(d.S_star), `${d.n_evolve} evolve + ${d.n_guards} guard cases`],
+    ["Noise band δ", d.delta == null ? "–" : d.delta.toFixed(3), d.delta_cost ? `cost band ${pct(d.delta_cost)}` : "cost band: not set"],
+    ["Accepted", `${d.accepted.length}`, d.accepted.join(", ") || "none yet"],
+    ["Rounds without acceptance", `${d.stalled_rounds ?? 0}`, `stops at ${d.config.max_stall ?? "–"}`],
+  ].map(([k, v, s]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
+
+  const key = d.phase === "evaluate" && d.round === 0 ? "evaluate0" : d.phase;
+  let now = `<div class="explain">${esc(PHASE[key] || d.phase)}</div>`;
+  if (d.stop_reason) now += `<div><b>Stopped:</b> ${esc(d.stop_reason)}</div>`;
+  if (d.current && (d.phase === "evaluate" || d.phase === "smoke" || d.phase === "final")) {
+    const f = d.current.of ? d.current.done / d.current.of : 0;
+    const label = d.current.label || (d.current.is_incumbent ? "Incumbent harness" : "Candidate harness");
+    now += `<div>${esc(label)} <span class="mono muted">${esc(d.current.hash)}</span>: ${d.current.done} / ${d.current.of} cases saved (${esc(d.current.trials)} = trials per case)
+            <div class="bar"><div style="width:${100*f}%"></div></div><span class="muted">results are saved in chunks of 25 cases, so this count moves in steps ·
+            ${d.trials_finished_this_session != null ? `<b>${d.trials_finished_this_session}</b> fix runs finished this session · ` : ""}
+            last progress ${dur(d.seconds_since_progress)} ago · heartbeat ${dur(d.heartbeat_age_s)} ago</span></div>`;
+  }
+  if (d.candidate && d.candidate.id) {
+    now += `<div style="margin-top:8px"><b>Candidate ${esc(d.candidate.id)}</b> <span class="badge b-other">${esc(d.candidate.component)}</span><div class="explain">${esc(d.candidate.hypothesis)}</div></div>`;
+  }
+  $("now").innerHTML = now;
+
+  $("rounds").innerHTML = d.history.length ? `<table><tr><th>Round</th><th>Edit</th><th>ΔS</th><th>ΔC</th><th>Cases</th><th>Outcome</th></tr>` +
+    d.history.map(h => `<tr><td>r${esc(h.round)}</td>
+      <td><span class="badge b-other">${esc(h.component)}</span> ${esc((h.hypothesis || "").slice(0, 220))}
+        <details><summary>reason and diff</summary><div class="explain">${esc(h.reason)}</div><pre>${esc(h.diff || "")}</pre></details></td>
+      <td class="${(h.delta_S||0)>0?'up':(h.delta_S||0)<0?'down':''}">${h.delta_S == null ? "–" : (h.delta_S >= 0 ? "+" : "") + h.delta_S.toFixed(3)}</td>
+      <td>${h.delta_C == null ? "–" : (h.delta_C >= 0 ? "+" : "") + (100*h.delta_C).toFixed(1) + "%"}</td>
+      <td><span class="up">+${(h.improved||[]).length}</span> / <span class="down">−${(h.regressed||[]).length}</span></td>
+      <td>${outcomeBadge(h.outcome)}</td></tr>`).join("") + `</table>`
+    : `<div class="muted">No rounds judged yet.</div>`;
+
+  const inc = d.incumbent_cases || {}, cur = (d.current && !d.current.is_incumbent) ? d.current.cases : {};
+  const names = Array.from(new Set([...Object.keys(inc), ...Object.keys(cur)])).sort();
+  const v = vs => (vs || []).map(x => `<span class="${x==='PASS'?'v-pass':'v-fail'}">${x==='PASS'?'✓':'✗'}</span>`).join(" ") || "<span class='muted'>…</span>";
+  const score = vs => vs && vs.length ? vs.filter(x => x === "PASS").length / vs.length : null;
+  const changed = names.filter(n => cur[n] && inc[n] && score(cur[n].verdicts) !== score(inc[n].verdicts));
+  $("cases").innerHTML = names.length ? `<div class="explain">${names.length} cases · ${changed.length} changed vs incumbent in the evaluation in progress</div>
+    <table><tr><th>Case</th><th>Incumbent</th><th>In progress</th></tr>` +
+    names.map(n => { const a = score(inc[n]?.verdicts), b = score(cur[n]?.verdicts);
+      const cls = (a != null && b != null && b > a) ? "up" : (a != null && b != null && b < a) ? "down" : "";
+      return `<tr><td class="mono ${cls}">${esc(n)}</td><td>${v(inc[n]?.verdicts)}</td><td>${v(cur[n]?.verdicts)}</td></tr>`; }).join("") + `</table>`
+    : `<div class="muted">No cases evaluated yet.</div>`;
+
+  $("timing").innerHTML = d.timing.length ? `<table>` + d.timing.slice().reverse().map(t => `<tr><td>${esc(t.phase)}</td><td>${dur(t.seconds)}</td></tr>`).join("") + `</table>` : `<div class="muted">–</div>`;
+  const h = d.health || {}, lc = h.last_check || {};
+  $("health").innerHTML = `<div>${h.checks ?? 0} checks run</div>` + (lc.time ? `<div class="muted">last: round ${esc(lc.round)} ${esc(lc.phase)}, ${esc(lc.cases)} cases, ${lc.problems && lc.problems.length ? `<span class="down">${esc(lc.problems.join("; "))}</span>` : `<span class="up">no problems</span>`}</div>` : "");
+  $("log").textContent = (d.log || []).join("\n");
+  $("report-sec").style.display = d.report ? "" : "none";
+  if (d.report) $("report").textContent = d.report;
+}
+
+$("run").addEventListener("change", refresh);
+(async () => { await loadRuns(); await refresh(); setInterval(async () => { await loadRuns(); await refresh(); }, 10000); })();
+</script>
+</body>
+</html>

@@ -24,7 +24,6 @@ round's signals).
 """
 from __future__ import annotations
 
-from app.harness_optimizer import grader
 from app.harness_optimizer.acceptance import EvalResult
 
 
@@ -47,17 +46,28 @@ def build(result: EvalResult, trajectories: list[dict], max_failing: int = 3,
              f"escalation rate={result.escalation_rate:.1%}", "", "Per case:"]
     turns: dict[str, list[int]] = {}
     for rec in trajectories:
-        turns.setdefault(rec["instance_id"], []).append(len(rec.get("llm_calls") or []))
+        turns.setdefault(rec["instance_id"], []).append(rec.get("turns") or len(rec.get("llm_calls") or []))
     for cid, cr in sorted(result.per_case.items()):
         lines.append(f"  {cid}: {cr.verdicts} turns={turns.get(cid, [])} cost=${cr.cost_usd:.2f}")
 
-    grades = [grader.grade(rec) for rec in trajectories]
-    lines += ["", "Trajectory checks (app/harness_optimizer/grader.py):", grader.render(grader.summarize(grades))]
+    from app.harness_optimizer import profiles
+    g_mod = profiles.active().grader
+    grades = [g_mod.grade(rec) for rec in trajectories]
+    lines += ["", f"Trajectory checks ({g_mod.__name__}):", g_mod.render(g_mod.summarize(grades))]
 
     if trajectories:
-        rep = analyze(trajectories)
+        # Only real per-call records (fix-loop trajectories have none; early fix
+        # records held None placeholders, which crashed the first smoke run).
+        rep = analyze([{**r, "llm_calls": [c for c in r.get("llm_calls") or [] if isinstance(c, dict)]}
+                       for r in trajectories])
         lines += ["", "Cost by prompt source (share of spend):"]
         lines += [f"  {r['source']}: {r['share']:.1%} (${r.get('cost', 0):.2f})" for r in rep["by_source"][:10]]
+
+    feedback = [(r["instance_id"], r["self_feedback"]) for r in trajectories
+                if r.get("self_feedback") and r.get("verdict") != "PASS"][:6]
+    if feedback:
+        lines += ["", "Agent self-feedback after failing runs (the agent's own words about the setup):"]
+        lines += [f"  - {fb[:400]}" for _, fb in feedback]
 
     failing = [(r, g) for r, g in zip(trajectories, grades) if r.get("verdict") != "PASS"][:max_failing]
     for rec, g in failing:

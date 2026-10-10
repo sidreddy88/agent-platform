@@ -210,16 +210,19 @@ class GatewayLLMService:
     routed through LLMGateway for config-driven model selection and logging.
     """
 
-    def __init__(self, gateway: LLMGateway, task_type: str) -> None:
+    def __init__(self, gateway: LLMGateway, task_type: str, model: str | None = None) -> None:
         self._gateway = gateway
         self._task_type = task_type
+        # Per-service model override (e.g. the harness optimizer's second-model
+        # check), so two models can run in one process; None = the routed model.
+        self._model_override = model
         self.last_input_tokens: int = 0
         self.last_output_tokens: int = 0
 
     @property
     def _model(self) -> str:
         _, model, _mt = self._gateway._get_routing(self._task_type)
-        return model
+        return self._model_override or model
 
     async def complete(
         self,
@@ -262,6 +265,7 @@ class GatewayLLMService:
         import litellm
 
         _, model, max_tokens = self._gateway._get_routing(self._task_type)
+        model = self._model_override or model
 
         # Convert Anthropic tool format → LiteLLM/OpenAI format
         litellm_tools = [
@@ -604,8 +608,8 @@ class LLMGateway:
             "cost_by_provider": by_provider,
         }
 
-    def get_llm_service_for(self, task_type: str) -> GatewayLLMService:
-        return GatewayLLMService(self, task_type)
+    def get_llm_service_for(self, task_type: str, model: str | None = None) -> GatewayLLMService:
+        return GatewayLLMService(self, task_type, model=model)
 
 
 # Module-level singleton — shared across all agents in a process

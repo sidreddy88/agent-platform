@@ -127,7 +127,21 @@ def _git_diff(worktree: Path, files: dict[str, str]) -> str:
         subprocess.run(["git", "-C", str(worktree), "checkout", "--", *files], check=True)
 
 
-async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None) -> dict[str, Any]:
+def _fix_provider_failure(exc: BaseException | None) -> str | None:
+    """auth / billing / rate_limit / provider_outage behind a fix-loop LLM error, or None.
+    Same classifier as the diagnosis gate (a credit outage there once scored as a
+    30-case regression)."""
+    if exc is None:
+        return None
+    from scripts.eval_diagnosis_full_regression import _provider_failure
+    kind = _provider_failure(exc)
+    if kind is None and "invalid api key" in str(exc).lower():
+        kind = "auth"
+    return kind
+
+
+async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None,
+                  harness_dir: str | None = None, fix_model: str | None = None) -> dict[str, Any]:
     from app.agents import fix_generation
     from app.agents.diagnosis import DiagnosisAgent, DiagnosisResult, _pinned_graph
     from app.models.events import ErrorEvent, EventSource, IncidentState
@@ -175,12 +189,12 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None)
 
         # ── fix, patch only, tools pointed at the pinned checkout ──
         _apply_diagnosis(incident, diagnosis)
-        agent = fix_generation.FixGenerationAgent(github=github)
+        agent = fix_generation.FixGenerationAgent(github=github, harness_dir=harness_dir)
         agent._owner, agent._repo, agent._local_repo, agent._rag = owner, repo, pinned, None
         # Per-agent call graph, never the module-level one: several cases run at
         # once. Shares DiagnosisAgent's cache (keyed by repo and pinned SHA).
         agent._code_graph = await _pinned_graph(owner, repo, pinned)
-        agent._llm = llm_gateway.get_llm_service_for("fix")
+        agent._llm = llm_gateway.get_llm_service_for("fix", model=fix_model)
         with cost_meter.metered() as m:
             t0 = time.monotonic()
             result, steps = await agent.fix_with_steps(incident, patch_only=True)
@@ -191,6 +205,9 @@ async def run_one(instance: dict[str, Any], saved_diagnosis: dict | None = None)
             "patch_lines": patch.count("\n"), "steps": steps,
             "cost_usd": m.summary()["cost_usd"], "seconds": round(time.monotonic() - t0, 1),
             "meter": m.summary(),
+            "trajectory_steps": list(getattr(agent, "_fix_steps", []) or []),
+            "provider_failure": _fix_provider_failure(getattr(agent, "_llm_error", None)),
+            "self_feedback": getattr(agent, "_self_feedback", None),
         }
         rec["model_patch"] = patch
         return rec
