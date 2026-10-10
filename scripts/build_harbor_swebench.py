@@ -75,6 +75,39 @@ def capture_patch(task_dir: Path) -> None:
     test_sh.write_text("\n".join(lines) + "\n")
 
 
+HINT_HEADER = ("\n\n---\n\nA diagnosis step that read this repository suggests where to start. It is usually "
+               "right, but check it against the code before relying on it:\n\n")
+
+
+def _clip(text: str, n: int = 1200) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= n else text[:n] + " ..."
+
+
+def diagnosis_hint(d: dict) -> str | None:
+    """The hint text from one of our saved diagnoses, or None if it gave up."""
+    if not d or d.get("no_submission") or d.get("escalate") or not d.get("affected_file"):
+        return None
+    lines = [f"- Likely file: `{d['affected_file']}`"
+             + (f" (function `{d['affected_function']}`)" if d.get("affected_function") else "")]
+    extra = {d.get("additional_fix_file")} | {t.get("file") for t in (d.get("additional_fix_targets") or [])}
+    extra = sorted(f for f in extra if f and f != d["affected_file"])
+    if extra:
+        lines.append("- Also involved: " + ", ".join(f"`{f}`" for f in extra))
+    if d.get("root_cause"):
+        lines.append(f"- Root cause: {_clip(d['root_cause'])}")
+    if d.get("fix_approach"):
+        lines.append(f"- Suggested fix approach: {_clip(d['fix_approach'])}")
+    return HINT_HEADER + "\n".join(lines) + "\n"
+
+
+def add_hint(task_dir: Path, hint: str) -> None:
+    inst = task_dir / "instruction.md"
+    text = inst.read_text()
+    if HINT_HEADER.strip()[:40] not in text:
+        inst.write_text(text.rstrip("\n") + hint)
+
+
 def network_check_task(template: Path, out: Path, allowed: list[str]) -> Path:
     """A copy of one task whose oracle solution probes the network: Together must
     answer, GitHub and PyPI must not. Run with the oracle agent (no model calls)."""
@@ -104,6 +137,8 @@ def main() -> int:
     group.add_argument("--all", action="store_true")
     group.add_argument("--network-check", action="store_true")
     ap.add_argument("--allow-host", action="append", default=None)
+    ap.add_argument("--hint-from", help="our saved diagnoses (.jsonl.gz): append each case's diagnosis to its "
+                                        "instruction as a hint (cases where diagnosis gave up get none)")
     args = ap.parse_args()
     src, out = Path(args.src), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -116,6 +151,13 @@ def main() -> int:
         ids = sorted(random.Random(20261011).sample(ids, args.sample))
     elif args.cases:
         ids = args.cases.split(",")
+    hints = None
+    if args.hint_from:
+        import gzip
+        opener = gzip.open if args.hint_from.endswith(".gz") else open
+        with opener(args.hint_from, "rt") as f:
+            rows = [json.loads(x) for x in f if x.strip()]
+        hints = {r["instance_id"]: diagnosis_hint((r.get("diagnosis") or {}).get("full") or {}) for r in rows}
     for i in ids:
         dest = out / i
         if dest.exists():
@@ -123,8 +165,11 @@ def main() -> int:
         shutil.copytree(src / i, dest)
         patch_task(dest, allowed)
         capture_patch(dest)
+        if hints is not None and hints.get(i):
+            add_hint(dest, hints[i])
     (out / "cases.json").write_text(json.dumps(ids, indent=1))
-    print(f"{len(ids)} tasks in {out}")
+    hinted = sum(1 for i in ids if hints and hints.get(i))
+    print(f"{len(ids)} tasks in {out}" + (f" ({hinted} with a diagnosis hint)" if hints is not None else ""))
     return 0
 
 
