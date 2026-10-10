@@ -3,10 +3,20 @@
   "max_fix_turns": "fix loop turn budget (no test sandbox)",
   "budget_warning_turns": "turns before the end when a model with no edit yet is told to make one",
   "no_edit_nudges": "times a model that ends its turn without an edit is pushed back",
-  "max_cutoffs": "responses cut off at the output limit in a row before the loop gives up"
+  "max_cutoffs": "responses cut off at the output limit in a row before the loop gives up",
+  "test_mode": "offline evals with a test sandbox: 'existing_tests' runs the repo's existing tests near the changed file before and after the fix and regenerates the fix when it breaks tests that passed before; 'off' submits the first fix untested",
+  "test_max_attempts": "fix attempts in test mode, the first included (each retry is a full new fix run with the failures shown)",
+  "test_max_files": "existing test files run per fix (same module name first, then files that mention the changed function)",
+  "test_timeout_s": "seconds allowed for one test run",
+  "test_pick": "which attempt is submitted when every attempt still breaks tests: 'fewest_broken' or 'last'"
  },
  "max_fix_turns": 20,
  "budget_warning_turns": 3,
  "no_edit_nudges": 1,
- "max_cutoffs": 3
+ "max_cutoffs": 3,
+ "test_mode": "off",
+ "test_max_attempts": 3,
+ "test_max_files": 3,
+ "test_timeout_s": 300,
+ "test_pick": "fewest_broken"
 }

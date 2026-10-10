@@ -1,0 +1,12 @@
+Your previous fix broke tests in the repository's existing test suite that passed before your change. The reported bug still has to be fixed: make a fix that resolves it and keeps these tests passing.
+
+Tests that passed before your fix and fail with it ({count}):
+{tests}
+
+Test output (passing tests removed, trimmed):
+{output}
+
+Your previous fix, as a diff:
+{previous_diff}
+
+Read the failing tests and the code they exercise before editing. If a failing test checks behaviour other code relies on, keep that behaviour. If you are confident a failing test asserts exactly the buggy behaviour the issue asks to change, make the same fix again.

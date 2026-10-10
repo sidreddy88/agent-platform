@@ -136,6 +136,13 @@ FIX_SETTING_BOUNDS = {
     "budget_warning_turns": (1, 8),
     "no_edit_nudges": (0, 3),
     "max_cutoffs": (1, 6),
+    # Test mode (app/services/repo_tests.py): run the repo's existing tests before
+    # and after a fix, regenerate on regressions. A frozenset lists allowed values.
+    "test_mode": frozenset({"off", "existing_tests"}),
+    "test_max_attempts": (1, 4),
+    "test_max_files": (1, 6),
+    "test_timeout_s": (60, 600),
+    "test_pick": frozenset({"fewest_broken", "last"}),
 }
 
 # From the run-2 fix step (DeepSeek-V4.1-Flash, library policy): ~$0.046 per fix,
