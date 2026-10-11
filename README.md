@@ -3,6 +3,7 @@
 > Autonomous incident remediation for production systems. CloudWatch alarm to fix-PR in single-digit minutes — no human in the loop until approval.
 
 **Engineering blog:** [remediatelabs.io/blog](https://remediatelabs.io/blog) · **Architecture deep-dive:** [remediatelabs.io/projects/agent-platform](https://remediatelabs.io/projects/agent-platform)
+· **Open-source optimizer:** [harness-evolve](https://github.com/sidreddy88/harness-evolve) (`pip install harness-evolve`)
 
 ---
 
@@ -277,6 +278,8 @@ An optimizer agent (`app/harness_optimizer/`, `scripts/optimize_harness.py`) evo
 - **RRSI-style regularization** ([paper](https://arxiv.org/abs/2609.24972), [reference implementation](https://github.com/google-research/rrsi), Apache-2.0; the acceptance rules and the critic prompt are adapted from it): a noise band calibrated from repeated trials of the unchanged harness, cost-aware acceptance, an LLM leakage critic plus a denylist of every benchmark case ID, repo and fix path, and an escalation guard.
 - **Held out by repository:** xarray and sphinx (66 cases) are never shown to the optimizer; the final phase compares the original and evolved harness there, against a matched-budget rerun baseline ([Wang et al., AI2](https://arxiv.org/abs/2607.12227)).
 - **Long-running:** checkpoints after every phase, a per-case result cache, a hard budget cap, tripwires that pause the run when its own measurements look broken, and a watchdog.
+
+**Open-sourced as [harness-evolve](https://github.com/sidreddy88/harness-evolve)** ([PyPI](https://pypi.org/project/harness-evolve/)): the same optimizer, made agent-agnostic (point it at any agent whose prompts, tool descriptions and settings live in files), with a benchmark that tests the optimizer itself: known-answer scenarios, and a deliberately broken agent it diagnosed and fixed on its own (28% → 79% on unseen problems). `app/harness_optimizer/` here is the original version behind the results below; new optimizer work happens in harness-evolve.
 
 The first full run (Sonnet 5, 51 cases) rejected every edit as within noise, reproducing the finding that evolution rarely beats reruns. A power analysis showed the limit was sample size; rebuilt around 138 cases DeepSeek-V4.1-Flash actually fails, a 7.4-hour run (2,129 agent runs, surviving a provider outage) accepted two changes, a correction-loop prompt and retry on no submission, that raised held-out localization from 78.8% to 89.9%. The evolved prompt edit didn't transfer back to Sonnet (−2.3pp, not significant) while retry did (+8.3pp), so the harness shipped together with DeepSeek.
 
