@@ -13,12 +13,19 @@ Decision:
                   follow up with improvements in a separate PR.
   "refix_first" — fix may be wrong, introduces risk, or has blocking issues
                   (incorrect logic, security concern, data loss, breaks other functionality).
+
+The decision is a forced tool call (LLMService.complete_structured, tool_choice
+locked to submit_merge_decision) rather than JSON-in-prose extracted with a
+regex: decision is guaranteed one of exactly two values, blocking_issues/
+non_blocking_issues are guaranteed real arrays, at the API level. This
+replaced a regex-extract + json.loads + hardcoded-fallback-default parser
+that silently degraded to decision="refix_first" on any malformed response —
+conservative, but an undetectable failure mode either way, since nothing
+distinguished "the model reasoned to refix_first" from "the parser gave up."
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass
 
 from app.models.events import IncidentState
@@ -37,26 +44,42 @@ class MergeDecision:
     non_blocking_issues: list[str]
 
 
-def _parse(raw: str) -> MergeDecision:
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if match:
-        try:
-            d = json.loads(match.group())
-            return MergeDecision(
-                decision=d.get("decision", "refix_first"),
-                reasoning=d.get("reasoning", ""),
-                blocking_issues=d.get("blocking_issues", []),
-                non_blocking_issues=d.get("non_blocking_issues", []),
-            )
-        except (json.JSONDecodeError, ValueError):
-            pass
-    logger.warning("[MergeDecision] Non-JSON response — defaulting to refix_first. Raw: %s", raw[:200])
-    return MergeDecision(
-        decision="refix_first",
-        reasoning=f"Parse failed — defaulting to refix_first. Raw: {raw[:200]}",
-        blocking_issues=[],
-        non_blocking_issues=[],
-    )
+# Forced-tool-use schema — see LLMService.complete_structured. decision locked
+# to its real enum; blocking_issues/non_blocking_issues guaranteed arrays
+# (possibly empty) rather than a field the model might omit or return as a
+# bare string when it has nothing to report.
+_SUBMIT_MERGE_DECISION_SCHEMA = {
+    "name": "submit_merge_decision",
+    "description": "Submit the merge decision for an AI-generated fix PR that received REQUEST_CHANGES.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": ["merge_now", "refix_first"],
+                "description": (
+                    "merge_now = core fix is correct, remaining issues are non-blocking. "
+                    "refix_first = fix may be wrong, introduces risk, or has a blocking issue."
+                ),
+            },
+            "blocking_issues": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Blocking issues found, empty array if none.",
+            },
+            "non_blocking_issues": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Non-blocking issues found, empty array if none.",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "One sentence explaining the decision.",
+            },
+        },
+        "required": ["decision", "blocking_issues", "non_blocking_issues", "reasoning"],
+    },
+}
 
 
 class MergeDecisionAgent:
@@ -128,24 +151,24 @@ DECISION LOGIC:
 IMPORTANT: If the review flags a security or quality issue that existed in the codebase
 BEFORE this PR, that is non-blocking. This PR is judged only on what it changes.
 
-Respond with ONLY a valid JSON object:
-{{
-  "decision": "merge_now" | "refix_first",
-  "blocking_issues": ["<list of blocking issues found, empty if none>"],
-  "non_blocking_issues": ["<list of non-blocking issues found>"],
-  "reasoning": "<one sentence explaining the decision>"
-}}"""
+Call submit_merge_decision with your decision."""
 
         try:
-            raw = await self._llm.complete(
+            data = await self._llm.complete_structured(
                 messages=[{"role": "user", "content": prompt}],
+                tool_schema=_SUBMIT_MERGE_DECISION_SCHEMA,
                 system=(
                     "You are a senior engineering manager deciding whether a critical production fix "
                     "should be merged immediately or sent back for improvements. Be precise about "
-                    "what is blocking vs non-blocking. Return only valid JSON."
+                    "what is blocking vs non-blocking."
                 ),
             )
-            result = _parse(raw)
+            result = MergeDecision(
+                decision=data.get("decision", "refix_first"),
+                reasoning=data.get("reasoning", ""),
+                blocking_issues=data.get("blocking_issues", []),
+                non_blocking_issues=data.get("non_blocking_issues", []),
+            )
 
             # Leaked-marker check only. Unlike TriageAgent, this agent has a
             # real fail-safe available: if the reasoning echoes an ipi_guard
