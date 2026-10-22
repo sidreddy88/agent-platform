@@ -1,0 +1,11 @@
+# agentstats policy for DiagnosisAgent (see scripts/diagnosis_smoke.py and app/evals/gate_v2.py).
+# Only the smoke tier lives here: the full 434-case gate keeps gate v2's own paired test and calibrated threshold.
+design = "curated"
+
+[smoke]                        # every push of a diagnosis PR, before the full gate: catches breakage, not regressions
+sample = 40                    # stratified across repos, same cases every time
+stratify_by = "repo"
+seed = 0
+runs = 1
+require.no_regression = 0.15   # FAIL only when clearly worse than main by more than 15 points
+require.max_infra = 0.20

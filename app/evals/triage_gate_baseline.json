@@ -1,0 +1,8 @@
+{
+  "main_sha": "2b32da668ff55969f15bb3fdcd79c349819edb8d",
+  "inputs_hash": "5581e1dda95ccbe0",
+  "trials": 4,
+  "cases_file": "app/evals/triage_heldout.jsonl",
+  "model": "claude-haiku-4-5-20251001",
+  "measured_at": "2026-10-22T01:52:10+00:00"
+}

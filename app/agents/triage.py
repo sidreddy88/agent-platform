@@ -110,11 +110,19 @@ class TriageAgent(BaseAgent):
 
     Uses Claude Haiku for fast, cheap classification on every alert.
 
+    Doesn't get the target app's harness docs (USES_TARGET_HARNESS_DOCS = False). They're coding guidance with
+    nothing about real/noise or severity, yet with them triage matched its 114 held-out labels 78.9% of the time
+    (4 trials) against ~91% without (103/114, 104/114; 2026-10-22): they moved severity a level and flipped
+    real -> noise on cases it otherwise gets right. Production loaded them; every eval and the golden labels
+    didn't.
+
     Usage (standalone — call before wiring into the incident loop):
         agent = TriageAgent()
         result = await agent.triage(error_event)
         print(result.decision, result.severity, result.occurrences_24h)
     """
+
+    USES_TARGET_HARNESS_DOCS = False
 
     def __init__(
         self,

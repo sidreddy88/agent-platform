@@ -1,28 +1,24 @@
 name: TriageAgent Regression
 
-# Hard regression gate for TriageAgent: any PR touching triage.py or base.py
-# (the shared ReAct loop TriageAgent inherits from) must replay the 80-case
-# filtered gate set (triage_regression_gate.jsonl) and stay within its
-# noise-floor threshold (MAX_NONPASS_RATE, currently 6%) before merging.
-# See scripts/eval_triage_full_regression.py for why this is a threshold,
-# not a literal 100%-pass bar -- repeated real runs showed a small,
-# rotating set of boundary cases flip regardless of code changes, which a
-# zero-tolerance gate can't distinguish from an actual regression.
+# Regression gate for TriageAgent, measured with agentstats (github.com/sidreddy88/agentstats; private, installed
+# with a read-only deploy key). Every PR that touches TriageAgent replays all 114 held-out cases twice and
+# compares each case with main's own measured rate on it (app/evals/triage_gate_baseline.jsonl, 4 trials per
+# case), using agentstats' fixed-cases paired test. Design and sizing: scripts/triage_gate.py.
 #
-# Unlike ci.yml, this makes real Anthropic API calls -- real cost, but much
-# cheaper/faster than the sibling DiagnosisAgent gate (diagnosis-gate-v2.yml):
-# no git checkout of a second repo, no GitHub API, one Haiku call per case.
-# Expect low single-digit minutes, not the hour-plus Diagnosis's
-# Sonnet-plus-tool-loop gate needs.
+# Replaces the fixed threshold (fail if more than 6% of 80 cases miss), which compared against nothing, caught a
+# doubling of the error rate only ~35% of the time, had to drop 6 noisy error templates (32 cases), and failed
+# on API outages. Here:
+#   - FAIL only on a proven drop (the whole 90% interval below main), otherwise PASS, with the smallest drop the
+#     run reliably catches in the job summary. Sized in app/evals/triage_gate_policy.toml: 5% false alarms,
+#     96% of 10-point drops caught. (Proving "no worse than X" needs far more runs: that's a release question.)
+#   - INCONCLUSIVE (exit 2) on a run-wide shock (whole runs varying more than per-case randomness predicts) with
+#     too few runs to correct for it: rerun;
+#   - API failures are infrastructure: counted and capped (exit 3 when too many), never scored as misses;
+#   - fails closed when the baseline is stale (measured on triage inputs that match neither main nor the PR).
 #
-# The path check is done INSIDE the job (via the "Check whether relevant
-# files changed" step below), not as a top-level `on.pull_request.paths`
-# filter -- same reasoning as diagnosis-gate-v2.yml: this job is a
-# required status check in main's branch protection, and a trigger-level
-# path filter would leave the check permanently pending (and merges
-# blocked) on any PR that doesn't touch these files. Running the job
-# unconditionally and skipping the expensive replay internally keeps the
-# check always reporting, so requiring it doesn't strand unrelated PRs.
+# "Touches TriageAgent": triage.py, base.py (the shared ReAct loop), llm.py, the shared harness loader, the
+# routed model, the replay script or the gate's own files. The path check runs inside the job so the check
+# always reports. Cost: ~228 Haiku calls per run (~$3), ~10 minutes.
 
 on:
   pull_request:
@@ -31,44 +27,90 @@ concurrency:
   group: triage-regression-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  RELEVANT: '^(app/agents/(triage|base)\.py|app/agents/harness/__init__\.py|app/services/llm\.py|config/llm_routing\.json|scripts/(triage_gate|eval_triage_regression)\.py|app/evals/triage_(heldout\.jsonl|gate_.*)|\.github/workflows/triage-regression\.yml)$'
+  AGENTSTATS_REF: b6f7a7e   # pinned agentstats commit
+
 jobs:
   regression:
-    name: full filtered gate replay (80 cases)
+    name: triage gate (agentstats, 114 cases)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Check whether relevant files changed
+      - name: Check whether relevant files changed, and whether the baseline is stale
         id: filter
         run: |
-          if git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" \
-              | grep -qE '^app/agents/(triage|base)\.py$'; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
+          base=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "${{ github.event.pull_request.head.sha }}")
+          if ! git diff --name-only "$base" "${{ github.event.pull_request.head.sha }}" | grep -qE "$RELEVANT"; then
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          # Stale = the baseline was measured on different triage inputs than main's (content hash, so squash
+          # merges don't matter). A PR whose baseline matches its own inputs is a baseline refresh: allowed.
+          want=$(python3 -c "import json; print(json.load(open('app/evals/triage_gate_baseline.json'))['inputs_hash'])")
+          main_hash=$(python3 scripts/triage_gate.py inputs-hash --ref "$base")
+          pr_hash=$(python3 scripts/triage_gate.py inputs-hash)
+          if [ "$want" = "$main_hash" ]; then
+            echo "Baseline matches main's triage inputs ($want)."
+          elif [ "$want" = "$pr_hash" ]; then
+            echo "Baseline was measured on this PR's own triage inputs: a baseline refresh. The comparison is"
+            echo "PR vs its own baseline, so it checks the replay and the gate, not a change against main."
           else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Baseline ($want) matches neither main ($main_hash) nor this PR ($pr_hash): stale."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Stale baseline
+        if: steps.filter.outputs.stale == 'true'
+        run: |
+          echo "Refresh it: python scripts/triage_gate.py baseline --trials 4 on main's triage inputs, then commit"
+          echo "app/evals/triage_gate_baseline.jsonl and .json through a PR."
+          exit 1
+
       - name: Set up Python
-        if: steps.filter.outputs.run == 'true'
+        if: steps.filter.outputs.run == 'true' && steps.filter.outputs.stale != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: "pip"
 
-      - name: Install dependencies
-        if: steps.filter.outputs.run == 'true'
-        run: pip install -r requirements-dev.txt
+      - name: Install dependencies and agentstats
+        if: steps.filter.outputs.run == 'true' && steps.filter.outputs.stale != 'true'
+        env:
+          DEPLOY_KEY: ${{ secrets.AGENTSTATS_DEPLOY_KEY }}
+        run: |
+          pip install -r requirements-dev.txt
+          mkdir -p ~/.ssh && printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/agentstats && chmod 600 ~/.ssh/agentstats
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/agentstats -o IdentitiesOnly=yes" \
+            pip install "agentstats @ git+ssh://git@github.com/sidreddy88/agentstats.git@$AGENTSTATS_REF"
+          rm -f ~/.ssh/agentstats
 
-      - name: Run full TriageAgent regression gate
-        if: steps.filter.outputs.run == 'true'
+      - name: Replay the 114 held-out cases (2 trials)
+        if: steps.filter.outputs.run == 'true' && steps.filter.outputs.stale != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python scripts/eval_triage_full_regression.py
+        run: python scripts/triage_gate.py run --trials 2 --out runs/triage-gate/pr.jsonl
+
+      - name: Gate against main's baseline
+        if: steps.filter.outputs.run == 'true' && steps.filter.outputs.stale != 'true'
+        run: >
+          agentstats gate --policy app/evals/triage_gate_policy.toml --tier pr --conf 0.90
+          --candidate runs/triage-gate/pr.jsonl --baseline app/evals/triage_gate_baseline.jsonl
+
+      - name: Upload replay results
+        if: always() && steps.filter.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-gate-results
+          path: runs/triage-gate/
+          if-no-files-found: ignore
 
       - name: Skipped -- no relevant files changed
         if: steps.filter.outputs.run == 'false'
-        run: echo "No changes to triage.py/base.py in this PR -- skipping the 80-case replay."
+        run: echo "No changes to TriageAgent or its inputs in this PR -- skipping the replay."
