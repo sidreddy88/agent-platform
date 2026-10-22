@@ -1,4 +1,4 @@
-"""BaseAgent injects the target harness docs by default; TriageAgent opts out (measured, see its docstring)."""
+"""BaseAgent injects the target harness docs; TriageAgent clears them (measured, see its docstring)."""
 from app.agents.base import BaseAgent
 from app.agents.triage import TriageAgent
 

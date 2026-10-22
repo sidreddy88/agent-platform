@@ -199,12 +199,6 @@ class BaseAgent:
             print(step)
     """
 
-    # Whether this agent gets the target app's harness docs (AGENTS.md + CONSTRAINTS.md from
-    # settings.harness_docs_path) prepended to every call. They're written for agents that read and change the
-    # target's code; an agent whose job they don't inform can opt out. Change only on a measured with/without
-    # comparison (see TriageAgent).
-    USES_TARGET_HARNESS_DOCS: bool = True
-
     def __init__(self, llm: LLMService | None = None, gateway: Any = None) -> None:
         self._llm = llm or LLMService()
         self._gateway = gateway
@@ -212,8 +206,8 @@ class BaseAgent:
         self._tools: dict[str, tuple[ToolFn, str]] = {}
         # set by @trace_agent at runtime — no-op sentinel until then
         self._tracing_ctx: TracingContext = TracingContext(trace=None, enabled=False)
-        # Harness docs (AGENTS.md + CONSTRAINTS.md) injected into every LLM call, unless the agent opts out.
-        self._harness_docs: str = self._load_harness_docs() if self.USES_TARGET_HARNESS_DOCS else ""
+        # Harness docs (AGENTS.md + CONSTRAINTS.md) injected into every LLM call.
+        self._harness_docs: str = self._load_harness_docs()
         # Opt-in floor: subclasses whose answers get acted on (e.g. fed to
         # FixGenerationAgent) can require at least N tool calls before a
         # final answer is accepted, rather than trusting whatever the LLM

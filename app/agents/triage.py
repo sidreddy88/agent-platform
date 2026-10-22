@@ -110,7 +110,7 @@ class TriageAgent(BaseAgent):
 
     Uses Claude Haiku for fast, cheap classification on every alert.
 
-    Doesn't get the target app's harness docs (USES_TARGET_HARNESS_DOCS = False). They're coding guidance with
+    Doesn't get the target app's harness docs (cleared in __init__). They're coding guidance with
     nothing about real/noise or severity, yet with them triage matched its 114 held-out labels 78.9% of the time
     (4 trials) against ~91% without (103/114, 104/114; 2026-10-22): they moved severity a level and flipped
     real -> noise on cases it otherwise gets right. Production loaded them; every eval and the golden labels
@@ -121,8 +121,6 @@ class TriageAgent(BaseAgent):
         result = await agent.triage(error_event)
         print(result.decision, result.severity, result.occurrences_24h)
     """
-
-    USES_TARGET_HARNESS_DOCS = False
 
     def __init__(
         self,
@@ -138,6 +136,9 @@ class TriageAgent(BaseAgent):
         # is the actual fix; loosening the regression gate's pass bar
         # instead would just be tolerating noise, not removing it.
         super().__init__(llm=llm or LLMService(model=HAIKU_MODEL, temperature=0.0))
+        # No target harness docs for triage: measured, see the class docstring. (BaseAgent loads them for every
+        # agent; a per-agent switch there can come when another agent is measured with and without.)
+        self._harness_docs = ""
         self._aws = aws or AWSService()
         self._store = store or _default_store
         self._register_tools()
