@@ -20,6 +20,13 @@ name: Diagnosis gate v2
 #
 # Each run costs ~$29 on Together and ~40 minutes. A new push cancels the run
 # in flight for the same PR.
+#
+# Smoke tier first (scripts/diagnosis_smoke.py, measured with agentstats): 40
+# pool cases sampled across repos, one trial, ~$1.50 and ~10 minutes, compared
+# case by case with the same baseline. It fails only on clear breakage (worse
+# than main by more than 15 points); then the full gate doesn't run and the PR
+# doesn't spend $29 to learn it's broken. PASS or INCONCLUSIVE lets the full
+# gate run and decide.
 
 on:
   pull_request:
@@ -70,9 +77,68 @@ jobs:
             echo "stale=true" >> "$GITHUB_OUTPUT"
           fi
 
-  run:
+  smoke:
+    name: smoke tier (40 cases, agentstats)
     needs: changes
     if: needs.changes.outputs.run == 'true' && needs.changes.outputs.stale == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AGENTSTATS_REF: 3ab7870
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies and agentstats
+        env:
+          DEPLOY_KEY: ${{ secrets.AGENTSTATS_DEPLOY_KEY }}
+        run: |
+          pip install -r requirements-dev.txt
+          mkdir -p ~/.ssh && printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/agentstats && chmod 600 ~/.ssh/agentstats
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/agentstats -o IdentitiesOnly=yes" \
+            pip install "agentstats @ git+ssh://git@github.com/sidreddy88/agentstats.git@$AGENTSTATS_REF"
+          rm -f ~/.ssh/agentstats
+
+      - name: Replay the smoke sample (1 trial)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.DIAGNOSIS_REGRESSION_GITHUB_PAT }}
+        run: |
+          set -euo pipefail
+          python scripts/diagnosis_smoke.py sample --out runs/smoke/cases.json
+          rc=0
+          python scripts/optimize_harness.py --run-dir runs/smoke --cases-file runs/smoke/cases.json \
+            --rounds 0 --calibration-trials 1 --budget 3 --parallel 2 --lane-width 3 --no-pass-rate-tripwire || rc=$?
+          python scripts/gate_v2.py collect --run-dir runs/smoke --trials 1 --out runs/smoke/verdicts.json
+          echo "runner exit code: $rc (missing cases count as infrastructure failures below)"
+
+      - name: Smoke gate (fails only on clear breakage)
+        run: |
+          python scripts/diagnosis_smoke.py convert --results runs/smoke/verdicts.json --out runs/smoke/pr.jsonl
+          python scripts/diagnosis_smoke.py baseline --cases runs/smoke/cases.json --out runs/smoke/baseline.jsonl
+          rc=0
+          agentstats gate --policy app/evals/diagnosis_gate_policy.toml --tier smoke \
+            --candidate runs/smoke/pr.jsonl --baseline runs/smoke/baseline.jsonl || rc=$?
+          # 0 pass, 2 inconclusive: let the full gate decide. 1 fail, 3 unhealthy: stop here.
+          if [ "$rc" = "2" ]; then echo "Smoke inconclusive: the full gate decides."; exit 0; fi
+          exit $rc
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnosis-smoke
+          path: runs/smoke/*.json*
+          if-no-files-found: ignore
+
+  run:
+    needs: [changes, smoke]
+    if: needs.changes.outputs.run == 'true' && needs.changes.outputs.stale == 'false' && needs.smoke.result == 'success'
     uses: ./.github/workflows/diagnosis-gate-v2-run.yml
     secrets: inherit
     with:
@@ -82,7 +148,7 @@ jobs:
 
   gate:
     name: diagnosis gate v2
-    needs: [changes, run]
+    needs: [changes, smoke, run]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -96,6 +162,10 @@ jobs:
           fi
           if [ "${{ needs.changes.outputs.stale }}" = "true" ]; then
             echo "The baseline is stale: refresh it (diagnosis-gate-v2-manual.yml, mode=baseline) and commit it."; exit 1
+          fi
+          if [ "${{ needs.smoke.result }}" != "success" ]; then
+            echo "Smoke tier ended as '${{ needs.smoke.result }}' (clear breakage or too many infra failures):"
+            echo "the full gate didn't run. See the smoke job's summary."; exit 1
           fi
           if [ "${{ needs.run.result }}" != "success" ]; then
             echo "Gate v2 ended as '${{ needs.run.result }}': see the paired-test job's summary."; exit 1

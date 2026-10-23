@@ -1,4 +1,8 @@
 """
+SUPERSEDED (2026-10-22) by scripts/triage_gate.py + agentstats: CI no longer runs this. Kept for history; the
+analysis below is why the threshold design was replaced, not just tuned (see .github/workflows/triage-regression.yml).
+"""
+"""
 Hard regression gate for TriageAgent: replay every case in
 app/evals/triage_regression_gate.jsonl and fail only if MORE THAN
 MAX_NONPASS_RATE of them disagree with their recorded label. This is a
