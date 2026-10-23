@@ -1,6 +1,6 @@
 # agentstats policy for the TriageAgent gate (.github/workflows/triage-regression.yml; scripts/triage_gate.py).
-# Sized on a 2026-10-22 baseline (114 cases x 4 trials, 92.1%; the committed one, re-measured after moving the
-# docs opt-out into triage.py, is 93.0%), TriageAgent without the target harness docs,
+# Sized on a 2026-10-22 baseline (114 cases x 4 trials, 92.1%, measured on a Mac). The committed baseline is measured
+# in CI by the "TriageAgent gate baseline" workflow (2026-10-23: 91.9%), TriageAgent without the target harness docs,
 # by simulation with a 90% interval (scripts/triage_gate.py size --trials 2 --margin 0 --rule drop):
 #   no change: 5% false alarms; drop of 2.5 pts caught 25%; 5 pts 64%; 8 pts 94%; 12 pts 100%.
 # The old rule (fail above 5 misses of 80 filtered cases, 1 run), same rates: ~0% false alarms; 14% / 48% / 82%
