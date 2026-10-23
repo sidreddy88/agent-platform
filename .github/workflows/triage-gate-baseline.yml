@@ -1,0 +1,63 @@
+name: TriageAgent gate baseline
+
+# Measure the triage gate's baseline in CI: the same runner, Python and dependency versions the gate runs with
+# (.github/workflows/triage-regression.yml). The first baseline was measured on a Mac with an older SDK, and both
+# CI gate runs since came in ~3 points below it (90% vs 93%): suggestive of an environment difference, which a
+# baseline measured here removes.
+#
+# Run it on main (Actions -> TriageAgent gate baseline -> Run workflow), download the artifact, and commit
+# app/evals/triage_gate_baseline.jsonl and .json through a PR. Re-run whenever the gate reports a stale baseline
+# (triage's inputs changed on main). Cost: 114 cases x trials Haiku calls (~$6 at 4 trials), ~20 minutes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      trials:
+        description: "trials per case (the gate's sizing assumes 4)"
+        default: "4"
+
+jobs:
+  baseline:
+    name: measure triage baseline (114 cases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Measure the baseline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/triage_gate.py baseline --trials "${{ inputs.trials }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Triage gate baseline"
+            echo '```'
+            cat app/evals/triage_gate_baseline.json
+            echo '```'
+            python3 -c "
+          import json
+          rows = [json.loads(l) for l in open('app/evals/triage_gate_baseline.jsonl')]
+          runs = sorted({r['run'] for r in rows})
+          for k in runs:
+              rs = [r for r in rows if r['run'] == k]
+              print(f'- trial {k}: {sum(1 for r in rs if r[\"passed\"])}/{len(rs)} pass, '
+                    f'{sum(1 for r in rs if r[\"infra_error\"])} infra failures')
+          "
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: triage-gate-baseline
+          path: |
+            app/evals/triage_gate_baseline.jsonl
+            app/evals/triage_gate_baseline.json
