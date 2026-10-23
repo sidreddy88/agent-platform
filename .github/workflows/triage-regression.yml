@@ -68,8 +68,8 @@ jobs:
       - name: Stale baseline
         if: steps.filter.outputs.stale == 'true'
         run: |
-          echo "Refresh it: python scripts/triage_gate.py baseline --trials 4 on main's triage inputs, then commit"
-          echo "app/evals/triage_gate_baseline.jsonl and .json through a PR."
+          echo "Refresh it: run the 'TriageAgent gate baseline' workflow on main (Actions tab), then commit its"
+          echo "artifact (app/evals/triage_gate_baseline.jsonl and .json) through a PR."
           exit 1
 
       - name: Set up Python
