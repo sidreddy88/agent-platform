@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import json
 import math
 import random
@@ -75,12 +76,45 @@ def _infra(exc: Exception) -> str | None:
     return None
 
 
+_TOKENS: contextvars.ContextVar[dict | None] = contextvars.ContextVar("triage_gate_tokens", default=None)
+
+
+def _count_tokens() -> None:
+    """Add every LLM call's input/output tokens to the running attempt's counter (asyncio tasks copy the context)."""
+    from app.services.llm import LLMService
+
+    original = LLMService.complete
+    if getattr(original, "_counts_tokens", False):
+        return
+
+    async def complete(self, *args, **kwargs):
+        out = await original(self, *args, **kwargs)
+        counter = _TOKENS.get()
+        if counter is not None:
+            counter["model"] = self._model
+            counter["input"] += self.last_input_tokens or 0
+            counter["output"] += self.last_output_tokens or 0
+        return out
+
+    complete._counts_tokens = True
+    LLMService.complete = complete
+
+
+def _cost(tokens: dict) -> float | None:
+    """List-price cost from config/llm_routing.json (input and output; prompt-cache discounts not counted)."""
+    prices = json.loads((ROOT / "config" / "llm_routing.json").read_text()).get("cost_per_1k_tokens", {})
+    p = prices.get(tokens.get("model") or "")
+    return round((tokens["input"] * p["input"] + tokens["output"] * p["output"]) / 1000, 6) if p else None
+
+
 async def _attempt(case: dict, trial: int, arm: str, sem: asyncio.Semaphore) -> dict:
     from scripts.eval_triage_regression import _replay_one
 
     async with sem:
         started = time.monotonic()
         row = {"arm": arm, "run": trial, "case": case["id"], "tags": [f"template:{case['input'].get('error_type')}"]}
+        tokens = {"model": None, "input": 0, "output": 0}
+        _TOKENS.set(tokens)
         try:
             r = await _replay_one(case)
             row.update(passed=r["verdict"] == "PASS", infra_error=None, verdict=r["verdict"], detail=r["detail"])
@@ -89,11 +123,20 @@ async def _attempt(case: dict, trial: int, arm: str, sem: asyncio.Semaphore) -> 
             row.update(passed=None if kind else False, infra_error=kind, verdict="ERROR",
                        detail=f"{type(exc).__name__}: {exc}"[:300])
         row["latency_s"] = round(time.monotonic() - started, 2)
+        if (cost := _cost(tokens)) is not None:
+            row["cost_usd"] = cost
         return row
 
 
-async def run(trials: int, out: Path, arm: str, concurrency: int, limit: int | None) -> list[dict]:
+async def run(trials: int, out: Path, arm: str, concurrency: int, limit: int | None,
+              model: str | None = None) -> list[dict]:
     cases = [json.loads(line) for line in CASES.read_text().splitlines() if line.strip()][:limit]
+    _count_tokens()
+    if model:      # run TriageAgent on another model (e.g. to compare one before switching), same code otherwise
+        import functools
+
+        from app.agents import triage
+        triage.TriageAgent.__init__ = functools.partialmethod(triage.TriageAgent.__init__, model=model)
     sem = asyncio.Semaphore(concurrency)
     out.parent.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -155,6 +198,7 @@ def main() -> int:
     r.add_argument("--arm", default="candidate")
     r.add_argument("--concurrency", type=int, default=4)
     r.add_argument("--limit", type=int)
+    r.add_argument("--model", help="run TriageAgent on this model instead of routing.triage.model")
     b = sub.add_parser("baseline")
     b.add_argument("--trials", type=int, default=4)
     b.add_argument("--concurrency", type=int, default=4)
@@ -170,7 +214,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.cmd == "run":
-        asyncio.run(run(args.trials, args.out, args.arm, args.concurrency, args.limit))
+        asyncio.run(run(args.trials, args.out, args.arm, args.concurrency, args.limit, args.model))
     elif args.cmd == "baseline":
         asyncio.run(run(args.trials, BASELINE, "main", args.concurrency, None))
         sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=ROOT).stdout.strip()

@@ -64,6 +64,15 @@ def _load_default_models() -> dict:
 DEFAULT_MODELS = _load_default_models()
 
 
+# Models that reject a non-default temperature (the API returns 400 when one is sent).
+NO_TEMPERATURE_MODELS = ("claude-haiku-5-5",)
+
+
+def routed_model(task: str, default: str) -> str:
+    """config/llm_routing.json's routing.<task>.model, or `default` when there's no entry."""
+    return (_load_routing_config().get("routing", {}).get(task) or {}).get("model") or default
+
+
 def _configured_models() -> tuple[set[str], set[str]]:
     """Every model id in config/llm_routing.json, split by provider.
 

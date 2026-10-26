@@ -32,6 +32,7 @@ from app.services.aws import AWSError, AWSService
 from app.services.incident_store import incident_store as _default_store
 from app.services.ipi_guard import scan_for_injection
 from app.services.llm import HAIKU_MODEL, LLMService
+from app.services.model_config import NO_TEMPERATURE_MODELS, routed_model
 from app.services.output_validator import check_leaked_markers
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ class TriageAgent(BaseAgent):
         aws: AWSService | None = None,
         store=None,
         llm: LLMService | None = None,
+        model: str | None = None,
     ) -> None:
         # temperature=0.0: this classification has one right answer given the
         # facts (decision + severity, not open-ended reasoning), and running
@@ -135,7 +137,11 @@ class TriageAgent(BaseAgent):
         # original label on a pure replay, zero code changes. Pinning this
         # is the actual fix; loosening the regression gate's pass bar
         # instead would just be tolerating noise, not removing it.
-        super().__init__(llm=llm or LLMService(model=HAIKU_MODEL, temperature=0.0))
+        # The model comes from config/llm_routing.json (routing.triage.model). Models that reject a temperature
+        # (Haiku 5.5) run without one.
+        model = model or routed_model("triage", HAIKU_MODEL)
+        temperature = None if model.startswith(NO_TEMPERATURE_MODELS) else 0.0
+        super().__init__(llm=llm or LLMService(model=model, temperature=temperature))
         # No target harness docs for triage: measured, see the class docstring. (BaseAgent loads them for every
         # agent; a per-agent switch there can come when another agent is measured with and without.)
         self._harness_docs = ""
