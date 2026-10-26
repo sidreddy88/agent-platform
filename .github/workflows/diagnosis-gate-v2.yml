@@ -9,7 +9,8 @@ name: Diagnosis gate v2
 # "Changes diagnosis" = diagnosis.py, base.py (the shared ReAct loop), the
 # diagnosis harness (app/agents/harness/diagnosis/ and the shared loader
 # harness/__init__.py; the fix agent's harness/fix/ doesn't affect diagnosis),
-# or the routed model (config/llm_routing.json). The path check
+# or the parts of config/llm_routing.json diagnosis reads (its routing entry, the
+# defaults, its models' prices: scripts/diagnosis_inputs_changed.py). The check
 # runs inside the workflow, not as an on.paths filter, so the `gate` job always
 # reports and can be a required check: it passes fast when nothing relevant
 # changed or the PR is a draft, and gives the real verdict when it did.
@@ -52,7 +53,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          relevant='^(app/agents/((diagnosis|base)\.py$|harness/(diagnosis/|__init__\.py$))|config/llm_routing\.json$)'
           echo "stale=false" >> "$GITHUB_OUTPUT"
           # The PR's live draft state, not the event payload's (see the v1 gate's history).
           draft=$(gh pr view "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
@@ -62,7 +62,7 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           base=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "${{ github.event.pull_request.head.sha }}")
-          if ! git diff --name-only "$base" "${{ github.event.pull_request.head.sha }}" | grep -qE "$relevant"; then
+          if ! python3 scripts/diagnosis_inputs_changed.py "$base" "${{ github.event.pull_request.head.sha }}"; then
             echo "No diagnosis changes since main."
             echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
@@ -71,9 +71,9 @@ jobs:
           if ! git cat-file -e "$measured^{commit}" 2>/dev/null; then
             echo "Baseline commit $measured not found: treating the baseline as stale."
             echo "stale=true" >> "$GITHUB_OUTPUT"
-          elif git diff --name-only "$measured" "$base" | grep -qE "$relevant"; then
+          elif python3 scripts/diagnosis_inputs_changed.py "$measured" "$base" > /tmp/stale.txt; then
             echo "Diagnosis changed on main since the baseline ($measured): it's stale."
-            git diff --name-only "$measured" "$base" | grep -E "$relevant"
+            cat /tmp/stale.txt
             echo "stale=true" >> "$GITHUB_OUTPUT"
           fi
 
