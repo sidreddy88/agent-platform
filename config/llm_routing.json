@@ -4,7 +4,7 @@
     "haiku": "claude-haiku-4-5-20251001"
   },
   "routing": {
-    "triage":    { "model": "claude-haiku-4-5-20251001", "fallback_model": "claude-sonnet-4-6" },
+    "triage":    { "model": "claude-haiku-5-5", "fallback_model": "claude-sonnet-4-6" },
     "diagnosis": { "model": "together_ai/deepseek-ai/DeepSeek-V4.1-Flash", "max_tokens": 32768 },
     "fix":       { "model": "claude-sonnet-4-6", "max_tokens": 8192 },
     "clarity":   { "model": "claude-sonnet-4-6", "max_tokens": 8192 },
