@@ -104,6 +104,13 @@ async def _replay_one(case: dict[str, Any]) -> dict[str, Any]:
 
 
 def _score(truth: dict[str, Any], result: Any) -> dict[str, str]:
+    # Some labels accept more than one answer where the prompt's own rules don't settle the case ("accept" lists
+    # [decision, severity] pairs; "accept_rule" says why). Added 2026-10-25 after a review of the cases where Haiku
+    # 4.5 and Haiku 5.5 disagreed: the set was generated and filtered with Haiku 4.5, so single labels there had
+    # been rewarding its answers, including counts it never looked up.
+    if [result.decision, result.severity] in truth.get("accept", []):
+        exact = result.decision == truth["decision"] and result.severity == truth["severity"]
+        return {"status": "PASS", "detail": "matches ground truth" if exact else "accepted alternative"}
     if result.decision != truth["decision"]:
         return {
             "status": "FAIL",
