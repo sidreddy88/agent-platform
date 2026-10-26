@@ -17,3 +17,8 @@ slice_by = "template"               # per-template table vs the baseline in the 
 require.no_significant_drop = 0.0   # FAIL only on a proven drop below main's baseline
 require.max_infra = 0.10            # above this, API trouble: exit 3, rerun
 require.max_no_answer = 0.05        # above this, the agent loop or the answer parsing broke, not judgement
+# Behaviour rules (scripts/triage_gate.py _checks), no labels needed: did it call check_duplicate_pr, and
+# get_occurrence_count when there's a log group? The labels once rewarded skipping the count, so accuracy couldn't
+# catch it.
+require.min_rule_rate = 0.95        # each rule holds at least this often (FAIL only when the interval is below)
+require.no_rule_regression = 0.0    # FAIL if any rule is proven to hold less often than in main's baseline

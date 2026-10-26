@@ -77,6 +77,35 @@ def _infra(exc: Exception) -> str | None:
 
 
 _TOKENS: contextvars.ContextVar[dict | None] = contextvars.ContextVar("triage_gate_tokens", default=None)
+_TOOLS: contextvars.ContextVar[list | None] = contextvars.ContextVar("triage_gate_tools", default=None)
+
+
+def _record_tools() -> None:
+    """Record the name of every tool the running attempt actually called (asyncio tasks copy the context)."""
+    from app.agents.base import BaseAgent
+
+    original = BaseAgent._execute_tool
+    if getattr(original, "_records_tools", False):
+        return
+
+    async def execute(self, name, raw_input):
+        calls = _TOOLS.get()
+        if calls is not None and name in self._tools:
+            calls.append(name)
+        return await original(self, name, raw_input)
+
+    execute._records_tools = True
+    BaseAgent._execute_tool = execute
+
+
+def _checks(case: dict, calls: list[str]) -> dict[str, bool]:
+    """Behaviour rules, scored without labels. The occurrence count only applies when the event has a log group
+    (the prompt says to skip it otherwise). Haiku 4.5 skipped it in 29 of 61 runs on real incidents and invented a
+    count, and the labels rewarded that, so the accuracy gate couldn't see it; these rules can."""
+    checks = {"called_check_duplicate_pr": "check_duplicate_pr" in calls}
+    if case["input"].get("log_group", "ecs/ContainerProcess/synthetic"):
+        checks["called_get_occurrence_count"] = "get_occurrence_count" in calls
+    return checks
 
 
 def _count_tokens() -> None:
@@ -115,11 +144,14 @@ async def _attempt(case: dict, trial: int, arm: str, sem: asyncio.Semaphore) -> 
         row = {"arm": arm, "run": trial, "case": case["id"], "tags": [f"template:{case['input'].get('error_type')}"]}
         tokens = {"model": None, "input": 0, "output": 0}
         _TOKENS.set(tokens)
+        calls: list[str] = []
+        _TOOLS.set(calls)
         try:
             r = await _replay_one(case)
             row.update(passed=r["verdict"] == "PASS", infra_error=None, verdict=r["verdict"], detail=r["detail"])
             if r.get("no_answer"):      # no usable answer: a failure even if the fallback matched the label
                 row.update(passed=False, no_answer=r["no_answer"])
+            row["checks"] = _checks(case, calls)
         except Exception as exc:  # noqa: BLE001 - classify, never crash the run
             kind = _infra(exc)
             row.update(passed=None if kind else False, infra_error=kind, verdict="ERROR",
@@ -134,6 +166,7 @@ async def run(trials: int, out: Path, arm: str, concurrency: int, limit: int | N
               model: str | None = None) -> list[dict]:
     cases = [json.loads(line) for line in CASES.read_text().splitlines() if line.strip()][:limit]
     _count_tokens()
+    _record_tools()
     if model:      # run TriageAgent on another model (e.g. to compare one before switching), same code otherwise
         import functools
 
