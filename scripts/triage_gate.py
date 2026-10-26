@@ -118,6 +118,8 @@ async def _attempt(case: dict, trial: int, arm: str, sem: asyncio.Semaphore) -> 
         try:
             r = await _replay_one(case)
             row.update(passed=r["verdict"] == "PASS", infra_error=None, verdict=r["verdict"], detail=r["detail"])
+            if r.get("no_answer"):      # no usable answer: a failure even if the fallback matched the label
+                row.update(passed=False, no_answer=r["no_answer"])
         except Exception as exc:  # noqa: BLE001 - classify, never crash the run
             kind = _infra(exc)
             row.update(passed=None if kind else False, infra_error=kind, verdict="ERROR",
