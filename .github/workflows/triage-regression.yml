@@ -29,7 +29,7 @@ concurrency:
 
 env:
   RELEVANT: '^(app/agents/(triage|base)\.py|app/agents/harness/__init__\.py|app/services/llm\.py|config/llm_routing\.json|scripts/(triage_gate|eval_triage_regression)\.py|app/evals/triage_(heldout\.jsonl|gate_.*)|\.github/workflows/triage-regression\.yml)$'
-  AGENTSTATS_REF: 726368c   # pinned agentstats commit
+  AGENTSTATS_REF: 8ea38e7   # pinned agentstats commit
 
 jobs:
   regression:
