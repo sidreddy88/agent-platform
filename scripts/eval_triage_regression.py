@@ -100,7 +100,18 @@ async def _replay_one(case: dict[str, Any]) -> dict[str, Any]:
         "ground_truth_severity": truth["severity"],
         "current_decision": result.decision,
         "current_severity": result.severity,
+        "no_answer": _no_answer(result),
     }
+
+
+def _no_answer(result: Any) -> str | None:
+    """Why there was no usable answer, if there wasn't one. TriageAgent falls back to real/P2 when it can't parse an
+    answer (the agent hit its step limit, or wrote something that isn't the JSON object); that fallback is not a
+    judgement, so the gate counts it as a failure and reports it apart, even when real/P2 happens to match the label."""
+    reasoning = getattr(result, "reasoning", "") or ""
+    if not reasoning.startswith("Parse failed"):
+        return None
+    return "step_limit" if "unable to find an answer within the allowed number of steps" in reasoning else "parse_error"
 
 
 def _score(truth: dict[str, Any], result: Any) -> dict[str, str]:

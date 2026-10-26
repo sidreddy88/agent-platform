@@ -7,7 +7,13 @@
 # / 97%, blind to the 34 excluded noisy-template cases, and API outages scored as misses.
 design = "curated"
 
+# 2026-10-26: TriageAgent runs on Haiku 5.5 (#295); the baseline is re-measured on it. Answers the agent couldn't
+# produce (step limit, unparseable output) are rows with no_answer: failures, reported apart (agentstats 0.3).
+
 [pr]
 runs = 2
+slice_by = "template"               # per-template table vs the baseline in the job summary (reported, not enforced:
+                                    # most templates have under 15 cases, too few to prove a slice drop)
 require.no_significant_drop = 0.0   # FAIL only on a proven drop below main's baseline
 require.max_infra = 0.10            # above this, API trouble: exit 3, rerun
+require.max_no_answer = 0.05        # above this, the agent loop or the answer parsing broke, not judgement
