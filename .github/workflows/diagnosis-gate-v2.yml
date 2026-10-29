@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      AGENTSTATS_REF: 726368c
+      AGENTSTATS_REF: d554a1d
     steps:
       - uses: actions/checkout@v4
 
