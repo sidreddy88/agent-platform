@@ -1,30 +1,29 @@
 """
-Weekly agent monitoring with agentstats: the TriageAgent, end to end.
+Weekly agent monitoring with agentstats: every configured agent, end to end.
 
-    python scripts/agentstats_weekly.py --days 7 --out weekly/          # report.md + artifacts
-    python scripts/agentstats_weekly.py --days 7 --out weekly/ --judge  # also the rubric judge (Together key)
+    python scripts/agentstats_weekly.py --days 7 --out weekly/                  # all agents in config/agentstats/agents
+    python scripts/agentstats_weekly.py --days 7 --out weekly/ --judge          # also the rubric judge (Together key)
+    python scripts/agentstats_weekly.py --days 7 --out weekly/ --agents triage  # just some
 
-Steps, all on last week's Langfuse traces:
-1. Fetch every TriageAgent run (agent observation: the event in, the decision out) and every tool call, through the
-   Langfuse v2 observations API, and join them by trace id. Tool rows don't carry the trace name, so tools are
-   fetched for the whole window and matched to the triage traces.
-2. Build one agentstats row per run, tagged by source: `production` (a real log group), `eval` (a synthetic one,
-   i.e. a gate or eval replay), `no_log_group`. Rows are rules-only: production has no labels. Behaviour checks:
-   - called_check_duplicate_pr   every run
-   - called_get_occurrence_count when the event has a log group
-   - count_matches_lookup        when the count tool ran and the answer states occurrences_24h: the stated count is
-                                 one the tool returned, or 1 when every lookup found none (made-up counts were a
-                                 real production bug)
-   An answer that isn't the JSON the agent should return is no_answer (parse_error).
-3. Summarize the rules per source with agentstats (Wilson intervals; production is a sample of traffic).
-4. With --judge: `agentstats grade` on a sample of runs with config/agentstats/triage_rubric.json (severity follows
-   the guide, decision supported, reasoning sticks to the facts), then `agentstats review sample` for a person.
-5. `agentstats promote find`: failed runs become candidate eval cases (deduplicated by signature, with provenance).
-6. report.md: aggregates, trace ids and error types only (no raw event text, which can contain production data).
+Each agent is a config file, config/agentstats/agents/<name>.json:
+  agent          the Langfuse trace name (the agent span's name)
+  rules          behaviour rules, checked per run:
+                   {"name", "called": tool} / {"name", "not_called": tool} / {"name", "before": [a, b]} /
+                   {"name", "args": {"tool", "match"}}  (agentstats rule kinds, on the run's recorded steps)
+                   {"name", "output": field, "in": [...]} / {"name", "output": field, "min": n}  (the agent's output)
+                 optional "when": an adapter condition name, "called:<tool>", "output:<field>>=<n>" or
+                 "input_json:<key>" (a truthy key in a JSON user_input); the rule is only checked when it holds
+  adapter        name in scripts/agentstats_adapters.py for logic a config can't express (default "default")
+  rubric, judge_fields, judge_sample, review_n   the rubric judge and the human review sample (optional)
+  group_by       tag prefix for candidate eval cases (optional)
 
-The severity guide the judge sees is read from the triage prompt (app/agents/triage.py), so there's one copy.
-Needs only the standard library and agentstats. Langfuse keys from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
-(LANGFUSE_BASE_URL optional).
+Steps, on last week's Langfuse traces: fetch each agent's runs (agent observations by name) and every tool call
+and LLM call in the window (Langfuse v2 observations API, joined by trace id) -> one agentstats row per run, tagged
+by source (production / local / eval) and model, errored runs as infrastructure failures -> behaviour rules per
+source and model (agentstats summarize, Wilson intervals) -> optional rubric judge on a sample (agentstats grade,
+flagged unreliable above a 10% flip rate) and a blind review sheet (agentstats review sample) -> production
+failures as candidate eval cases (agentstats promote find) -> one report.md with a section per agent: aggregates,
+trace ids and error types only, no raw event text.
 """
 from __future__ import annotations
 
@@ -44,12 +43,37 @@ import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agentstats.checks import run_checks  # noqa: E402
+from agentstats_adapters import ADAPTERS, as_json  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
-RUBRIC = ROOT / "config" / "agentstats" / "triage_rubric.json"
-TRIAGE_PROMPT = ROOT / "app" / "agents" / "triage.py"
+CONFIG_DIR = ROOT / "config" / "agentstats" / "agents"
 RULE_FLOOR = 0.95                       # a behaviour rule holding less often than this (proven) is flagged
 MAX_JUDGE_FLIPS = 0.10                  # above this the judge is too unstable to report its verdicts as findings
-COUNT_RE = re.compile(r"^\s*(\d+)\s+occurrences?\b", re.I)
+AGENTSTATS_KINDS = ("called", "not_called", "before", "args")
+
+
+# ---- config ----------------------------------------------------------------------------------------------------
+
+def load_configs(names: list[str] | None = None, config_dir: Path = CONFIG_DIR) -> list[dict]:
+    out = []
+    for path in sorted(config_dir.glob("*.json")):
+        if names and path.stem not in names:
+            continue
+        cfg = json.loads(path.read_text())
+        cfg.setdefault("key", path.stem)
+        if "agent" not in cfg:
+            raise ValueError(f"{path}: 'agent' (the trace name) is required")
+        if cfg.get("adapter", "default") not in ADAPTERS:
+            raise ValueError(f"{path}: unknown adapter {cfg['adapter']!r}; known: {sorted(ADAPTERS)}")
+        for r in cfg.get("rules", []):
+            kinds = [k for k in (*AGENTSTATS_KINDS, "output") if k in r]
+            if "name" not in r or len(kinds) != 1:
+                raise ValueError(f"{path}: each rule needs a name and exactly one of "
+                                 f"{(*AGENTSTATS_KINDS, 'output')}: {r}")
+        out.append(cfg)
+    return out
 
 
 # ---- 1. fetch --------------------------------------------------------------------------------------------------
@@ -58,7 +82,9 @@ def _langfuse_get(params: dict, retries: int = 6) -> dict:
     """One page from the Langfuse v2 observations API. Rate limits (429) and server errors are retried with backoff,
     honouring Retry-After: paging through a week of generations hits the limit."""
     base = (os.environ.get("LANGFUSE_BASE_URL") or "https://us.cloud.langfuse.com").rstrip("/")
-    token = base64.b64encode(f"{os.environ['LANGFUSE_PUBLIC_KEY']}:{os.environ['LANGFUSE_SECRET_KEY']}".encode())
+    # Stray quotes or whitespace (copied from a .env line like KEY="pk-lf-...") make Langfuse answer 401.
+    public, secret = (os.environ[k].strip().strip("\"'") for k in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"))
+    token = base64.b64encode(f"{public}:{secret}".encode())
     url = f"{base}/api/public/v2/observations?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"Authorization": "Basic " + token.decode(),
                                                "User-Agent": "agentstats-weekly"})
@@ -93,18 +119,9 @@ def fetch_observations(obs_type: str, start: dt.datetime, end: dt.datetime, name
     return rows
 
 
-def _json(v):
-    if isinstance(v, str):
-        try:
-            return json.loads(v)
-        except ValueError:
-            return v
-    return v
-
-
 def join_traces(agents: list[dict], tools: list[dict], generations: list[dict] | None = None) -> list[dict]:
-    """One dict per TriageAgent run: the agent observation, its tool calls in start order, and from its LLM calls
-    the model and the summed cost."""
+    """One dict per agent run: the agent observation, its tool calls in start order, and from its LLM calls the
+    model and the summed cost. Tool and generation rows don't carry the trace name, so they're matched by id."""
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for t in tools:
         by_trace[t["traceId"]].append(t)
@@ -120,146 +137,109 @@ def join_traces(agents: list[dict], tools: list[dict], generations: list[dict] |
         m = models.get(a["traceId"])
         out.append({"trace_id": a["traceId"], "agent": a, "model": m.most_common(1)[0][0] if m else "unknown",
                     "cost_usd": cost.get(a["traceId"]),
-                    "calls": [{"name": t.get("name"), "input": _json(t.get("input")) or {},
-                               "output": str(_json(t.get("output")) or "")} for t in calls]})
+                    "calls": [{"name": t.get("name"), "input": as_json(t.get("input")) or {},
+                               "output": str(as_json(t.get("output")) or "")} for t in calls]})
     return out
 
 
 # ---- 2. rows ---------------------------------------------------------------------------------------------------
 
-def event_text(agent_obs: dict) -> str:
-    inp = _json(agent_obs.get("input"))
-    if isinstance(inp, dict):
-        inp = inp.get("user_input", "")
-    return str(inp or "")
-
-
-def event_field(text: str, field: str) -> str | None:
-    m = re.search(rf"^\s*{field}\s*:\s*(.+)$", text, re.M)
-    return m.group(1).strip() if m else None
-
-
-def log_group(trace: dict) -> str | None:
-    for c in trace["calls"]:
-        if c["name"] == "get_occurrence_count" and isinstance(c["input"], dict) and c["input"].get("log_group"):
-            return str(c["input"]["log_group"])
-    lg = event_field(event_text(trace["agent"]), "log_group")
-    return lg if lg and lg.lower() not in ("none", "null", "") else None
-
-
-def source(trace: dict) -> str:
-    """production / local / eval / no_log_group. Traces carry a Langfuse environment since agent-platform set one
-    (production on ECS, local elsewhere); older traces only say "default", so the log group decides: a synthetic
-    one is an eval run, a real one is production (which then includes local replays of real incidents)."""
+def source(trace: dict, adapter) -> str:
+    """production / local / eval / no_log_group / unknown. Traces carry a Langfuse environment (production on ECS,
+    local elsewhere); older ones say "default", and for agents with a log group a synthetic one means an eval run
+    and a real one production (which then includes local replays of real incidents)."""
     env = (trace["agent"].get("environment") or "default").lower()
+    lg = adapter.log_group(trace)
+    if lg and "synthetic" in lg.lower():
+        return "eval"
     if env in ("production", "local"):
-        lg = log_group(trace)
-        return "eval" if lg and "synthetic" in lg.lower() else env
-    lg = log_group(trace)
-    if not lg:
-        return "no_log_group"
-    return "eval" if "synthetic" in lg.lower() else "production"
+        return env
+    if lg:
+        return "production"
+    return "no_log_group" if "log_group" in adapter.conditions else "unknown"
 
 
-def decision(agent_obs: dict) -> dict | None:
-    """The triage JSON the agent answered with, or None if it isn't parseable."""
-    out = _json(agent_obs.get("output"))
-    if isinstance(out, dict) and "answer" in out:
-        out = out["answer"]
-    if isinstance(out, str):
-        m = re.search(r"\{.*\}", out, re.S)
-        if not m:
-            return None
-        try:
-            out = json.loads(m.group(0))
-        except ValueError:
-            return None
-    return out if isinstance(out, dict) and "decision" in out else None
-
-
-def looked_up_counts(trace: dict) -> list[int]:
-    """Every count the occurrence tool returned in this run (the agent may look up more than one pattern)."""
-    out = []
-    for c in trace["calls"]:
-        if c["name"] == "get_occurrence_count":
-            m = COUNT_RE.match(c["output"])
-            if m:
-                out.append(int(m.group(1)))
-    return out
-
-
-def count_supported(stated: int, looked_up: list[int]) -> bool:
-    """The stated occurrences_24h is one the tool returned, or 1 when every lookup found none (the event being
-    triaged is itself one occurrence; the agent may reasonably treat the log count as a lower bound)."""
-    return stated in looked_up or (stated == 1 and all(n == 0 for n in looked_up))
-
-
-def to_row(trace: dict) -> dict:
-    agent = trace["agent"]
-    if agent.get("level") == "ERROR":           # the run itself failed (e.g. the LLM circuit breaker was open)
-        return {"arm": "triage", "case": trace["trace_id"], "run": 1, "passed": None,
-                "infra_error": str(agent.get("statusMessage") or "agent run errored")[:200],
-                "tags": [f"source:{source(trace)}", f"model:{trace.get('model', 'unknown')}"], "checks": {}}
+def condition_holds(when: str | None, trace: dict, output: dict | None, adapter) -> bool:
+    if not when:
+        return True
     names = [c["name"] for c in trace["calls"]]
-    d = decision(trace["agent"])
-    checks = {"called_check_duplicate_pr": "check_duplicate_pr" in names}
-    if log_group(trace):
-        checks["called_get_occurrence_count"] = "get_occurrence_count" in names
-    looked_up = looked_up_counts(trace)
-    stated = (d or {}).get("occurrences_24h")
-    if looked_up and isinstance(stated, (int, float)) and not isinstance(stated, bool):
-        checks["count_matches_lookup"] = count_supported(int(stated), looked_up)
-    error_type = event_field(event_text(trace["agent"]), "error_type") or "unknown"
-    meta = trace["agent"].get("metadata") or {}
-    row = {"arm": "triage", "case": trace["trace_id"], "run": 1, "passed": None, "infra_error": None,
-           "tags": [f"source:{source(trace)}", f"model:{trace.get('model', 'unknown')}", f"error_type:{error_type}",
-                    f"severity:{(d or {}).get('severity', 'none')}", f"decision:{(d or {}).get('decision', 'none')}"],
-           "checks": checks, "tool_calls": len(names)}
+    if when.startswith("called:"):
+        return when.split(":", 1)[1] in names
+    if when.startswith("output:"):
+        m = re.match(r"output:(\w+)\s*>=\s*([\d.]+)$", when)
+        if not m:
+            raise ValueError(f"can't read condition {when!r}")
+        v = (output or {}).get(m.group(1))
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and v >= float(m.group(2))
+    if when.startswith("input_json:"):
+        inp = as_json(trace["agent"].get("input"))
+        inp = as_json(inp.get("user_input")) if isinstance(inp, dict) and "user_input" in inp else inp
+        return bool(isinstance(inp, dict) and inp.get(when.split(":", 1)[1]))
+    fn = adapter.conditions.get(when)
+    if fn is None:
+        raise ValueError(f"unknown condition {when!r}")
+    return bool(fn(trace))
+
+
+def output_check(rule: dict, output: dict | None) -> bool:
+    v = (output or {}).get(rule["output"])
+    if "in" in rule:
+        return v in rule["in"]
+    if "min" in rule:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and v >= rule["min"]
+    return v is not None
+
+
+def to_row(trace: dict, cfg: dict) -> dict:
+    adapter = ADAPTERS[cfg.get("adapter", "default")]
+    agent = trace["agent"]
+    base_tags = [f"agent:{cfg['key']}", f"source:{source(trace, adapter)}", f"model:{trace.get('model', 'unknown')}"]
+    if agent.get("level") == "ERROR":           # the run itself failed (e.g. the LLM circuit breaker was open)
+        return {"arm": cfg["key"], "case": trace["trace_id"], "run": 1, "passed": None,
+                "infra_error": str(agent.get("statusMessage") or "agent run errored")[:200],
+                "tags": base_tags, "checks": {}}
+    output = adapter.parse_output(trace)
+    calls = [{"name": c["name"], "args": c["input"] if isinstance(c["input"], dict) else {}} for c in trace["calls"]]
+    checks: dict[str, bool] = {}
+    for r in cfg.get("rules", []):
+        if not condition_holds(r.get("when"), trace, output, adapter):
+            continue
+        if "output" in r:
+            if output is not None:
+                checks[r["name"]] = output_check(r, output)
+        else:
+            checks.update(run_checks([{k: v for k, v in r.items() if k not in ("when", "why")}], calls))
+    checks.update(adapter.checks(trace))
+    meta = agent.get("metadata") or {}
+    row = {"arm": cfg["key"], "case": trace["trace_id"], "run": 1, "passed": None, "infra_error": None,
+           "tags": base_tags + adapter.tags(trace), "checks": checks, "tool_calls": len(calls)}
     if trace.get("cost_usd"):
         row["cost_usd"] = round(trace["cost_usd"], 6)
-    if trace["agent"].get("latency") is not None:
-        row["latency_s"] = float(trace["agent"]["latency"])
+    if agent.get("latency") is not None:
+        row["latency_s"] = float(agent["latency"])
     if isinstance(meta, dict) and meta.get("iterations") is not None:
         row["steps"] = float(meta["iterations"])
-    if d is None:
+    if output is None:
         row["no_answer"] = "parse_error"
     return row
 
 
-# ---- 4. judge items --------------------------------------------------------------------------------------------
-
-def severity_guide() -> str:
-    lines = [ln.strip() for ln in TRIAGE_PROMPT.read_text().splitlines() if re.match(r"^\s*P[0-3]\s+—", ln)]
-    return "\n".join(lines)
-
-
-def to_item(trace: dict, guide: str) -> dict | None:
-    d = decision(trace["agent"])
-    if d is None:
-        return None
-    text = event_text(trace["agent"])
-    event = "\n".join(f"{f}: {(event_field(text, f) or '')[:600]}" for f in ("error_type", "title", "service",
-                                                                               "description"))
-    tools = "\n".join(f"{c['name']}: {c['output'][:300]}" for c in trace["calls"]) or "no tool calls"
-    agent = json.dumps({k: d.get(k) for k in ("decision", "severity", "occurrences_24h", "reasoning")})
-    return {"item": trace["trace_id"], "case": trace["trace_id"], "tags": [f"source:{source(trace)}"],
-            "severity_guide": guide, "error_event": event, "tool_results": tools, "agent_decision": agent}
-
-
-# ---- 3/6. report -----------------------------------------------------------------------------------------------
+# ---- 3. summaries ----------------------------------------------------------------------------------------------
 
 def _pct(v):
     return "n/a" if v is None else f"{100 * v:.1f}%"
 
 
+def _tag(row: dict, prefix: str) -> str:
+    return next((t.split(":", 1)[1] for t in row["tags"] if t.startswith(prefix + ":")), "unknown")
+
+
 def summarize_rules(rows: list[dict]) -> dict[str, dict]:
     from agentstats import analysis
     from agentstats.records import from_dict
-    def tag(r, prefix):
-        return next((t.split(":", 1)[1] for t in r["tags"] if t.startswith(prefix + ":")), "unknown")
     groups: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
-        groups[f"{tag(r, 'source')} / {tag(r, 'model')}"].append(r)
+        groups[f"{_tag(r, 'source')} / {_tag(r, 'model')}"].append(r)
     out = {}
     for key in sorted(groups, key=lambda k: (not k.startswith("production"), k)):
         atts = [from_dict(r) for r in groups[key]]
@@ -286,15 +266,71 @@ def flags(rule_summary: dict[str, dict]) -> list[str]:
     return out
 
 
-def render(start, end, rows, rule_summary, judge_summary, review_note, promote_table, failures) -> str:
-    by_src = Counter(t.split(":", 1)[1] for r in rows for t in r["tags"] if t.startswith("source:"))
-    lines = [f"# agentstats weekly: TriageAgent, {start:%Y-%m-%d} to {end:%Y-%m-%d}", "",
-             f"{len(rows)} runs: " + ", ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + ".", ""]
+def _agentstats(*args: str) -> str:
+    r = subprocess.run([sys.executable, "-m", "agentstats.cli", *args], capture_output=True, text=True)
+    if r.returncode not in (0, 1, 2, 3):
+        raise RuntimeError(f"agentstats {' '.join(args[:2])} failed: {r.stderr[-500:]}")
+    return r.stdout
+
+
+def judge(cfg: dict, traces: list[dict], out: Path, seed: int) -> tuple[str, str]:
+    """(judge summary, review note) for one agent: rubric judge on a sample, then a blind review sheet."""
+    adapter = ADAPTERS[cfg.get("adapter", "default")]
+    items = []
+    for t in traces:
+        it = adapter.judge_item(t)
+        if it:
+            items.append({"item": t["trace_id"], "case": t["trace_id"], "tags": [f"source:{source(t, adapter)}"],
+                          **it})
+    if not items:
+        return "No judgeable runs this week.", "Not run this week (no judged runs)."
+    rng = random.Random(seed)
+    prod = [i for i in items if "source:production" in i["tags"]]
+    rest = [i for i in items if "source:production" not in i["tags"]]
+    rng.shuffle(rest)
+    sample = (prod + rest)[:cfg.get("judge_sample", 40)]
+    (out / "judge_items.jsonl").write_text("".join(json.dumps(i) + "\n" for i in sample))
+    fields = cfg.get("judge_fields") or [k for k in sample[0] if k not in ("item", "case", "tags")]
+    _agentstats("grade", str(out / "judge_items.jsonl"), "--rubric", str(ROOT / cfg["rubric"]),
+                "--model", os.environ.get("AGENTSTATS_JUDGE_MODEL", "deepseek-ai/DeepSeek-V4.1-Flash"),
+                "--base-url", "https://api.together.xyz/v1", "--api-key-env", "TOGETHER_API_KEY",
+                "--fields", ",".join(fields), "--repeats", "2",
+                "--out", str(out / "judge_labels.jsonl"), "--rows", str(out / "judge_rows.jsonl"))
+    jrows = [json.loads(x) for x in (out / "judge_rows.jsonl").read_text().splitlines() if x.strip()]
+    judged = [r for r in jrows if r["passed"] is not None]
+    per_q = Counter(k for r in judged for k, v in r["checks"].items() if not v)
+    flip = re.search(r"flip rate ([\d.]+)%", _agentstats("judge", str(out / "judge_labels.jsonl")))
+    flip_rate = float(flip.group(1)) / 100 if flip else None
+    summary = (f"{len(judged)} of {len(jrows)} sampled runs judged; {sum(r['passed'] for r in judged)} passed every "
+               "rubric question. Failed questions: "
+               + (", ".join(f"`{k}` {v}" for k, v in per_q.most_common()) or "none")
+               + f". Judge flip rate over 2 repeats: {_pct(flip_rate)}.")
+    if flip_rate is not None and flip_rate > MAX_JUDGE_FLIPS:
+        summary = (f"**The judge is unreliable this week** (flip rate {_pct(flip_rate)} over 2 repeats, above "
+                   f"{_pct(MAX_JUDGE_FLIPS)}): treat its verdicts as noise and fix the rubric before trusting them. "
+                   + summary)
+    n = cfg.get("review_n", 20)
+    _agentstats("review", "sample", str(out / "judge_rows.jsonl"), "--n", str(n), "--stratify-by", "source",
+                "--seed", str(seed), "--out", str(out / "review"))
+    return summary, (f"{n} judged runs sampled for review (blind sheet `{cfg['key']}/review/review.csv` in the "
+                     f"artifact; verdicts and sampling weights in `{cfg['key']}/review/key.jsonl`).")
+
+
+# ---- 6. report -------------------------------------------------------------------------------------------------
+
+def render_agent(cfg: dict, rows: list[dict], rule_summary: dict, judge_summary: str, review_note: str,
+                 promote_table: str, failures: list[str]) -> list[str]:
+    by_src = Counter(_tag(r, "source") for r in rows)
+    lines = [f"## {cfg['agent']}", ""]
+    if cfg.get("description"):
+        lines += [cfg["description"], ""]
+    if not rows:
+        return lines + ["No runs this week.", ""]
+    lines += [f"{len(rows)} runs: " + ", ".join(f"{k} {v}" for k, v in sorted(by_src.items())) + "."]
     fl = flags(rule_summary)
-    lines += ["## Needs attention", ""] + ([f"- {f}" for f in fl] or ["- Nothing: every behaviour rule is at or "
-                                                                     f"above {_pct(RULE_FLOOR)}."]) + [""]
-    lines += ["## Runs by source and model", "",
-              "| source / model | runs | errored (infrastructure) | no usable answer | cost per run |",
+    lines += ["", "**Needs attention**", ""] + ([f"- {f}" for f in fl] or
+                                              [f"- Nothing: every behaviour rule is at or above {_pct(RULE_FLOOR)}."])
+    lines += ["", "| source / model | runs | errored (infrastructure) | no usable answer | cost per run |",
               "|---|---|---|---|---|"]
     for key, s in rule_summary.items():
         cpr = f"${s['cost_per_run']:.4f}" if s.get("cost_per_run") else "n/a"
@@ -303,120 +339,91 @@ def render(start, end, rows, rule_summary, judge_summary, review_note, promote_t
     if errors:
         lines += ["", "Errored runs are kept out of the rule rates. Causes: "
                   + "; ".join(f"{msg} ({n})" for msg, n in errors.most_common(3)) + "."]
-    lines += ["", "## Behaviour rules (no labels needed)", "",
-              "| source / model | rule | runs checked | held | 95% CI |", "|---|---|---|---|---|"]
-    for src, s in rule_summary.items():
-        for rule, iv in sorted(s["checks"].items()):
-            lines.append(f"| {src} | `{rule}` | {iv['n']} | {_pct(iv['estimate'])} | {_pct(iv['low'])} to "
-                         f"{_pct(iv['high'])} |")
-    lines.append("")
+    checked = [(k, rule, iv) for k, s in rule_summary.items() for rule, iv in sorted(s["checks"].items())]
+    if checked:
+        lines += ["", "| source / model | rule | runs checked | held | 95% CI |", "|---|---|---|---|---|"]
+        lines += [f"| {k} | `{rule}` | {iv['n']} | {_pct(iv['estimate'])} | {_pct(iv['low'])} to {_pct(iv['high'])} |"
+                  for k, rule, iv in checked]
+    else:
+        lines += ["", "No behaviour rule applied to this week's runs."]
     if failures:
-        lines += ["Runs that broke a rule (trace ids, for Langfuse): " + ", ".join(f"`{t}`" for t in failures[:15])
-                  + (f" and {len(failures) - 15} more" if len(failures) > 15 else ""), ""]
-    lines += ["## Rubric judge", "", judge_summary or "Not run this week (run with `--judge`).", ""]
-    lines += ["## Human review", "", review_note, ""]
-    lines += ["## Candidate eval cases (failures, deduplicated)", "", promote_table or "None this week.", ""]
+        lines += ["", "Runs that broke a rule (trace ids, for Langfuse): " + ", ".join(f"`{t}`" for t in failures[:15])
+                  + (f" and {len(failures) - 15} more" if len(failures) > 15 else "")]
+    if cfg.get("rubric"):
+        lines += ["", "**Rubric judge**", "", judge_summary or "Not run this week (run with `--judge`).",
+                  "", "**Human review**", "", review_note]
+    lines += ["", "**Candidate eval cases (production failures, deduplicated)**", "", promote_table or "None this week.",
+              ""]
+    return lines
+
+
+def render(start, end, sections: list[list[str]]) -> str:
+    lines = [f"# agentstats weekly, {start:%Y-%m-%d} to {end:%Y-%m-%d}", ""]
+    for s in sections:
+        lines += s
     lines += ["## How to close the loop", "",
-              "1. Download the `agentstats-weekly` artifact from this run.",
-              "2. Fill `review/review.csv` (human_verdict: pass / fail / unsure), then "
-              "`agentstats review import review/review.csv --key review/key.jsonl --rater <you> "
-              "--out app/evals/agentstats/triage_review_labels.jsonl` and commit the labels.",
-              "3. In `candidates.jsonl`, set `\"approved\": true` on cases worth keeping, then "
-              "`agentstats promote accept candidates.jsonl --into app/evals/agentstats/triage_cases.jsonl`, and add "
-              "their events (from `items.jsonl`) with your label to the triage eval set.", "",
-              "_Generated by `scripts/agentstats_weekly.py` with agentstats. No raw event text is included here; it's "
-              "in the artifact and Langfuse._"]
+              "1. Download the `agentstats-weekly` artifact from this run (one folder per agent).",
+              "2. Fill `<agent>/review/review.csv` (human_verdict: pass / fail / unsure), then `agentstats review "
+              "import <agent>/review/review.csv --key <agent>/review/key.jsonl --rater <you> --out "
+              "app/evals/agentstats/<agent>_review_labels.jsonl` and commit the labels.",
+              "3. In `<agent>/candidates.jsonl`, set `\"approved\": true` on cases worth keeping, then `agentstats "
+              "promote accept <agent>/candidates.jsonl --into app/evals/agentstats/<agent>_cases.jsonl`, and add their "
+              "events with your label to that agent's eval set.", "",
+              "_Generated by `scripts/agentstats_weekly.py` with agentstats; agents are configured in "
+              "`config/agentstats/agents/`. No raw event text is included here; it's in the artifact and Langfuse._"]
     return "\n".join(lines) + "\n"
 
 
 # ---- main ------------------------------------------------------------------------------------------------------
 
-def _agentstats(*args: str) -> str:
-    r = subprocess.run([sys.executable, "-m", "agentstats.cli", *args], capture_output=True, text=True)
-    if r.returncode not in (0, 1, 2, 3):
-        raise RuntimeError(f"agentstats {' '.join(args[:2])} failed: {r.stderr[-500:]}")
-    return r.stdout
+def run_agent(cfg: dict, traces: list[dict], out: Path, use_judge: bool, seed: int) -> list[str]:
+    out.mkdir(parents=True, exist_ok=True)
+    rows = [to_row(t, cfg) for t in traces]
+    (out / "rows.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    if not rows:
+        return render_agent(cfg, rows, {}, "", "", "", [])
+    rule_summary = summarize_rules(rows)
+    (out / "rules.json").write_text(json.dumps(rule_summary, indent=1))
+    failures = [r["case"] for r in rows if (r["checks"] and not all(r["checks"].values())) or r.get("no_answer")]
+    judge_summary, review_note = "", "Not run this week (needs the judge: `--judge`)."
+    if use_judge and cfg.get("rubric"):
+        judge_summary, review_note = judge(cfg, traces, out, seed)
+    prod_rows = [r for r in rows if "source:production" in r["tags"]]
+    table = ""
+    if prod_rows:
+        (out / "production_rows.jsonl").write_text("".join(json.dumps(r) + "\n" for r in prod_rows))
+        args = ["promote", "find", str(out / "production_rows.jsonl"), "--source", "production", "--label-from",
+                "human", "--out", str(out / "candidates.jsonl")]
+        if cfg.get("group_by"):
+            args += ["--group-by", cfg["group_by"]]
+        table = "\n".join(ln for ln in _agentstats(*args).splitlines() if ln.startswith("|"))
+    return render_agent(cfg, rows, rule_summary, judge_summary, review_note, table, failures)
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[1] if __doc__ else None)
+    ap = argparse.ArgumentParser(description="Weekly agent monitoring with agentstats.")
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--judge", action="store_true", help="run the rubric judge on a sample (TOGETHER_API_KEY)")
-    ap.add_argument("--judge-sample", type=int, default=40, help="runs judged per week (production first)")
-    ap.add_argument("--judge-model", default="deepseek-ai/DeepSeek-V4.1-Flash")
-    ap.add_argument("--review-n", type=int, default=20)
+    ap.add_argument("--agents", help="comma-separated config names (default: every config)")
+    ap.add_argument("--judge", action="store_true", help="run each agent's rubric judge on a sample (TOGETHER_API_KEY)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
+    configs = load_configs(args.agents.split(",") if args.agents else None)
     end = dt.datetime.now(dt.UTC).replace(microsecond=0)
     start = end - dt.timedelta(days=args.days)
-    out = args.out
-    out.mkdir(parents=True, exist_ok=True)
-
-    agents = fetch_observations("AGENT", start, end, name="TriageAgent")
+    args.out.mkdir(parents=True, exist_ok=True)
     tools = fetch_observations("TOOL", start, end)
-    # LLM calls are named by whichever path made them ("llm/triage" through the gateway, "anthropic.messages.create"
-    # from the SDK's own instrumentation, ...), so take every generation in the window and match by trace id.
+    # LLM calls are named by whichever path made them, so take every generation in the window and match by trace id.
     generations = fetch_observations("GENERATION", start, end, fields="core,model,usage", max_rows=200_000)
-    traces = join_traces(agents, tools, generations)
-    rows = [to_row(t) for t in traces]
-    (out / "rows.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    print(f"{len(traces)} TriageAgent runs, {len(tools)} tool calls in the window")
-    if not rows:
-        (out / "report.md").write_text(f"# agentstats weekly: TriageAgent\n\nNo TriageAgent runs between "
-                                       f"{start:%Y-%m-%d} and {end:%Y-%m-%d}.\n")
-        return 0
-
-    rule_summary = summarize_rules(rows)
-    failures = [r["case"] for r in rows if not all(r["checks"].values()) or r.get("no_answer")]
-
-    judge_summary, review_note = "", "Not run this week (needs the judge: `--judge`)."
-    guide = severity_guide()
-    items = [i for i in (to_item(t, guide) for t in traces) if i]
-    (out / "items.jsonl").write_text("".join(json.dumps(i) + "\n" for i in items))
-    if args.judge and items:
-        rng = random.Random(args.seed)
-        prod = [i for i in items if "source:production" in i["tags"]]
-        rest = [i for i in items if "source:production" not in i["tags"]]
-        rng.shuffle(rest)
-        sample = (prod + rest)[:args.judge_sample]
-        (out / "judge_items.jsonl").write_text("".join(json.dumps(i) + "\n" for i in sample))
-        _agentstats("grade", str(out / "judge_items.jsonl"), "--rubric", str(RUBRIC), "--model", args.judge_model,
-                    "--base-url", "https://api.together.xyz/v1", "--api-key-env", "TOGETHER_API_KEY",
-                    "--fields", "severity_guide,error_event,tool_results,agent_decision", "--repeats", "2",
-                    "--out", str(out / "judge_labels.jsonl"), "--rows", str(out / "judge_rows.jsonl"))
-        jrows = [json.loads(x) for x in (out / "judge_rows.jsonl").read_text().splitlines() if x.strip()]
-        judged = [r for r in jrows if r["passed"] is not None]
-        per_q = Counter(k for r in judged for k, v in r["checks"].items() if not v)
-        consistency = _agentstats("judge", str(out / "judge_labels.jsonl"))
-        flip = re.search(r"flip rate ([\d.]+)%", consistency)
-        flip_rate = float(flip.group(1)) / 100 if flip else None
-        judge_summary = (f"{len(judged)} of {len(jrows)} sampled runs judged; {sum(r['passed'] for r in judged)} "
-                         f"passed every rubric question. Failed questions: "
-                         + (", ".join(f"`{k}` {v}" for k, v in per_q.most_common()) or "none")
-                         + f". Judge flip rate over 2 repeats: {_pct(flip_rate)}.")
-        if flip_rate is not None and flip_rate > MAX_JUDGE_FLIPS:
-            judge_summary = (f"**The judge is unreliable this week** (flip rate {_pct(flip_rate)} over 2 repeats, above "
-                             f"{_pct(MAX_JUDGE_FLIPS)}): treat its verdicts as noise and fix the rubric before "
-                             "trusting them. " + judge_summary)
-        review_dir = out / "review"
-        _agentstats("review", "sample", str(out / "judge_rows.jsonl"), "--n", str(args.review_n),
-                    "--stratify-by", "source", "--seed", str(args.seed), "--out", str(review_dir))
-        review_note = (f"{args.review_n} judged runs sampled for review (blind sheet `review/review.csv` in the "
-                       "artifact; verdicts and sampling weights in `review/key.jsonl`).")
-
-    # Only production failures become candidates: eval failures are already eval cases.
-    prod_rows = [r for r in rows if "source:production" in r["tags"]]
-    (out / "production_rows.jsonl").write_text("".join(json.dumps(r) + "\n" for r in prod_rows))
-    promote_out = _agentstats("promote", "find", str(out / "production_rows.jsonl"), "--source", "production",
-                              "--label-from", "human", "--group-by", "error_type",
-                              "--out", str(out / "candidates.jsonl")) if prod_rows else ""
-    table = "\n".join(ln for ln in promote_out.splitlines() if ln.startswith("|"))
-    report = render(start, end, rows, rule_summary, judge_summary, review_note, table, failures)
-    (out / "report.md").write_text(report)
-    (out / "rules.json").write_text(json.dumps(rule_summary, indent=1))
-    print(f"wrote {out / 'report.md'}")
+    sections = []
+    for cfg in configs:
+        agents = fetch_observations("AGENT", start, end, name=cfg["agent"])
+        traces = join_traces(agents, tools, generations)
+        print(f"{cfg['agent']}: {len(traces)} runs")
+        sections.append(run_agent(cfg, traces, args.out / cfg["key"], args.judge, args.seed))
+    (args.out / "report.md").write_text(render(start, end, sections))
+    print(f"wrote {args.out / 'report.md'}")
     return 0
 
 

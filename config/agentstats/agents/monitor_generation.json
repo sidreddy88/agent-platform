@@ -1,0 +1,8 @@
+{
+ "agent": "MonitorGenerationAgent",
+ "description": "Generates CloudWatch alarms from a merged PR's diff (deterministic: no LLM call).",
+ "rules": [
+  {"name": "monitors_when_files", "output": "monitors", "min": 1, "when": "output:files_analyzed>=1",
+   "why": "a merged PR with analysed files should get at least one monitor"}
+ ]
+}

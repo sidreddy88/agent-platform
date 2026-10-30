@@ -83,8 +83,6 @@ jobs:
     if: needs.changes.outputs.run == 'true' && needs.changes.outputs.stale == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      AGENTSTATS_REF: d554a1d
     steps:
       - uses: actions/checkout@v4
 
@@ -94,15 +92,7 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies and agentstats
-        env:
-          DEPLOY_KEY: ${{ secrets.AGENTSTATS_DEPLOY_KEY }}
-        run: |
-          pip install -r requirements-dev.txt
-          mkdir -p ~/.ssh && printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/agentstats && chmod 600 ~/.ssh/agentstats
-          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/agentstats -o IdentitiesOnly=yes" \
-            pip install "agentstats @ git+ssh://git@github.com/sidreddy88/agentstats.git@$AGENTSTATS_REF"
-          rm -f ~/.ssh/agentstats
+        run: pip install -r requirements-dev.txt     # includes agentstats (PyPI, pinned there)
 
       - name: Replay the smoke sample (1 trial)
         env:

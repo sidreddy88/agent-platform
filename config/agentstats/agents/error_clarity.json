@@ -1,0 +1,9 @@
+{
+ "agent": "ErrorClarityAgent",
+ "description": "Adds logging and error messages when diagnosis confidence is too low to fix.",
+ "rules": [
+  {"name": "read_before_suggesting", "before": ["read_file", "suggest_addition"],
+   "why": "an addition must target code the agent actually read (the 'plausible but never investigated' gap)"}
+ ],
+ "group_by": "error_type"
+}

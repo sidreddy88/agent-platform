@@ -25,6 +25,7 @@ from app.models.events import IncidentState
 from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import HAIKU_MODEL, LLMService
 from app.services.output_validator import check_leaked_markers
+from app.services.tracing import incident_summary, trace_entry
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,11 @@ class MergeDecisionAgent:
     def __init__(self, llm: LLMService | None = None) -> None:
         self._llm = llm or LLMService(model=HAIKU_MODEL)
 
+    @trace_entry(input_of=lambda incident, review_text: {**incident_summary(incident),
+                                                          "review_chars": len(review_text or "")},
+                 output_of=lambda d: {"decision": d.decision, "blocking_issues": len(d.blocking_issues),
+                                      "non_blocking_issues": len(d.non_blocking_issues),
+                                      "reasoning": (d.reasoning or "")[:300]})
     async def decide(self, incident: IncidentState, review_text: str) -> MergeDecision:
         event = incident.error_event
         severity = str(event.severity).split(".")[-1] if event.severity else "P2"
