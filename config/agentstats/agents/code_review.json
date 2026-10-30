@@ -1,0 +1,8 @@
+{
+ "agent": "CodeReviewAgent",
+ "description": "Reviews a PR and posts feedback as a GitHub comment.",
+ "rules": [
+  {"name": "posted_when_asked", "called": "post_pr_review", "when": "input_json:post_to_github",
+   "why": "a review requested for GitHub must actually be posted"}
+ ]
+}

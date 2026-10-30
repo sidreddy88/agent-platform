@@ -1,0 +1,14 @@
+{
+ "agent": "TriageAgent",
+ "adapter": "triage",
+ "description": "Classifies an error event as real/noise/duplicate with P0-P3 severity.",
+ "rules": [
+  {"name": "called_check_duplicate_pr", "called": "check_duplicate_pr"},
+  {"name": "called_get_occurrence_count", "called": "get_occurrence_count", "when": "log_group"}
+ ],
+ "rubric": "config/agentstats/triage_rubric.json",
+ "judge_fields": ["severity_guide", "error_event", "tool_results", "agent_decision"],
+ "judge_sample": 40,
+ "review_n": 20,
+ "group_by": "error_type"
+}

@@ -2,7 +2,8 @@
 
 `agentstats` runs agent-platform's monitoring: once a week (Mondays 14:00 UTC, or on demand from the Actions tab)
 `.github/workflows/agentstats-weekly.yml` runs `scripts/agentstats_weekly.py`, which reads the past week's Langfuse
-traces and opens one GitHub issue (label `agentstats-weekly`). TriageAgent is first; the others follow the same shape.
+traces and opens one GitHub issue (label `agentstats-weekly`) with a section per agent. Every agent is a config file in
+`config/agentstats/agents/`; TriageAgent is the full example (rules, adapter checks, rubric judge, review, promote).
 
 | Step | What it does | agentstats |
 |---|---|---|
@@ -22,6 +23,24 @@ are reported as outages, not agent failures.
 **Source.** Traces carry a Langfuse environment (`production` on ECS, `local` elsewhere, set in
 `app/services/tracing.py`). Older traces say `default`; for those a synthetic log group means an eval run and a real
 one means production, which then includes local replays of real incidents.
+
+**Adding an agent** is a config file, `config/agentstats/agents/<name>.json`:
+
+```json
+{"agent": "FixGenerationAgent",
+ "rules": [{"name": "tests_before_pr", "before": ["sandbox_tests", "create_pull_request"]}],
+ "group_by": "error_type"}
+```
+
+Rules use agentstats' kinds on the run's recorded steps (`called`, `not_called`, `before`, `args`) or check the
+agent's output (`{"output": "decision", "in": [...]}`, `{"output": "monitors", "min": 1}`); `"when"` limits a rule
+to runs where it applies (`"called:<tool>"`, `"output:<field>>=<n>"`, `"input_json:<key>"`, or an adapter
+condition). Logic a config can't express goes in a small adapter in `scripts/agentstats_adapters.py` (triage's
+"stated count was looked up"). Add `"rubric"` for a judge. The agent has to be traced: `BaseAgent.run()` is, and
+other entry points use `@trace_entry` with `record_step()` for the actions rules check.
+
+Configured today: triage (full), fix (`tests_before_pr`), ErrorClarity (`read_before_suggesting`), merge decision
+(`valid_decision`), monitor generation (`monitors_when_files`), code review (`posted_when_asked`).
 
 **Closing the loop** is in each issue: fill the review sheet and import it; approve candidates and add their events
 (with your label) to the triage eval set.

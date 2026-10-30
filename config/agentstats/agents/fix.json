@@ -1,0 +1,9 @@
+{
+ "agent": "FixGenerationAgent",
+ "description": "Generates a fix, self-critiques, sandbox-validates, opens a PR.",
+ "rules": [
+  {"name": "tests_before_pr", "before": ["sandbox_tests", "create_pull_request"],
+   "why": "a PR must not be opened before the sandbox tests ran"}
+ ],
+ "group_by": "error_type"
+}

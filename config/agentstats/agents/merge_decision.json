@@ -1,0 +1,8 @@
+{
+ "agent": "MergeDecisionAgent",
+ "description": "Decides merge-now vs refix-first when review requests changes.",
+ "rules": [
+  {"name": "valid_decision", "output": "decision", "in": ["merge_now", "refix_first"]}
+ ],
+ "group_by": "error_type"
+}
