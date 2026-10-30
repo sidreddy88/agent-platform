@@ -50,6 +50,12 @@ def _get_client() -> Any:
     try:
         from langfuse import Langfuse
         host = settings.langfuse_base_url or settings.langfuse_host
+        # Tag traces with where they ran, so monitoring can tell production from local runs and evals (every trace
+        # used to say "default"). ECS injects ECS_CONTAINER_METADATA_URI_V4 into every task; anything else is local
+        # unless LANGFUSE_TRACING_ENVIRONMENT says otherwise (an eval script can set "eval").
+        import os
+        os.environ.setdefault("LANGFUSE_TRACING_ENVIRONMENT",
+                              "production" if os.environ.get("ECS_CONTAINER_METADATA_URI_V4") else "local")
         _langfuse = Langfuse(
             public_key=settings.langfuse_public_key,
             secret_key=settings.langfuse_secret_key,
