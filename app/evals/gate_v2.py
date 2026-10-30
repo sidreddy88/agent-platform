@@ -108,6 +108,50 @@ def collect(run_dirs: list[Path], harness_hash: str, trials: int) -> Verdicts:
     return out
 
 
+def trial_row(case: str, run: int, verdict: str, repo: str, steps: list[str] | None = None,
+              cost: float | None = None) -> dict:
+    """One trial as an agentstats attempt row. A billing/infra verdict is an infrastructure failure; with the
+    trajectory's steps, the row also checks submitted_via_tool (no accepted submission passed 0% of recorded
+    DeepSeek trials) and marks a trial that never submitted as no_answer."""
+    row = {"case": case, "run": run, "tags": [f"repo:{repo}"], "infra_error": None, "checks": {}}
+    v = verdict.upper()
+    if v.startswith(("BILLING", "INFRA", "ERROR")):
+        row.update(passed=None, infra_error=verdict)
+        return row
+    row["passed"] = v == "PASS"
+    if steps is not None:
+        submitted = "submit_diagnosis" in steps
+        row["checks"]["submitted_via_tool"] = submitted
+        row["steps"] = float(len(steps))
+        if not submitted and not row["passed"]:
+            row["no_answer"] = "no_submission"
+    if isinstance(cost, dict):                    # trajectories record {"cost_usd": ..., "tokens": ..., ...}
+        cost = cost.get("cost_usd")
+    if isinstance(cost, (int, float)):
+        row["cost_usd"] = round(float(cost), 6)
+    return row
+
+
+def collect_rows(run_dirs: list[Path], harness_hash: str, trials: int) -> list[dict]:
+    """agentstats rows (one per trial, with rule checks from the trajectory) from optimizer run dirs."""
+    rows = []
+    for rd in run_dirs:
+        for p in sorted((Path(rd) / "evals" / harness_hash / f"k{trials}").glob("*.json")):
+            data = json.loads(p.read_text())
+            trajs = data.get("trajectories") or []
+            for i, verdict in enumerate(data["case"]["verdicts"], 1):
+                t = trajs[i - 1] if i - 1 < len(trajs) else {}
+                rows.append(trial_row(p.stem, i, verdict, t.get("repo") or p.stem.split("__")[0],
+                                      [s.get("name") for s in t.get("steps", [])] if t else None, t.get("cost")))
+    return rows
+
+
+def baseline_rows(base: dict, pool: dict) -> list[dict]:
+    """The stored baseline's verdicts as agentstats rows (verdicts only: it predates trajectory checks)."""
+    return [trial_row(c, i, v, pool["repos"].get(c, c.split("__")[0]))
+            for c in pool["cases"] for i, v in enumerate(base["cases"].get(c, []), 1)]
+
+
 def merge(*parts: Verdicts) -> Verdicts:
     """Combine trials of the same harness measured in separate runs."""
     out: Verdicts = {}

@@ -62,6 +62,10 @@ class Default:
     def log_group(self, trace: dict) -> str | None:
         return None
 
+    def no_answer_reason(self, trace: dict) -> str:
+        """Why a run has no usable answer (only asked when parse_output returned None)."""
+        return "parse_error"
+
     def judge_item(self, trace: dict) -> dict | None:
         out = self.parse_output(trace)
         if out is None:
@@ -145,4 +149,59 @@ class Triage(Default):
                                                                     "reasoning")})}
 
 
-ADAPTERS = {"default": Default(), "triage": Triage()}
+# ---- DiagnosisAgent: the diagnosis is the input of the last submit_diagnosis call the tool accepted -----------
+
+class Diagnosis(Default):
+    """The grounding gate (PR #211) rejects an ungrounded submit_diagnosis ("REJECTED — fix the following ...") and
+    the agent resubmits; the accepted call's input is the diagnosis."""
+
+    @staticmethod
+    def submissions(trace: dict) -> list[dict]:
+        return [c for c in trace["calls"] if c["name"] == "submit_diagnosis"]
+
+    def parse_output(self, trace: dict) -> dict | None:
+        accepted = [c for c in self.submissions(trace) if c["output"].startswith("Diagnosis accepted")]
+        return accepted[-1]["input"] if accepted and isinstance(accepted[-1]["input"], dict) else None
+
+    def checks(self, trace: dict) -> dict[str, bool]:
+        subs = self.submissions(trace)
+        if not subs:
+            return {}
+        return {"diagnosis_accepted": self.parse_output(trace) is not None,
+                "accepted_first_try": subs[0]["output"].startswith("Diagnosis accepted")}
+
+    def log_group(self, trace: dict) -> str | None:
+        lg = event_field(event_text(trace["agent"]), "log_group")
+        return lg if lg and lg.lower() not in ("none", "null", "") else None
+
+    def no_answer_reason(self, trace: dict) -> str:
+        out = str(as_json(trace["agent"].get("output")) or "")
+        if "allowed number of steps" in out:
+            return "step_limit"                   # ran out of steps (MAX_ITERATIONS) before an accepted submission
+        return "not_accepted" if self.submissions(trace) else "no_submission"
+
+    def tags(self, trace: dict) -> list[str]:
+        d = self.parse_output(trace) or {}
+        et = event_field(event_text(trace["agent"]), "error_type") or "unknown"
+        return [f"error_type:{et}", f"confidence:{d.get('confidence', 'none')}"]
+
+    def judge_item(self, trace: dict) -> dict | None:
+        d = self.parse_output(trace)
+        if d is None:
+            return None
+        text = event_text(trace["agent"])
+        incident = "\n".join(f"{f}: {(event_field(text, f) or '')[:600]}"
+                             for f in ("error_type", "title", "service", "description"))
+        reads = [c for c in trace["calls"] if c["name"] in ("get_file_contents", "grep_codebase", "find_callers",
+                                                             "verify_symbol_in_repo")]
+        target = str(d.get("affected_file") or "")
+        # Reads of the file the diagnosis names first (that's where its support is), then the most recent others.
+        ranked = sorted(reads, key=lambda c: target and target in json.dumps(c["input"]), reverse=True)[:6]
+        code = "\n\n".join(f"{c['name']} {json.dumps(c['input'])[:150]}:\n{c['output'][:1200]}" for c in ranked)
+        diag = {k: str(d.get(k, ""))[:800] for k in ("root_cause", "root_cause_snippet", "affected_file",
+                                                     "affected_function", "evidence", "fix_approach", "confidence")}
+        return {"incident": incident, "code_the_agent_read": code or "no code read",
+                "diagnosis": json.dumps(diag)}
+
+
+ADAPTERS = {"default": Default(), "triage": Triage(), "diagnosis": Diagnosis()}

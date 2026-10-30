@@ -39,7 +39,8 @@ condition). Logic a config can't express goes in a small adapter in `scripts/age
 "stated count was looked up"). Add `"rubric"` for a judge. The agent has to be traced: `BaseAgent.run()` is, and
 other entry points use `@trace_entry` with `record_step()` for the actions rules check.
 
-Configured today: triage (full), fix (`tests_before_pr`), ErrorClarity (`read_before_suggesting`), merge decision
+Configured today: triage (full), diagnosis (full: `submitted_via_tool`, `read_before_first_submit`, adapter checks
+`diagnosis_accepted` and `accepted_first_try`, a rubric, step-limit runs labelled `step_limit`), fix (`tests_before_pr`), ErrorClarity (`read_before_suggesting`), merge decision
 (`valid_decision`), monitor generation (`monitors_when_files`), code review (`posted_when_asked`).
 
 **Closing the loop** is in each issue: fill the review sheet and import it; approve candidates and add their events
@@ -47,3 +48,13 @@ Configured today: triage (full), fix (`tests_before_pr`), ErrorClarity (`read_be
 
 Secrets: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `TOGETHER_API_KEY` (judge). Run locally:
 `python scripts/agentstats_weekly.py --days 7 --out weekly/ [--judge]` with the same variables set.
+
+**Diagnosis, measured before choosing its rules** (recorded DeepSeek runs, r9 + g500, 1,491 trials): runs that never
+submitted a diagnosis passed 0% of the time (89% when they did), so `submitted_via_tool` is both monitored and gated;
+reading a file before submitting made no difference (82% vs 83%), so `read_before_first_submit` is monitored only.
+First data (14 days): the grounding gate rejected 26 of 71 submissions (37%), and 17 of 62 runs ran out of steps
+without an accepted diagnosis.
+
+**The diagnosis CI gate decides with agentstats** (`--tier full` in `app/evals/diagnosis_gate_policy.toml`), gate v2's
+own paired test printing alongside for comparison. Simulated on main's baseline the two agree on 99.5-100% of PRs; on a
+recorded full DeepSeek run both say PASS (+1.6 points).

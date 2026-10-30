@@ -9,3 +9,16 @@ seed = 0
 runs = 1
 require.no_regression = 0.15   # FAIL only when clearly worse than main by more than 15 points
 require.max_infra = 0.20
+
+[full]                         # the 434-case gate on every diagnosis PR: 2 trials per case vs main's baseline
+# Decision moved from gate v2's own paired test to agentstats (same statistic, plus the small-sample correction).
+# Simulated on main's real baseline (434 cases x 4 trials, 1,500 PRs each): no change -> 0.9% false alarms
+# (gate v2: 1.1%); a real 3-point drop -> caught 94.5% (gate v2: 95.0%); the two agree on 99.5-100% of PRs.
+# Run with --conf 0.90 (conf 0.95 caught only 89.9% of 3-point drops).
+runs = 2
+slice_by = "repo"
+require.no_significant_drop = 0.0    # fail on a proven drop
+require.max_slice_drop = 0.20        # a repo proven worse by 20+ points fails; smaller leads are named
+require.min_rule_rate = 0.85         # submitted_via_tool held in 92% of recorded DeepSeek trials
+require.max_no_answer = 0.15
+require.max_infra = 0.05

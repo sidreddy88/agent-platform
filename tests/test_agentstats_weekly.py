@@ -205,3 +205,42 @@ def test_fetch_follows_the_cursor():
         return next(pages)
     rows = w.fetch_observations("AGENT", dt.datetime(2026, 1, 1), dt.datetime(2026, 1, 8), name="TriageAgent", get=get)
     assert [r["id"] for r in rows] == [1, 2] and seen == [None, "c1"]
+
+
+# ---- diagnosis (adapter) ----------------------------------------------------------------------------------
+
+def diag_trace(tid, calls, output="Diagnosis submitted"):
+    a = agent(tid, name="DiagnosisAgent", output={"answer": output, "iterations": 5},
+              inp={"user_input": "INCIDENT:\n  error_type      : APP_CRASHED\n  title           : x\n"})
+    return w.join_traces([a], [tool(tid, n, i, o, str(k)) for k, (n, i, o) in enumerate(calls)])[0]
+
+
+def test_diagnosis_uses_the_accepted_submission_and_tracks_rejections():
+    cfg = CONFIGS["diagnosis"]
+    t = diag_trace("d1", [("submit_diagnosis", {"root_cause": "guess"}, "REJECTED — fix the following ..."),
+                          ("get_file_contents", {"file_path": "a.js"}, "code"),
+                          ("submit_diagnosis", {"root_cause": "real", "affected_file": "a.js"},
+                           "Diagnosis accepted. Write a brief final Answer")])
+    row = w.to_row(t, cfg)
+    assert ADAPTERS["diagnosis"].parse_output(t)["root_cause"] == "real"
+    assert row["checks"] == {"submitted_via_tool": True, "read_before_first_submit": False,
+                             "diagnosis_accepted": True, "accepted_first_try": False}
+    assert "no_answer" not in row and "error_type:APP_CRASHED" in row["tags"]
+
+
+def test_diagnosis_that_ran_out_of_steps_is_a_step_limit_no_answer():
+    t = diag_trace("d2", [("grep_codebase", {"pattern": "x"}, "...")] * 15,
+                   output="I was unable to find an answer within the allowed number of steps.")
+    row = w.to_row(t, CONFIGS["diagnosis"])
+    assert row["no_answer"] == "step_limit" and row["checks"]["submitted_via_tool"] is False
+    assert row["checks"]["read_before_first_submit"] is True       # 'before' holds vacuously with no submission
+
+
+def test_diagnosis_judge_item_puts_the_affected_files_reads_first():
+    t = diag_trace("d3", [("get_file_contents", {"file_path": "b.js"}, "other"),
+                          ("get_file_contents", {"file_path": "a.js"}, "the bug"),
+                          ("submit_diagnosis", {"root_cause": "r", "affected_file": "a.js", "root_cause_snippet": "s"},
+                           "Diagnosis accepted.")])
+    item = ADAPTERS["diagnosis"].judge_item(t)
+    assert item["code_the_agent_read"].startswith('get_file_contents {"file_path": "a.js"}')
+    assert '"root_cause_snippet": "s"' in item["diagnosis"]

@@ -1,0 +1,11 @@
+[
+ {"name": "root_cause_supported_by_evidence",
+  "question": "Is the diagnosis's root cause supported by the evidence it quotes and the code the agent read? Reasonable inference from that code is fine; a root cause the code it read doesn't touch is not supported.",
+  "pass": "yes"},
+ {"name": "points_at_producer",
+  "question": "Does the diagnosis place the problem where the bad value or state is produced, rather than only at the line where the error surfaces (for example a null check at the crash site)? If the error surfaces where it is produced, answer yes.",
+  "pass": "yes"},
+ {"name": "fix_approach_addresses_root_cause",
+  "question": "Would the diagnosis's fix approach, as described, address its stated root cause?",
+  "pass": "yes"}
+]

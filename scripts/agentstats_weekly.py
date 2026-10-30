@@ -220,7 +220,7 @@ def to_row(trace: dict, cfg: dict) -> dict:
     if isinstance(meta, dict) and meta.get("iterations") is not None:
         row["steps"] = float(meta["iterations"])
     if output is None:
-        row["no_answer"] = "parse_error"
+        row["no_answer"] = adapter.no_answer_reason(trace)
     return row
 
 

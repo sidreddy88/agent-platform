@@ -59,9 +59,10 @@ def cmd_collect(args) -> int:
 
     h = content_hash(Path(args.harness))
     verdicts = gate_v2.collect([Path(d) for d in args.run_dir], h, args.trials)
+    rows = gate_v2.collect_rows([Path(d) for d in args.run_dir], h, args.trials)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps({"harness_hash": h, "trials": args.trials,
-                                          "verdicts": verdicts}, indent=1))
+                                          "verdicts": verdicts, "rows": rows}, indent=1))
     print(f"{len(verdicts)} cases collected for harness {h}")
     return 0
 
@@ -118,6 +119,24 @@ def cmd_aggregate(args) -> int:
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
             f.write(text + "\n")
     return 0 if res.passed else 1
+
+
+def cmd_agentstats_rows(args) -> int:
+    """The PR's trials (from shard results) and main's baseline as agentstats rows, for `agentstats gate`.
+    Fails closed, like the paired test: every pool case must have trials on both sides."""
+    pool = gate_v2.load_pool()
+    pr_rows = [r for p in args.results for r in json.loads(Path(p).read_text()).get("rows", [])]
+    base_rows = gate_v2.baseline_rows(gate_v2.load_baseline(Path(args.baseline)), pool)
+    have_pr, have_base = {r["case"] for r in pr_rows}, {r["case"] for r in base_rows}
+    missing = [c for c in pool["cases"] if c not in have_pr or c not in have_base]
+    if missing:
+        print(f"{len(missing)} pool case(s) missing from the PR's results or the baseline "
+              f"(e.g. {missing[:5]}): failing closed")
+        return 1
+    Path(args.pr_out).write_text("".join(json.dumps(r) + "\n" for r in pr_rows))
+    Path(args.baseline_out).write_text("".join(json.dumps(r) + "\n" for r in base_rows))
+    print(f"{len(pr_rows)} PR trials and {len(base_rows)} baseline trials over {len(pool['cases'])} cases")
+    return 0
 
 
 def cmd_baseline(args) -> int:
@@ -197,6 +216,11 @@ def main() -> int:
     s = sub.add_parser("aggregate")
     s.add_argument("--results", nargs="+", required=True)
     s.add_argument("--baseline", default=str(gate_v2.BASELINE))
+    s = sub.add_parser("agentstats-rows", help="PR and baseline trials as agentstats rows (fails closed)")
+    s.add_argument("--results", nargs="+", required=True)
+    s.add_argument("--baseline", default=str(gate_v2.BASELINE))
+    s.add_argument("--pr-out", required=True)
+    s.add_argument("--baseline-out", required=True)
     s = sub.add_parser("baseline")
     s.add_argument("--results", nargs="+", required=True)
     s.add_argument("--main-sha", required=True)
@@ -208,7 +232,7 @@ def main() -> int:
     s.add_argument("--sims", type=int, default=1000)
     args = ap.parse_args()
     return {"pool": cmd_pool, "shard-file": cmd_shard_file, "collect": cmd_collect,
-            "aggregate": cmd_aggregate, "timing": cmd_timing, "timing-report": cmd_timing_report, "baseline": cmd_baseline, "power": cmd_power}[args.cmd](args)
+            "aggregate": cmd_aggregate, "agentstats-rows": cmd_agentstats_rows, "timing": cmd_timing, "timing-report": cmd_timing_report, "baseline": cmd_baseline, "power": cmd_power}[args.cmd](args)
 
 
 if __name__ == "__main__":

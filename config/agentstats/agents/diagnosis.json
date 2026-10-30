@@ -1,0 +1,16 @@
+{
+ "agent": "DiagnosisAgent",
+ "adapter": "diagnosis",
+ "description": "Root cause + confidence, grounded via call graph and symbol verification; submits through submit_diagnosis, which rejects ungrounded diagnoses.",
+ "rules": [
+  {"name": "submitted_via_tool", "called": "submit_diagnosis",
+   "why": "a conclusion written as prose instead of submitted was a real bug (PR #224); runs without a submission passed 0% of the time (92 recorded DeepSeek trials)"},
+  {"name": "read_before_first_submit", "before": ["get_file_contents", "submit_diagnosis"],
+   "why": "drift signal: does the agent read code before its first submission? (did not predict correctness on recorded runs, so it is monitored, not gated)"}
+ ],
+ "rubric": "config/agentstats/diagnosis_rubric.json",
+ "judge_fields": ["incident", "code_the_agent_read", "diagnosis"],
+ "judge_sample": 30,
+ "review_n": 15,
+ "group_by": "error_type"
+}
