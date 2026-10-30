@@ -125,8 +125,23 @@ jobs:
         if: inputs.mode == 'probe'
         run: python scripts/gate_v2.py timing-report --results gate-results/timing-*.json
 
-      - name: Paired test against main's baseline
+      - name: Gate against main's baseline (agentstats decides)
         if: inputs.mode == 'gate'
+        # Same paired statistic as gate v2 plus the small-sample correction, per-repo slices, the
+        # submitted_via_tool rule and no-answer/infra handling; simulated on main's baseline it agrees with
+        # gate v2 on 99.5-100% of PRs (app/evals/diagnosis_gate_policy.toml). Missing cases fail closed.
+        run: |
+          python scripts/gate_v2.py agentstats-rows --results gate-results/shard-*.json \
+            --pr-out pr-rows.jsonl --baseline-out baseline-rows.jsonl
+          rc=0
+          agentstats gate --policy app/evals/diagnosis_gate_policy.toml --tier full \
+            --candidate pr-rows.jsonl --baseline baseline-rows.jsonl --conf 0.90 | tee gate.md || rc=${PIPESTATUS[0]}
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat gate.md >> "$GITHUB_STEP_SUMMARY"; fi
+          exit $rc
+
+      - name: Gate v2's own paired test (for comparison, not the decision)
+        if: inputs.mode == 'gate' && always()
+        continue-on-error: true
         run: python scripts/gate_v2.py aggregate --results gate-results/shard-*.json
 
       - name: Write a new baseline
