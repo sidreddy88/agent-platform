@@ -83,7 +83,6 @@ jobs:
     if: needs.changes.outputs.run == 'true' && needs.changes.outputs.stale == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
     steps:
       - uses: actions/checkout@v4
 
