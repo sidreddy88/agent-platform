@@ -1,0 +1,63 @@
+name: agentstats-weekly
+
+# Weekly agent monitoring with agentstats (TriageAgent first): last week's Langfuse traces -> behaviour rules per
+# source and model -> rubric judge on a sample -> blind review sheet -> candidate eval cases -> one GitHub issue.
+# See scripts/agentstats_weekly.py. Costs a few cents a week (the judge, on Together).
+
+on:
+  schedule:
+    - cron: "0 14 * * 1"          # Mondays, 14:00 UTC
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days back to look"
+        default: "7"
+      judge:
+        description: "Run the rubric judge on a sample (a few cents)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  AGENTSTATS_REF: c7e56fd         # agentstats with the sampled-design fix for rules-only rows
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install agentstats
+        run: pip install "agentstats @ git+https://github.com/sidreddy88/agentstats@${AGENTSTATS_REF}"
+      - name: Weekly monitoring (TriageAgent)
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: https://us.cloud.langfuse.com
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          JUDGE: ${{ github.event_name == 'schedule' || inputs.judge }}
+        run: |
+          args=(--days "${{ inputs.days || '7' }}" --out weekly)
+          if [ "$JUDGE" = "true" ]; then args+=(--judge); fi
+          python scripts/agentstats_weekly.py "${args[@]}"
+      - name: Keep the artifacts (rows, judge output, review sheet, candidates)
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentstats-weekly
+          path: weekly/
+          retention-days: 90
+      - name: Open the weekly issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '\n\nArtifacts for this week: %s/%s/actions/runs/%s\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> weekly/report.md
+          gh label create agentstats-weekly --color 5319e7 --description "Weekly agentstats monitoring" --force
+          gh issue create --title "agentstats weekly: TriageAgent, week ending $(date -u +%F)" \
+            --body-file weekly/report.md --label agentstats-weekly

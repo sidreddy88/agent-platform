@@ -1,0 +1,11 @@
+[
+ {"name": "severity_allowed_by_guide",
+  "question": "Using the severity guide and the occurrence count in the tool results (not a number the agent states), is the agent's severity one the guide allows for this event? Service down or data loss is P0 whatever the count. If the event could reasonably fit two levels (for example a crash that may or may not take the service down), either level counts.",
+  "pass": "yes"},
+ {"name": "decision_supported",
+  "question": "Is the agent's decision (real, noise or duplicate) supported by the error event and the tool results? A duplicate needs an existing PR in the tool results; noise needs the event itself to show it is transient or expected.",
+  "pass": "yes"},
+ {"name": "reasoning_consistent_with_evidence",
+  "question": "Is the agent's reasoning consistent with the error event and the tool results: it does not contradict them, and every count, PR or specific detail it cites appears in one of them? Reasonable inferences from the event (for example that a fatal crash took the task down) are fine.",
+  "pass": "yes"}
+]

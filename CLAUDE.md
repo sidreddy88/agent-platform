@@ -58,6 +58,9 @@ Langfuse tracing is wired into `BaseAgent` automatically via the `@trace_agent` 
 ### Approval System (`app/services/approvals.py`)
 HIGH/CRITICAL risk actions must be approved before execution. `ApprovalService` is a module-level singleton shared between agents and the REST API. Approve/reject via `POST /approvals/{id}/approve` or `POST /approvals/{id}/reject`.
 
+### Weekly monitoring (`scripts/agentstats_weekly.py`)
+agentstats monitors the agents weekly from Langfuse traces (behaviour rules, rubric judge, review sample, new eval cases) and opens a GitHub issue; see `docs/AGENTSTATS_WEEKLY.md`. TriageAgent first.
+
 ### RAG Service (`app/services/rag.py`)
 ChromaDB-backed vector store with OpenAI `text-embedding-3-small`. Call `rag.index_codebase()` once to build the index, then `rag.search(query)` to retrieve relevant code snippets.
 

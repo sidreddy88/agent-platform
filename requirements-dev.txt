@@ -3,3 +3,7 @@
 -r requirements.txt
 pytest>=8.3.3
 pytest-asyncio>=0.24.0
+
+# agentstats: weekly monitoring (scripts/agentstats_weekly.py) and its tests. Public repo; commit has the
+# sampled-design fix for rules-only rows.
+agentstats @ git+https://github.com/sidreddy88/agentstats@c7e56fd
