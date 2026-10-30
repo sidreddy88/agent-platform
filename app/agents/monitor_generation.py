@@ -32,6 +32,7 @@ from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.output_validator import check_leaked_markers
 from app.services.github import GitHubError, GitHubService
 from app.services.llm import HAIKU_MODEL, LLMService
+from app.services.tracing import trace_entry
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +331,10 @@ class MonitorGenerationAgent(BaseAgent):
             ),
         )
 
+    @trace_entry(input_of=lambda owner, repo, pr_number, *a, **k: {"repo": f"{owner}/{repo}", "pr_number": pr_number},
+                 output_of=lambda r: {"monitors": len(r.monitors), "files_analyzed": r.files_analyzed,
+                                      "monitors_created": r.monitors_created, "coverage_ratio": r.coverage_ratio,
+                                      "dry_run": r.dry_run})
     async def generate_monitors(
         self,
         owner: str,

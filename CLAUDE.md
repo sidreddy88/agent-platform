@@ -53,7 +53,7 @@ LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
 All agents extend `BaseAgent`. Register tools with `agent.register_tool(name, async_fn, description)` or the `@agent.tool(name, description)` decorator. Call `await agent.run(user_input)` to execute the ReAct loop.
 
 ### Tracing (`app/services/tracing.py`)
-Langfuse tracing is wired into `BaseAgent` automatically via the `@trace_agent` decorator. Every LLM call and tool execution is captured as a nested span. Tracing is silently disabled when Langfuse keys are absent.
+Langfuse tracing is wired into `BaseAgent` automatically via the `@trace_agent` decorator. Every LLM call and tool execution is captured as a nested span. Tracing is silently disabled when Langfuse keys are absent. Agents whose entry point isn't `BaseAgent.run()` (fix, merge decision, ErrorClarity, monitor generation) use `@trace_entry(input_of=..., output_of=...)` and `record_step()` for key actions; inputs and outputs are compact summaries, never raw logs. Traces carry a Langfuse environment: `production` on ECS, `local` elsewhere.
 
 ### Approval System (`app/services/approvals.py`)
 HIGH/CRITICAL risk actions must be approved before execution. `ApprovalService` is a module-level singleton shared between agents and the REST API. Approve/reject via `POST /approvals/{id}/approve` or `POST /approvals/{id}/reject`.

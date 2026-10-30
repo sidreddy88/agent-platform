@@ -16,6 +16,7 @@ from app.services.github import FileDiff, GitHubError, GitHubService, PRDetails
 from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import LLMService
 from app.services.output_validator import check_leaked_markers
+from app.services.tracing import record_step, trace_agent
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +363,7 @@ IMPORTANT: Your review must be grounded solely in the per-file analysis above.
             # when the reviewer is the same user who opened the PR (422 Unprocessable Entity).
             # The recommendation is communicated in the review body text instead.
             await github.post_pr_review(owner, repo, pr_number, review_text, event="COMMENT")
+            record_step("post_pr_review", {"pr_number": pr_number}, {"posted": True})
             logger.info("[CodeReview] Posted review to PR #%d", pr_number)
             return review_text + "\n\n---\n✓ Review posted to GitHub."
         except GitHubError as exc:
@@ -412,6 +414,7 @@ class CodeReviewAgent(BaseAgent):
         except Exception:
             pass  # no OpenAI key or ChromaDB — reviews still work, just without codebase context
 
+    @trace_agent
     async def run(self, user_input: str) -> AgentResult:
         """
         Run the code review pipeline directly (no ReAct loop).

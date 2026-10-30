@@ -33,6 +33,7 @@ from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import HAIKU_MODEL, LLMService
 from app.services.repo import LocalRepoService
 from app.services.session_logger import session_logger
+from app.services.tracing import incident_summary, record_step, trace_entry
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +342,8 @@ class FixGenerationAgent(BaseAgent):
         result, _ = await self.fix_with_steps(incident)
         return result
 
+    @trace_entry(input_of=lambda incident: {**incident_summary(incident), "step": "commit_approved_fix"},
+                 output_of=lambda r: {"pr_number": r[0].pr_number, "files_changed": r[0].files_changed, "test_added": r[0].test_added, "blast_radius_violation": r[0].blast_radius_violation, "target_file": r[0].target_file, "fix_description": (r[0].fix_description or "")[:300]})
     async def commit_approved_fix(self, incident: IncidentState) -> tuple[FixResult, list[str]]:
         """
         Commit a previously generated and human-approved diff to GitHub and open a PR.
@@ -408,6 +411,7 @@ class FixGenerationAgent(BaseAgent):
                 base="staging",
                 labels=["bug", "ai-generated-fix", "awaiting-review"],
             )
+            record_step("create_pull_request", {"file": file_path}, {"pr_number": pr_number})
             steps.append(f"✓ Created PR #{pr_number}: {pr_url}")
             logger.info("[FixGen] Approved fix committed — PR #%d: %s", pr_number, pr_url)
 
@@ -426,6 +430,8 @@ class FixGenerationAgent(BaseAgent):
             commit_sha=commit_sha,
         ), steps
 
+    @trace_entry(input_of=lambda incident, patch_only=False: {**incident_summary(incident), "patch_only": patch_only},
+                 output_of=lambda r: {"pr_number": r[0].pr_number, "files_changed": r[0].files_changed, "test_added": r[0].test_added, "blast_radius_violation": r[0].blast_radius_violation, "target_file": r[0].target_file, "fix_description": (r[0].fix_description or "")[:300]})
     async def fix_with_steps(self, incident: IncidentState,
                              patch_only: bool = False) -> tuple[FixResult, list[str]]:
         """
@@ -602,6 +608,7 @@ class FixGenerationAgent(BaseAgent):
             if alt_frame:
                 alt_path, alt_fn = alt_frame
                 steps.append(f"↻ Critique LIKELY WRONG — retrying with alternate frame: {alt_path}")
+                record_step("alt_frame_retry", {"from": file_path, "to": alt_path})
                 logger.info("[FixGen] Critique rejected — switching to %s → %s", alt_path, alt_fn)
                 try:
                     alt_content, _ = await self._read_file(alt_path, ref=PR_BASE)
@@ -665,6 +672,8 @@ class FixGenerationAgent(BaseAgent):
             new_content = self._apply_all_edits(content, old_function, new_function, patches)
 
             sandbox_result = await _sandbox.run({file_path: new_content}, incident.id)
+            record_step("sandbox_tests", {"file": file_path, "attempt": attempt},
+                        {"passed": sandbox_result.passed, "error": sandbox_result.error})
             _sess = session_logger.get(incident.id)
             if _sess:
                 _sess.log_sandbox_attempt(
@@ -853,6 +862,7 @@ class FixGenerationAgent(BaseAgent):
                 base=PR_BASE,
                 labels=["bug", "ai-generated-fix", "awaiting-review"],
             )
+            record_step("create_pull_request", {"file": file_path}, {"pr_number": pr_number})
             steps.append(f"✓ Created PR #{pr_number}: {pr_url}")
             logger.info("[FixGen] PR #%d created: %s", pr_number, pr_url)
 

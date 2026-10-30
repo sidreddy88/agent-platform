@@ -163,6 +163,82 @@ def trace_agent(run_method: Callable) -> Callable:
 
 
 # ---------------------------------------------------------------------------
+# trace_entry / record_step — agents whose entry point isn't BaseAgent.run()
+# ---------------------------------------------------------------------------
+
+def incident_summary(incident: Any) -> dict:
+    """A compact, log-free description of an incident for a trace input (never full descriptions or logs)."""
+    ev = getattr(incident, "error_event", None)
+    return {"incident_id": getattr(incident, "id", None), "error_type": getattr(ev, "error_type", None),
+            "title": (getattr(ev, "title", "") or "")[:200], "service": getattr(ev, "service", None)}
+
+
+def _safely(fn: Callable | None, *args: Any, **kwargs: Any) -> Any:
+    if fn is None:
+        return None
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # describing the input/output must never break the agent
+        return {"trace_summary_error": str(exc)[:200]}
+
+
+def trace_entry(input_of: Callable[..., Any] | None = None,
+                output_of: Callable[[Any], Any] | None = None) -> Callable:
+    """Wrap an agent entry point that isn't BaseAgent.run() (fix_with_steps, decide, analyze, ...) in the same
+    Langfuse agent span trace_agent gives run(), so every agent's runs are traces: one per call, its LLM calls and
+    record_step() actions nested inside. input_of(*args, **kwargs) and output_of(result) build small, log-free
+    summaries; errors are recorded and re-raised."""
+    def decorate(method: Callable) -> Callable:
+        @functools.wraps(method)
+        async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            lf = _get_client()
+            agent_name = type(self).__name__
+            start = time.perf_counter()
+            if lf is None:
+                try:
+                    return await method(self, *args, **kwargs)
+                finally:
+                    _record_latency(agent_name, start)
+            try:
+                with lf.start_as_current_observation(
+                    name=agent_name, as_type="agent", input=_safely(input_of, *args, **kwargs),
+                ) as obs:
+                    obs.update(tags=[settings.environment])
+                    try:
+                        result = await method(self, *args, **kwargs)
+                        obs.update(output=_safely(output_of, result),
+                                   metadata={"agent": agent_name,
+                                             "duration_ms": int((time.perf_counter() - start) * 1000)})
+                        return result
+                    except Exception as exc:
+                        obs.update(level="ERROR", status_message=str(exc),
+                                   metadata={"agent": agent_name,
+                                             "duration_ms": int((time.perf_counter() - start) * 1000)})
+                        raise
+            finally:
+                _record_latency(agent_name, start)
+                try:
+                    lf.flush()
+                except Exception:
+                    pass
+        return wrapper
+    return decorate
+
+
+def record_step(name: str, input: Any = None, output: Any = None, error: str | None = None) -> None:
+    """Record an action an agent took (a sandbox run, a PR opened, a tool call in a hand-rolled loop) as a tool
+    observation inside the current agent span, for behaviour rules. Recorded after the action; never raises."""
+    lf = _get_client()
+    if lf is None:
+        return
+    try:
+        with lf.start_as_current_observation(name=name, as_type="tool", input=input) as span:
+            span.update(output=output, **({"level": "ERROR", "status_message": error} if error else {}))
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # trace_llm_call — wraps a single LLMService.complete() call
 # ---------------------------------------------------------------------------
 

@@ -29,6 +29,7 @@ from app.services.github import GitHubError, GitHubService
 from app.services.ipi_guard import scan_for_injection, wrap_untrusted
 from app.services.llm import LLMService
 from app.services.output_validator import validate_error_clarity_addition
+from app.services.tracing import incident_summary, record_step, trace_entry
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,10 @@ class ErrorClarityAgent:
         self._llm = llm or LLMService()
         self._owner, self._repo = settings.fix_target_repo.split("/", 1)
 
+    @trace_entry(input_of=incident_summary,
+                 output_of=lambda r: {"self_explanatory": r.self_explanatory, "additions": len(r.additions),
+                                      "patterns": len(r.patterns), "pr_number": r.pr_number,
+                                      "files": sorted({a.file for a in r.additions if a.file})})
     async def analyze(self, incident: IncidentState) -> ClarityResult:
         event = incident.error_event
         error_type = event.error_type or event.title
@@ -336,6 +341,7 @@ class ErrorClarityAgent:
                     result = f"Unknown tool: {name}"
 
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                record_step(name, {k: str(v)[:300] for k, v in (inp or {}).items()}, str(result)[:300])
 
         # Check for self-explanatory signal
         self_explanatory_pattern = next(
