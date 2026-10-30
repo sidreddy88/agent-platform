@@ -273,6 +273,33 @@ def _agentstats(*args: str) -> str:
     return r.stdout
 
 
+def trace_link(trace: dict) -> str:
+    """Langfuse UI link template for the review sheet ({case} is the trace id)."""
+    base = (os.environ.get("LANGFUSE_BASE_URL") or "https://us.cloud.langfuse.com").rstrip("/")
+    project = trace["agent"].get("projectId")
+    return f"{base}/project/{project}/traces/{{case}}" if project else ""
+
+
+def write_review_helper(out: Path, items: dict[str, dict], link: str, fields: list[str]) -> None:
+    """REVIEW.md next to the blind sheet: each sampled run's material (what the judge saw, never its verdict) with a
+    Langfuse link, numbered in the sheet's order. Raw event text: it stays in the artifact, never in the issue."""
+    import csv
+    sheet = out / "review" / "review.csv"
+    if not sheet.exists():
+        return
+    rows = list(csv.DictReader(sheet.open()))
+    md = ["# Review sheet helper", "", "For each run, decide whether the agent got it right. Write pass, fail or unsure "
+          "in the human_verdict column of review.csv (same order). The judge's verdict is deliberately not shown.", ""]
+    for n, r in enumerate(rows, 1):
+        it = items.get(r["case"], {})
+        url = link.format(case=r["case"]) if link else ""
+        md += [f"## {n}. `{r['case'][:12]}`" + (f"  [open in Langfuse]({url})" if url else ""), ""]
+        for f in fields:
+            md += [f"**{f.replace('_', ' ')}**", "", "```", str(it.get(f, "")).strip()[:1500], "```", ""]
+        md += ["---", ""]
+    (out / "review" / "REVIEW.md").write_text("\n".join(md))
+
+
 def judge(cfg: dict, traces: list[dict], out: Path, seed: int) -> tuple[str, str]:
     """(judge summary, review note) for one agent: rubric judge on a sample, then a blind review sheet."""
     adapter = ADAPTERS[cfg.get("adapter", "default")]
@@ -310,10 +337,13 @@ def judge(cfg: dict, traces: list[dict], out: Path, seed: int) -> tuple[str, str
                    f"{_pct(MAX_JUDGE_FLIPS)}): treat its verdicts as noise and fix the rubric before trusting them. "
                    + summary)
     n = cfg.get("review_n", 20)
+    link = trace_link(traces[0]) if traces else ""
     _agentstats("review", "sample", str(out / "judge_rows.jsonl"), "--n", str(n), "--stratify-by", "source",
-                "--seed", str(seed), "--out", str(out / "review"))
-    return summary, (f"{n} judged runs sampled for review (blind sheet `{cfg['key']}/review/review.csv` in the "
-                     f"artifact; verdicts and sampling weights in `{cfg['key']}/review/key.jsonl`).")
+                "--seed", str(seed), "--out", str(out / "review"), *(["--link", link] if link else []))
+    write_review_helper(out, {i["case"]: i for i in sample}, link, fields)
+    return summary, (f"{n} judged runs sampled for review: read `{cfg['key']}/review/REVIEW.md` (each run's material "
+                     f"and a Langfuse link) and fill `{cfg['key']}/review/review.csv` in the artifact; the judge's "
+                     f"verdicts and sampling weights are in `{cfg['key']}/review/key.jsonl`).")
 
 
 # ---- 6. report -------------------------------------------------------------------------------------------------

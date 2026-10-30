@@ -244,3 +244,20 @@ def test_diagnosis_judge_item_puts_the_affected_files_reads_first():
     item = ADAPTERS["diagnosis"].judge_item(t)
     assert item["code_the_agent_read"].startswith('get_file_contents {"file_path": "a.js"}')
     assert '"root_cause_snippet": "s"' in item["diagnosis"]
+
+
+def test_review_helper_numbers_runs_in_sheet_order_with_links_and_no_judge_verdict(tmp_path):
+    import csv
+    (tmp_path / "review").mkdir()
+    with (tmp_path / "review" / "review.csv").open("w", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=["item", "case", "arm", "run", "link", "human_verdict", "notes"])
+        wr.writeheader()
+        wr.writerow({"item": "x|t2|1", "case": "t2", "arm": "x", "run": 1})
+        wr.writerow({"item": "x|t1|1", "case": "t1", "arm": "x", "run": 1})
+    t = {"agent": {"projectId": "p1"}}
+    link = w.trace_link(t)
+    assert link.endswith("/project/p1/traces/{case}")
+    w.write_review_helper(tmp_path, {"t1": {"event": "E1"}, "t2": {"event": "E2"}}, link, ["event"])
+    md = (tmp_path / "review" / "REVIEW.md").read_text()
+    assert md.index("## 1. `t2`") < md.index("## 2. `t1`") and "/traces/t2" in md and "E2" in md
+    assert "verdict" not in md.split("judge's verdict is deliberately not shown")[1]
