@@ -82,7 +82,9 @@ def _langfuse_get(params: dict, retries: int = 6) -> dict:
     """One page from the Langfuse v2 observations API. Rate limits (429) and server errors are retried with backoff,
     honouring Retry-After: paging through a week of generations hits the limit."""
     base = (os.environ.get("LANGFUSE_BASE_URL") or "https://us.cloud.langfuse.com").rstrip("/")
-    token = base64.b64encode(f"{os.environ['LANGFUSE_PUBLIC_KEY']}:{os.environ['LANGFUSE_SECRET_KEY']}".encode())
+    # Stray quotes or whitespace (copied from a .env line like KEY="pk-lf-...") make Langfuse answer 401.
+    public, secret = (os.environ[k].strip().strip("\"'") for k in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"))
+    token = base64.b64encode(f"{public}:{secret}".encode())
     url = f"{base}/api/public/v2/observations?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"Authorization": "Basic " + token.decode(),
                                                "User-Agent": "agentstats-weekly"})
