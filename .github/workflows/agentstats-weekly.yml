@@ -21,9 +21,6 @@ permissions:
   contents: read
   issues: write
 
-env:
-  AGENTSTATS_REF: c7e56fd         # agentstats with the sampled-design fix for rules-only rows
-
 jobs:
   weekly:
     runs-on: ubuntu-latest
@@ -34,7 +31,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install agentstats
-        run: pip install "agentstats @ git+https://github.com/sidreddy88/agentstats@${AGENTSTATS_REF}"
+        run: pip install "agentstats==0.4.0"     # same version as requirements-dev.txt
       - name: Weekly monitoring (all configured agents)
         env:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
