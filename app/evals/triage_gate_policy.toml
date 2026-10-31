@@ -22,6 +22,7 @@ require.max_no_answer = 0.05        # above this, the agent loop or the answer p
 # catch it.
 require.min_rule_rate = 0.95        # each rule holds at least this often (FAIL only when the interval is below)
 require.no_rule_regression = 0.0    # FAIL if any rule is proven to hold less often than in main's baseline
+require.max_cost_ratio = 1.25       # cost per run, PR / baseline (bootstrap CI): catches prompt bloat and tool loops
 
 # 2026-10-31: nightly check of main against the same baseline (.github/workflows/triage-nightly.yml). Catches
 # regressions with no code change (provider model updates, dependency upgrades, infrastructure drift), which the PR
@@ -34,3 +35,10 @@ require.max_infra = 0.10
 require.max_no_answer = 0.05
 require.min_rule_rate = 0.95
 require.no_rule_regression = 0.0
+# 2026-10-31: reliability, cost and latency. Simulated on the baseline (200 nights of 2 trials per case vs the other
+# 2, unchanged agent): 0 false alarms at these limits; a pass^2 floor of 88% was INCONCLUSIVE 60% of nights. pass^2 = both trials of a case pass; the baseline's is 92.3%,
+# last night's 93.0%. Cost and p95 latency are ratios to the baseline; last night 1.01x and 0.91x. Latency is
+# nightly-only: provider slowness shouldn't block a PR, but a 50% slower agent is worth an issue.
+require.min_pass_hat_k = 0.85
+require.max_cost_ratio = 1.25
+require.max_p95_latency_ratio = 1.5
