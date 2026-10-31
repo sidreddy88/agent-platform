@@ -415,6 +415,11 @@ class LLMGateway:
         rates = self._config.get("cost_per_1k_tokens", {}).get(model, {})
         return (input_tokens * rates.get("input", 0.0) + output_tokens * rates.get("output", 0.0)) / 1000
 
+    def _response_cost(self, model: str, raw: LLMResponse) -> float:
+        """A call's cost from its token counts: cached input billed at 10% (see complete())."""
+        cost = self._compute_cost(model, raw.input_tokens - raw.cache_read_input_tokens, raw.output_tokens)
+        return cost + self._compute_cost(model, raw.cache_read_input_tokens, 0) * 0.1
+
     def _record_cost(self, task_type: str, provider: str, cost: float) -> None:
         today = date.today().isoformat()
         day = self._daily_costs.setdefault(today, {})
@@ -451,9 +456,18 @@ class LLMGateway:
                 try:
                     result = await provider.complete(messages, model, system=system, **kwargs)
                     try:
+                        # usage_details / cost_details: Langfuse v4 ignores unknown keywords, so the old
+                        # usage={...} was silently dropped. Claude and GPT calls only showed tokens because
+                        # Langfuse estimated them from the text; for a model it has no price for
+                        # (DeepSeek on Together) the span had no tokens and no cost at all.
+                        uncached = max(0, result.input_tokens - result.cache_read_input_tokens
+                                       - result.cache_creation_input_tokens)
                         gen.update(
                             output=result.content[:500],
-                            usage={"input": result.input_tokens, "output": result.output_tokens},
+                            usage_details={"input": uncached, "output": result.output_tokens,
+                                           "input_cached_tokens": result.cache_read_input_tokens,
+                                           "input_cache_creation": result.cache_creation_input_tokens},
+                            cost_details={"total": self._response_cost(model, result)},
                         )
                     except Exception:
                         pass
@@ -509,9 +523,7 @@ class LLMGateway:
         latency_ms = (time.perf_counter() - start) * 1000
 
         # Cached tokens are billed at 10% — compute actual cost accordingly
-        billed_input = raw.input_tokens - raw.cache_read_input_tokens
-        cost = self._compute_cost(model, billed_input, raw.output_tokens)
-        cost += self._compute_cost(model, raw.cache_read_input_tokens, 0) * 0.1
+        cost = self._response_cost(model, raw)
         resp = LLMResponse(
             content=raw.content,
             input_tokens=raw.input_tokens,

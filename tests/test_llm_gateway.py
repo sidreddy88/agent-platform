@@ -456,3 +456,42 @@ class TestCompleteStopReason:
 def test_diagnosis_output_cap_leaves_room_for_reasoning():
     _, _, max_tokens = LLMGateway()._get_routing("diagnosis")
     assert max_tokens >= 32768
+
+
+# ---------------------------------------------------------------------------
+# Langfuse generation spans carry the call's real tokens and cost
+# ---------------------------------------------------------------------------
+
+class TestGenerationSpanUsage:
+    @pytest.mark.asyncio
+    async def test_span_records_usage_and_cost_with_names_langfuse_v4_accepts(self):
+        """The span used to pass usage={...}; Langfuse v4 ignores unknown keywords, so tokens were silently dropped
+        and DeepSeek-on-Together diagnosis calls had no tokens or cost in Langfuse at all."""
+        import inspect
+        from contextlib import contextmanager
+
+        from langfuse._client.span import LangfuseGeneration
+
+        gen = MagicMock()
+
+        @contextmanager
+        def observation(**kwargs):
+            yield gen
+
+        lf = MagicMock()
+        lf.start_as_current_observation = observation
+        gw = _make_gateway()
+        gw._provider.complete = AsyncMock(return_value=LLMResponse(
+            content="ok", input_tokens=1000, output_tokens=200, provider="anthropic", model="claude-sonnet-4-6",
+            cost_usd=0.0, cache_read_input_tokens=300, cache_creation_input_tokens=100))
+        with patch("app.services.tracing._get_client", return_value=lf):
+            await gw._call_provider(gw._provider, [{"role": "user", "content": "hi"}], "claude-sonnet-4-6",
+                                    "diagnosis")
+        kwargs = gen.update.call_args.kwargs
+        accepted = set(inspect.signature(LangfuseGeneration.update).parameters) - {"self", "kwargs"}
+        assert set(kwargs) <= accepted                    # no keyword Langfuse would silently ignore
+        assert kwargs["usage_details"] == {"input": 600, "output": 200, "input_cached_tokens": 300,
+                                           "input_cache_creation": 100}
+        # (1000 - 300) input + 200 output at sonnet rates, plus 300 cached at 10%
+        expected = (700 * 0.003 + 200 * 0.015) / 1000 + (300 * 0.003 / 1000) * 0.1
+        assert kwargs["cost_details"]["total"] == pytest.approx(expected)
