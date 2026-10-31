@@ -43,11 +43,19 @@ class Default(Adapter):
     def log_group(self, trace: dict) -> str | None:
         return None
 
+    def error_type(self, trace: dict) -> str | None:
+        inp = self.parse_input(trace)
+        if isinstance(inp, dict) and inp.get("error_type"):
+            return str(inp["error_type"])
+        return event_field(event_text(trace["agent"]), "error_type")
+
     def source(self, trace: dict) -> str:
         """production / local / eval / no_log_group / unknown. Traces carry a Langfuse environment (production on
         ECS, local elsewhere); older ones say "default", and for agents with a log group a synthetic one means an eval
         run and a real one production (which then includes local replays of real incidents)."""
         env = (trace["agent"].get("environment") or "default").lower()
+        if self.error_type(trace) == "GITHUB_ISSUE":
+            return "eval"                         # SWE-bench replays (scripts/eval_swebench_*.py), never a real incident
         lg = self.log_group(trace)
         if lg and "synthetic" in lg.lower():
             return "eval"
