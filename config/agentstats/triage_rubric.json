@@ -6,6 +6,6 @@
   "question": "Is the agent's decision (real, noise or duplicate) supported by the error event and the tool results? A duplicate needs an existing PR in the tool results; noise needs the event itself to show it is transient or expected.",
   "pass": "yes"},
  {"name": "reasoning_consistent_with_evidence",
-  "question": "Is the agent's reasoning consistent with the error event and the tool results: it does not contradict them, and every count, PR or specific detail it cites appears in one of them? Reasonable inferences from the event (for example that a fatal crash took the task down) are fine.",
+  "question": "Is the agent's reasoning consistent with the error event and the tool results: it does not contradict them, and every count, PR or specific detail it cites appears in one of them? Reasonable inferences from the event (for example that a fatal crash took the task down) are fine, and so is pointing out that two pieces of evidence disagree or that something should be verified: noting a conflict is not contradicting the evidence.",
   "pass": "yes"}
 ]
