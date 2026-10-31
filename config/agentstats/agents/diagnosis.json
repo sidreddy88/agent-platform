@@ -8,13 +8,14 @@
   {"name": "read_before_first_submit", "before": ["get_file_contents", "submit_diagnosis"],
    "why": "drift signal: does the agent read code before its first submission? (did not predict correctness on recorded runs, so it is monitored, not gated)"},
   {"name": "grep_budget", "max_calls": {"tool": "grep_codebase", "max": 6},
-   "why": "over-retrieval: of 952 runs (30 days to 2026-10-31, mostly SWE-bench replays), those with 7+ searches ended with an accepted diagnosis 8% of the time (CI 4-14%) vs 81%, and 97% hit the step limit. On real incidents (60 days, 36 runs) it held only 58% (CI 42-73%) vs 90% on SWE-bench. Monitored: an early sign of a run going nowhere, partly mechanical (runs at the limit make more calls)"},
+   "why": "over-retrieval: of 952 runs (30 days to 2026-10-31, mostly SWE-bench replays), those with 7+ searches ended with an accepted diagnosis 8% of the time (CI 4-14%) vs 81%, and 97% hit the step limit. On the one real incident in production (replayed 36 times, 60 days) it held 58% vs 90% on SWE-bench. Monitored: an early sign of a run going nowhere, partly mechanical (runs at the limit make more calls)"},
   {"name": "no_identical_repeats", "max_repeats": {"tool": "*", "max": 0},
    "why": "tool flailing (mostly SWE-bench replays): runs repeating an identical call ended with an accepted diagnosis 50% of the time (CI 35-65%, 38 runs) vs 74% (914 runs). Monitored"}
  ],
  "rubric": "config/agentstats/diagnosis_rubric.json",
  "judge_fields": ["incident", "code_the_agent_read", "diagnosis"],
  "judge_sample": 30,
+ "review_instructions": "Check that the root cause is something the agent actually read (open the Langfuse trace for the full file reads: the sheet shows excerpts), and that it names where the bad value is produced, not only where it crashes. A diagnosis that cites code the agent never read is unsupported even if it sounds right.",
  "review_n": 15,
  "group_by": "error_type"
 }
