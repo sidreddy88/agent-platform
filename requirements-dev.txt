@@ -5,4 +5,4 @@ pytest>=8.3.3
 pytest-asyncio>=0.24.0
 
 # agentstats: the triage and diagnosis gates, weekly monitoring (scripts/agentstats_weekly.py) and its tests.
-agentstats==0.4.0
+agentstats==0.5.0
