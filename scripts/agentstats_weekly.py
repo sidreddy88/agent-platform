@@ -406,6 +406,33 @@ def render(start, end, sections: list[list[str]]) -> str:
 
 # ---- main ------------------------------------------------------------------------------------------------------
 
+def trajectories(cfg: dict, traces: list[dict]) -> list[dict]:
+    """One line per run for `agentstats suggest`: the tools in order and the final text (ungraded: production)."""
+    out = []
+    for t in traces:
+        if t["agent"].get("level") == "ERROR":
+            continue
+        end = as_json(t["agent"].get("output"))
+        end = end.get("answer", "") if isinstance(end, dict) and "answer" in end else end
+        out.append({"agent": cfg["agent"], "case": t["trace_id"], "passed": None,
+                    "tools": [c["name"] for c in t["calls"]], "end": str(end or "")[:300]})
+    return out
+
+
+def suggestions(out: Path) -> str:
+    """agentstats suggest over this week's trajectories, against the configs in the repo: the report section."""
+    traj = out / "trajectories.jsonl"
+    if not traj.exists() or not traj.read_text().strip():
+        return "No trajectories this week."
+    text = _agentstats("suggest", str(traj), "--config-dir", str(CONFIG_DIR), "--out", str(out / "proposal.json"))
+    body = "\n".join(ln for ln in text.splitlines() if not ln.startswith("wrote "))
+    return ("agentstats looked at this week's runs against the configured rules and suggests (evidence on each line; "
+            "production runs are ungraded, so new rules here are monitor-only):\n\n```\n" + body.strip() + "\n```\n\n"
+            "To accept some: download the artifact, then `agentstats suggest-apply proposal.json --config-dir "
+            "config/agentstats/agents` (it asks item by item and writes only the rules you accept), and open a PR "
+            "with the changed configs.")
+
+
 def run_agent(cfg: dict, traces: list[dict], out: Path, use_judge: bool, seed: int) -> list[str]:
     out.mkdir(parents=True, exist_ok=True)
     rows = [to_row(t, cfg) for t in traces]
@@ -446,12 +473,15 @@ def main(argv: list[str] | None = None) -> int:
     tools = fetch_observations("TOOL", start, end)
     # LLM calls are named by whichever path made them, so take every generation in the window and match by trace id.
     generations = fetch_observations("GENERATION", start, end, fields="core,model,usage", max_rows=200_000)
-    sections = []
+    sections, traj = [], []
     for cfg in configs:
         agents = fetch_observations("AGENT", start, end, name=cfg["agent"])
         traces = join_traces(agents, tools, generations)
         print(f"{cfg['agent']}: {len(traces)} runs")
         sections.append(run_agent(cfg, traces, args.out / cfg["key"], args.judge, args.seed))
+        traj += trajectories(cfg, traces)
+    (args.out / "trajectories.jsonl").write_text("".join(json.dumps(r) + "\n" for r in traj))
+    sections.append(["## Suggestions", "", suggestions(args.out), ""])
     (args.out / "report.md").write_text(render(start, end, sections))
     print(f"wrote {args.out / 'report.md'}")
     return 0

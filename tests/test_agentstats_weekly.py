@@ -261,3 +261,26 @@ def test_review_helper_numbers_runs_in_sheet_order_with_links_and_no_judge_verdi
     md = (tmp_path / "review" / "REVIEW.md").read_text()
     assert md.index("## 1. `t2`") < md.index("## 2. `t1`") and "/traces/t2" in md and "E2" in md
     assert "verdict" not in md.split("judge's verdict is deliberately not shown")[1]
+
+
+def test_trajectories_for_suggest_skip_errored_runs_and_keep_tool_order():
+    traces = triage_traces()
+    traj = w.trajectories(CONFIGS["triage"], traces)
+    assert len(traj) == len(traces) - 1                                     # t5 errored
+    t1 = next(t for t in traj if t["case"] == "t1")
+    assert t1["agent"] == "TriageAgent" and t1["passed"] is None
+    assert t1["tools"] == ["get_occurrence_count", "check_duplicate_pr"] and '"severity": "P2"' in t1["end"]
+
+
+def test_suggestions_section_runs_agentstats_suggest_against_the_configs(tmp_path, monkeypatch):
+    calls = []
+
+    def fake(*args):
+        calls.append(args)
+        return "TriageAgent  (40 runs)\n [1] MONITOR rule x\nwrote proposal.json. Accept items with ..."
+    monkeypatch.setattr(w, "_agentstats", fake)
+    assert w.suggestions(tmp_path) == "No trajectories this week."
+    (tmp_path / "trajectories.jsonl").write_text('{"agent": "TriageAgent", "tools": []}\n')
+    text = w.suggestions(tmp_path)
+    assert calls[0][0] == "suggest" and str(w.CONFIG_DIR) in calls[0]
+    assert "[1] MONITOR rule x" in text and "wrote proposal.json" not in text and "suggest-apply" in text
