@@ -15,6 +15,7 @@
  "rubric": "config/agentstats/diagnosis_rubric.json",
  "judge_fields": ["incident", "code_the_agent_read", "diagnosis"],
  "judge_sample": 30,
+ "review_instructions": "Check that the root cause is something the agent actually read (open the Langfuse trace for the full file reads: the sheet shows excerpts), and that it names where the bad value is produced, not only where it crashes. A diagnosis that cites code the agent never read is unsupported even if it sounds right.",
  "review_n": 15,
  "group_by": "error_type"
 }

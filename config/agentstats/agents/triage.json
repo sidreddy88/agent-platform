@@ -9,6 +9,7 @@
  "rubric": "config/agentstats/triage_rubric.json",
  "judge_fields": ["severity_guide", "error_event", "tool_results", "agent_decision"],
  "judge_sample": 40,
+ "review_instructions": "Check that every occurrence count the agent states appears in the tool results: a count with no get_occurrence_count result behind it is invented, and a severity built on it is unsupported (the only exception: 1 when every lookup returned 0). Then check the severity against the guide for the looked-up count.",
  "review_n": 20,
  "group_by": "error_type"
 }
