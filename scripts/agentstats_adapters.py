@@ -1,14 +1,11 @@
 """
-Per-agent logic for scripts/agentstats_weekly.py that a config file can't express. Most agents need none: the
-default adapter reads the compact input/output that tracing.trace_entry() records. An agent's config names its
-adapter with "adapter": "<name>" (default "default").
+agent-platform's adapters for `agentstats monitor` (--adapters scripts/agentstats_adapters.py): per-agent logic a
+config file can't express. Most agents need none beyond Default, which reads the compact input/output that
+tracing.trace_entry() records and works out where a run came from. An agent's config names its adapter with
+"adapter": "<name>" (default "default").
 
-An adapter can provide:
-  conditions   {name: fn(trace) -> bool}     for a rule's "when"
-  checks       fn(trace) -> {rule: bool}     checks that need code (only include a rule when it applies)
-  parse_output fn(trace) -> dict | None      the agent's answer; None means no usable answer (parse_error)
-  tags         fn(trace) -> [str]            extra tags, e.g. error_type:<x>
-  judge_item   fn(trace) -> dict | None      fields the rubric judge sees
+Each adapter subclasses agentstats.monitor.Adapter and overrides what it needs: conditions ({name: fn(trace)} for a
+rule's "when"), checks, parse_input, parse_output, tags, source, no_answer_reason, judge_item.
 """
 from __future__ import annotations
 
@@ -16,18 +13,11 @@ import json
 import re
 from pathlib import Path
 
+from agentstats.monitor import Adapter, as_json
+
 ROOT = Path(__file__).resolve().parent.parent
 TRIAGE_PROMPT = ROOT / "app" / "agents" / "triage.py"
 COUNT_RE = re.compile(r"^\s*(\d+)\s+occurrences?\b", re.I)
-
-
-def as_json(v):
-    if isinstance(v, str):
-        try:
-            return json.loads(v)
-        except ValueError:
-            return v
-    return v
 
 
 def event_text(agent_obs: dict) -> str:
@@ -44,36 +34,28 @@ def event_field(text: str, field: str) -> str | None:
 
 # ---- default: agents traced with trace_entry() (compact dict input and output) -----------------------------
 
-class Default:
-    conditions: dict = {}
-
-    def checks(self, trace: dict) -> dict[str, bool]:
-        return {}
-
-    def parse_output(self, trace: dict) -> dict | None:
-        out = as_json(trace["agent"].get("output"))
-        return out if isinstance(out, dict) else None
-
-    def tags(self, trace: dict) -> list[str]:
+class Default(Adapter):
+    def parse_input(self, trace: dict):
+        """BaseAgent.run() traces wrap the input as {"user_input": ...}; trace_entry() ones are the dict itself."""
         inp = as_json(trace["agent"].get("input"))
-        et = inp.get("error_type") if isinstance(inp, dict) else None
-        return [f"error_type:{et}"] if et else []
+        return as_json(inp.get("user_input")) if isinstance(inp, dict) and "user_input" in inp else inp
 
     def log_group(self, trace: dict) -> str | None:
         return None
 
-    def no_answer_reason(self, trace: dict) -> str:
-        """Why a run has no usable answer (only asked when parse_output returned None)."""
-        return "parse_error"
-
-    def judge_item(self, trace: dict) -> dict | None:
-        out = self.parse_output(trace)
-        if out is None:
-            return None
-        return {"agent_input": json.dumps(as_json(trace["agent"].get("input")))[:1500],
-                "agent_steps": "\n".join(f"{c['name']}: {str(c['output'])[:200]}" for c in trace["calls"])[:2000]
-                or "no recorded steps",
-                "agent_output": json.dumps(out)[:1500]}
+    def source(self, trace: dict) -> str:
+        """production / local / eval / no_log_group / unknown. Traces carry a Langfuse environment (production on
+        ECS, local elsewhere); older ones say "default", and for agents with a log group a synthetic one means an eval
+        run and a real one production (which then includes local replays of real incidents)."""
+        env = (trace["agent"].get("environment") or "default").lower()
+        lg = self.log_group(trace)
+        if lg and "synthetic" in lg.lower():
+            return "eval"
+        if env in ("production", "local"):
+            return env
+        if lg:
+            return "production"
+        return "no_log_group" if "log_group" in self.conditions else "unknown"
 
 
 # ---- TriageAgent: traced through BaseAgent.run(); answer is JSON inside the ReAct answer --------------------

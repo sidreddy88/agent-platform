@@ -2,7 +2,8 @@ name: agentstats-weekly
 
 # Weekly agent monitoring with agentstats, every agent configured in config/agentstats/agents/: last week's Langfuse
 # traces -> behaviour rules per source and model -> rubric judge on a sample -> blind review sheet -> candidate eval
-# cases -> one GitHub issue. See scripts/agentstats_weekly.py. Costs a few cents a week (the judge, on Together).
+# cases -> one GitHub issue. The engine is `agentstats monitor`; agent-platform supplies the configs and
+# scripts/agentstats_adapters.py. Costs a few cents a week (the judge, on Together).
 
 on:
   schedule:
@@ -31,7 +32,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install agentstats
-        run: pip install "agentstats==0.5.0"     # same version as requirements-dev.txt
+        run: pip install "agentstats==0.6.0"     # same version as requirements-dev.txt
       - name: Weekly monitoring (all configured agents)
         env:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
@@ -40,9 +41,13 @@ jobs:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
           JUDGE: ${{ github.event_name == 'schedule' || inputs.judge }}
         run: |
-          args=(--days "${{ inputs.days || '7' }}" --out weekly)
-          if [ "$JUDGE" = "true" ]; then args+=(--judge); fi
-          python scripts/agentstats_weekly.py "${args[@]}"
+          args=(--config-dir config/agentstats/agents --adapters scripts/agentstats_adapters.py
+                --labels-dir app/evals/agentstats --days "${{ inputs.days || '7' }}" --out weekly)
+          if [ "$JUDGE" = "true" ]; then
+            args+=(--judge --judge-model deepseek-ai/DeepSeek-V4.1-Flash
+                   --judge-base-url https://api.together.xyz/v1 --judge-key-env TOGETHER_API_KEY)
+          fi
+          agentstats monitor "${args[@]}"
       - name: Keep the artifacts (rows, judge output, review sheet, candidates)
         uses: actions/upload-artifact@v4
         with:
