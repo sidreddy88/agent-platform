@@ -220,6 +220,7 @@ def test_diagnosis_uses_the_accepted_submission_and_tracks_rejections():
     row = to_row(t, cfg)
     assert ADAPTERS["diagnosis"].parse_output(t)["root_cause"] == "real"
     assert row["checks"] == {"submitted_via_tool": True, "read_before_first_submit": False,
+                             "grep_budget": True, "no_identical_repeats": True,
                              "diagnosis_accepted": True, "accepted_first_try": False}
     assert "no_answer" not in row and "error_type:APP_CRASHED" in row["tags"]
 
@@ -230,6 +231,8 @@ def test_diagnosis_that_ran_out_of_steps_is_a_step_limit_no_answer():
     row = to_row(t, CONFIGS["diagnosis"])
     assert row["no_answer"] == "step_limit" and row["checks"]["submitted_via_tool"] is False
     assert row["checks"]["read_before_first_submit"] is True       # 'before' holds vacuously with no submission
+    assert row["checks"]["grep_budget"] is False                   # 15 searches: over-retrieval
+    assert row["checks"]["no_identical_repeats"] is False          # the same search 15 times: flailing
 
 
 def test_diagnosis_judge_item_puts_the_affected_files_reads_first():
@@ -251,3 +254,12 @@ def test_trajectories_for_suggest_skip_errored_runs_and_keep_tool_order():
     t1 = next(t for t in traj if t["case"] == "t1")
     assert t1["agent"] == "TriageAgent" and t1["passed"] is None
     assert t1["tools"] == ["get_occurrence_count", "check_duplicate_pr"] and '"severity": "P2"' in t1["end"]
+
+
+def test_swebench_replays_are_eval_not_production():
+    swe = {"user_input": "INCIDENT:\n  error_type      : GITHUB_ISSUE\n  title           : sympy__sympy-24213\n"
+                         "  log_group       : /ecs/TaskTargetApp\n"}
+    t = w.join_traces([agent("g1", name="DiagnosisAgent", inp=swe, output={"answer": "x"})], [], [])[0]
+    assert ADAPTERS["diagnosis"].source(t) == "eval"
+    fix = w.join_traces([agent("g2", name="FixGenerationAgent", inp={"error_type": "GITHUB_ISSUE"}, output={})], [], [])[0]
+    assert ADAPTERS["default"].source(fix) == "eval"
