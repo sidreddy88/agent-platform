@@ -22,3 +22,7 @@ require.max_slice_drop = 0.20        # a repo proven worse by 20+ points fails; 
 require.min_rule_rate = 0.85         # submitted_via_tool held in 92% of recorded DeepSeek trials
 require.max_no_answer = 0.15
 require.max_infra = 0.05
+# 2026-10-31: reliability floor. pass^2 (both of a case's trials pass) is 80.1% on main's baseline; over 50 draws of
+# 2 trials per case its 90% lower bound never fell below 75.1%, so a healthy PR passes. Re-check when the baseline is
+# refreshed. No cost or latency ratios: the stored baseline has verdicts only, so they'd be unmeasurable on every PR.
+require.min_pass_hat_k = 0.70
