@@ -22,3 +22,15 @@ require.max_no_answer = 0.05        # above this, the agent loop or the answer p
 # catch it.
 require.min_rule_rate = 0.95        # each rule holds at least this often (FAIL only when the interval is below)
 require.no_rule_regression = 0.0    # FAIL if any rule is proven to hold less often than in main's baseline
+
+# 2026-10-31: nightly check of main against the same baseline (.github/workflows/triage-nightly.yml). Catches
+# regressions with no code change (provider model updates, dependency upgrades, infrastructure drift), which the PR
+# gate never sees. Same requirements as a PR; the workflow reruns once on INCONCLUSIVE before raising an issue.
+[nightly]
+runs = 2
+slice_by = "template"
+require.no_significant_drop = 0.0
+require.max_infra = 0.10
+require.max_no_answer = 0.05
+require.min_rule_rate = 0.95
+require.no_rule_regression = 0.0

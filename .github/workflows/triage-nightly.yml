@@ -1,0 +1,116 @@
+name: triage-nightly
+
+# Every night, main's TriageAgent against main's committed baseline (the same 114 held-out cases x 2 trials and the
+# same agentstats gate as the PR check, tier "nightly" in app/evals/triage_gate_policy.toml). It catches what PR
+# gates can't: regressions with no code change (a provider updating a model, a dependency upgrade, infrastructure
+# drift). Quiet when it passes. On FAIL, UNHEALTHY, a stale baseline, or INCONCLUSIVE twice in a row (it reruns once,
+# as the gate asks) it opens or updates one issue labelled triage-nightly; a later passing night closes it.
+# Cost: ~$0.13 a night (228 attempts on Claude Haiku 5.5), twice that when it reruns.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"           # 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: triage-nightly
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: triage nightly (agentstats, 114 cases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies and agentstats
+        run: pip install -r requirements-dev.txt     # includes agentstats (PyPI, pinned there)
+
+      - name: Is the baseline still main's?
+        id: stale
+        run: |
+          want=$(python3 -c "import json; print(json.load(open('app/evals/triage_gate_baseline.json'))['inputs_hash'])")
+          have=$(python3 scripts/triage_gate.py inputs-hash)
+          if [ "$want" = "$have" ]; then
+            echo "Baseline matches main's triage inputs ($want)."
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Baseline ($want) doesn't match main's triage inputs ($have): stale."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Replay and gate (one rerun on INCONCLUSIVE)
+        id: gate
+        if: steps.stale.outputs.stale == 'false'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          mkdir -p runs/triage-nightly
+          rc=1
+          for attempt in 1 2; do
+            python scripts/triage_gate.py run --trials 2 --out "runs/triage-nightly/main-$attempt.jsonl"
+            agentstats gate --policy app/evals/triage_gate_policy.toml --tier nightly --conf 0.90 \
+              --candidate "runs/triage-nightly/main-$attempt.jsonl" \
+              --baseline app/evals/triage_gate_baseline.jsonl > "runs/triage-nightly/gate-$attempt.md"
+            rc=$?
+            cat "runs/triage-nightly/gate-$attempt.md"
+            cp "runs/triage-nightly/gate-$attempt.md" runs/triage-nightly/report.md
+            if [ "$rc" -ne 2 ]; then break; fi
+            echo "INCONCLUSIVE: rerunning once, as the gate asks."
+          done
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat runs/triage-nightly/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-nightly
+          path: runs/triage-nightly/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Open, update or close the triage-nightly issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STALE: ${{ steps.stale.outputs.stale }}
+          RC: ${{ steps.gate.outputs.rc }}
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          today=$(date -u +%F)
+          gh label create triage-nightly --color d93f0b --description "Nightly TriageAgent check needs attention" --force
+          open=$(gh issue list --label triage-nightly --state open --json number --jq '.[0].number // empty')
+          case "$STALE:$RC" in
+            false:0)
+              if [ -n "$open" ]; then
+                gh issue comment "$open" --body "Passing again on $today ($run_url). Closing."
+                gh issue close "$open"
+              fi
+              echo "PASS"; exit 0 ;;
+            true:*) what="the baseline is stale: triage's inputs changed on main since it was measured. Refresh it with the 'TriageAgent gate baseline' workflow and commit the artifact." ;;
+            *:1) what="FAIL: main is proven worse than its baseline, or a behaviour rule broke." ;;
+            *:2) what="INCONCLUSIVE twice in a row (a run-wide shock both times, or too noisy to tell)." ;;
+            *:3) what="UNHEALTHY: too many infrastructure failures to judge (provider, credit or rate limits)." ;;
+            *) what="the nightly job didn't produce a verdict (exit '$RC'); see the run." ;;
+          esac
+          body=$(printf '**%s** %s\n\nRun: %s\n\n%s\n' "$today" "$what" "$run_url" "$(cat runs/triage-nightly/report.md 2>/dev/null)")
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "Triage nightly check needs attention ($today)" --label triage-nightly --body "$body"
+          fi
+          exit 1
