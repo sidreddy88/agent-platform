@@ -63,10 +63,9 @@ submitted a diagnosis passed 0% of the time (89% when they did), so `submitted_v
 reading a file before submitting made no difference (82% vs 83%), so `read_before_first_submit` is monitored only.
 First data (14 days): the grounding gate rejected 26 of 71 submissions (37%), and 17 of 62 runs ran out of steps
 without an accepted diagnosis. **Corrected 2026-10-31:** those counted SWE-bench replays (`error_type: GITHUB_ISSUE`,
-traced before environment tags) as production. With them tagged `eval`, over 60 days: real incidents 36 runs, 27
-(75%) ended at the step limit, only 31% submitted a diagnosis at all (CI 18-47%), 8 of 11 first submissions were
-rejected, and 58% stayed within six searches (`grep_budget`); SWE-bench replays 919 runs, 25% at the step limit, 81%
-submitted, 90% within six searches. Diagnosis does much worse on real incidents than on its benchmark.
+traced before environment tags) as production: 919 of 955 diagnosis runs in 60 days. The other 36 are one incident
+(`APP_CRASHED in TaskAllInterviews`) replayed 36 times; 31 ended at the step limit. That's one hard incident, not
+evidence about real incidents in general: production diagnosis traffic is too thin to compare with SWE-bench yet.
 
 **The diagnosis CI gate decides with agentstats** (`--tier full` in `app/evals/diagnosis_gate_policy.toml`), gate v2's
 own paired test printing alongside for comparison. Simulated on main's baseline the two agree on 99.5-100% of PRs; on a
