@@ -1,9 +1,9 @@
 # Weekly agent monitoring with agentstats
 
 `agentstats` runs agent-platform's monitoring: once a week (Mondays 14:00 UTC, or on demand from the Actions tab)
-`.github/workflows/agentstats-weekly.yml` runs `scripts/agentstats_weekly.py`, which reads the past week's Langfuse
-traces and opens one GitHub issue (label `agentstats-weekly`) with a section per agent. Every agent is a config file in
-`config/agentstats/agents/`; TriageAgent is the full example (rules, adapter checks, rubric judge, review, promote).
+`.github/workflows/agentstats-weekly.yml` runs `agentstats monitor`, which reads the past week's Langfuse traces, and
+opens one GitHub issue (label `agentstats-weekly`) with a section per agent. The engine is agentstats's; agent-platform supplies one config file per agent in `config/agentstats/agents/` and the adapters in
+`scripts/agentstats_adapters.py`. TriageAgent is the full example (rules, adapter checks, rubric judge, review, promote).
 
 | Step | What it does | agentstats |
 |---|---|---|
@@ -24,6 +24,11 @@ are reported as outages, not agent failures.
 `app/services/tracing.py`). Older traces say `default`; for those a synthetic log group means an eval run and a real
 one means production, which then includes local replays of real incidents.
 
+**Moved into agentstats (0.6.0).** The weekly engine used to be `scripts/agentstats_weekly.py` here; it's now
+`agentstats monitor`, so any agent system with Langfuse or OpenTelemetry traces can run the same thing. On the same
+week of real traces the new command produced byte-identical rows to the old script (2,534 triage, 6 diagnosis, 1
+merge-decision run).
+
 **Adding an agent** is a config file, `config/agentstats/agents/<name>.json`:
 
 ```json
@@ -35,7 +40,8 @@ one means production, which then includes local replays of real incidents.
 Rules use agentstats' kinds on the run's recorded steps (`called`, `not_called`, `before`, `args`) or check the
 agent's output (`{"output": "decision", "in": [...]}`, `{"output": "monitors", "min": 1}`); `"when"` limits a rule
 to runs where it applies (`"called:<tool>"`, `"output:<field>>=<n>"`, `"input_json:<key>"`, or an adapter
-condition). Logic a config can't express goes in a small adapter in `scripts/agentstats_adapters.py` (triage's
+condition). Logic a config can't express goes in a small adapter in `scripts/agentstats_adapters.py` (a subclass of
+`agentstats.monitor.Adapter`) (triage's
 "stated count was looked up"). Add `"rubric"` for a judge. The agent has to be traced: `BaseAgent.run()` is, and
 other entry points use `@trace_entry` with `record_step()` for the actions rules check.
 
@@ -47,7 +53,10 @@ Configured today: triage (full), diagnosis (full: `submitted_via_tool`, `read_be
 (with your label) to the triage eval set.
 
 Secrets: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `TOGETHER_API_KEY` (judge). Run locally:
-`python scripts/agentstats_weekly.py --days 7 --out weekly/ [--judge]` with the same variables set.
+`agentstats monitor --config-dir config/agentstats/agents --adapters scripts/agentstats_adapters.py --labels-dir
+app/evals/agentstats --days 7 --out weekly/` with the same variables set (add `--judge --judge-model
+deepseek-ai/DeepSeek-V4.1-Flash --judge-base-url https://api.together.xyz/v1 --judge-key-env TOGETHER_API_KEY` for
+the rubric judge).
 
 **Diagnosis, measured before choosing its rules** (recorded DeepSeek runs, r9 + g500, 1,491 trials): runs that never
 submitted a diagnosis passed 0% of the time (89% when they did), so `submitted_via_tool` is both monitored and gated;

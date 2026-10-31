@@ -1,26 +1,30 @@
-"""scripts/agentstats_weekly.py + agentstats_adapters.py: Langfuse traces -> agentstats rows -> the weekly report,
-config-driven per agent. No network: Langfuse pages are faked."""
+"""agent-platform's weekly monitoring setup for `agentstats monitor`: the agent configs in config/agentstats/agents
+and the adapters in scripts/agentstats_adapters.py, on faked Langfuse rows (no network). The engine itself (fetching,
+summaries, judge, review sheet, report) is agentstats's and tested there."""
 from __future__ import annotations
 
 import datetime as dt
-import importlib.util
 import json
 import sys
 from pathlib import Path
 
 import pytest
+from agentstats import monitor as w
 
-_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-sys.path.insert(0, str(_SCRIPTS))
-_spec = importlib.util.spec_from_file_location("agentstats_weekly", _SCRIPTS / "agentstats_weekly.py")
-w = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(w)
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
 from agentstats_adapters import ADAPTERS  # noqa: E402
 
+CONFIG_DIR = ROOT / "config" / "agentstats" / "agents"
+ADAPTERS = {**w.load_adapters(None), **ADAPTERS}
 TRIAGE = ADAPTERS["triage"]
 REAL_LG = "/ecs/TaskTargetApp"
 SYNTH_LG = "ecs/ContainerProcess/synthetic"
-CONFIGS = {c["key"]: c for c in w.load_configs()}
+CONFIGS = {c["key"]: c for c in w.load_configs(CONFIG_DIR, ADAPTERS)}
+
+
+def to_row(trace, cfg):
+    return w.to_row(trace, cfg, ADAPTERS[cfg.get("adapter", "default")])
 
 
 def agent(tid, answer=None, env="default", level=None, status=None, name="TriageAgent", output=None, inp=None):
@@ -63,7 +67,7 @@ def triage_traces():
 
 
 def triage_rows():
-    return {r["case"]: r for r in (w.to_row(t, CONFIGS["triage"]) for t in triage_traces())}
+    return {r["case"]: r for r in (to_row(t, CONFIGS["triage"]) for t in triage_traces())}
 
 
 # ---- configs -----------------------------------------------------------------------------------------------
@@ -76,10 +80,10 @@ def test_every_shipped_config_loads_and_names_its_trace():
 def test_a_bad_config_is_refused(tmp_path):
     (tmp_path / "x.json").write_text(json.dumps({"agent": "X", "rules": [{"name": "r", "called": "a", "before": []}]}))
     with pytest.raises(ValueError, match="exactly one"):
-        w.load_configs(config_dir=tmp_path)
+        w.load_configs(tmp_path, ADAPTERS)
     (tmp_path / "x.json").write_text(json.dumps({"agent": "X", "adapter": "nope"}))
     with pytest.raises(ValueError, match="unknown adapter"):
-        w.load_configs(config_dir=tmp_path)
+        w.load_configs(tmp_path, ADAPTERS)
 
 
 # ---- triage (adapter) --------------------------------------------------------------------------------------
@@ -111,7 +115,7 @@ def test_source_from_environment_or_log_group():
     assert "source:eval" in r["t4"]["tags"]                # synthetic log group
     assert "source:production" in r["t6"]["tags"]          # tagged by the environment
     local = w.join_traces([agent("t9", {"decision": "real", "severity": "P2"}, env="local")], [], [])[0]
-    assert w.source(local, TRIAGE) == "local"
+    assert TRIAGE.source(local) == "local"
 
 
 def test_an_errored_run_is_an_infrastructure_failure_not_a_rule_violation():
@@ -121,7 +125,7 @@ def test_an_errored_run_is_an_infrastructure_failure_not_a_rule_violation():
 
 def test_unparseable_triage_answer_is_no_answer():
     t = w.join_traces([agent("t7", output={"answer": "I could not decide"})], [], [])[0]
-    assert w.to_row(t, CONFIGS["triage"])["no_answer"] == "parse_error"
+    assert to_row(t, CONFIGS["triage"])["no_answer"] == "parse_error"
 
 
 def test_severity_guide_is_read_from_the_triage_prompt():
@@ -139,9 +143,9 @@ def test_fix_tests_must_run_before_a_pr():
                           tool("f1", "create_pull_request", {}, "{'pr_number': 7}", "2")])[0]
     bad = w.join_traces([agent("f2", name="FixGenerationAgent", output=out)],
                         [tool("f2", "create_pull_request", {}, "{'pr_number': 8}", "1")])[0]
-    assert w.to_row(good, cfg)["checks"] == {"tests_before_pr": True}
-    assert "error_type:NULL_PTR" in w.to_row(good, cfg)["tags"]
-    assert w.to_row(bad, cfg)["checks"] == {"tests_before_pr": False}
+    assert to_row(good, cfg)["checks"] == {"tests_before_pr": True}
+    assert "error_type:NULL_PTR" in to_row(good, cfg)["tags"]
+    assert to_row(bad, cfg)["checks"] == {"tests_before_pr": False}
 
 
 def test_error_clarity_reads_before_suggesting():
@@ -149,15 +153,15 @@ def test_error_clarity_reads_before_suggesting():
     t = w.join_traces([agent("e1", name="ErrorClarityAgent", output={"additions": 1})],
                       [tool("e1", "suggest_addition", {"file": "a.js"}, "ok", "1"),
                        tool("e1", "read_file", {"path": "a.js"}, "...", "2")])[0]
-    assert w.to_row(t, cfg)["checks"] == {"read_before_suggesting": False}
+    assert to_row(t, cfg)["checks"] == {"read_before_suggesting": False}
 
 
 def test_merge_decision_output_must_be_a_valid_decision():
     cfg = CONFIGS["merge_decision"]
     ok = w.join_traces([agent("m1", name="MergeDecisionAgent", output={"decision": "merge_now"})], [])[0]
     odd = w.join_traces([agent("m2", name="MergeDecisionAgent", output={"decision": "ship it"})], [])[0]
-    assert w.to_row(ok, cfg)["checks"] == {"valid_decision": True}
-    assert w.to_row(odd, cfg)["checks"] == {"valid_decision": False}
+    assert to_row(ok, cfg)["checks"] == {"valid_decision": True}
+    assert to_row(odd, cfg)["checks"] == {"valid_decision": False}
 
 
 def test_monitor_rule_applies_only_when_files_were_analysed():
@@ -166,8 +170,8 @@ def test_monitor_rule_applies_only_when_files_were_analysed():
                          [])[0]
     miss = w.join_traces([agent("g2", name="MonitorGenerationAgent", output={"monitors": 0, "files_analyzed": 3})],
                          [])[0]
-    assert w.to_row(none, cfg)["checks"] == {}
-    assert w.to_row(miss, cfg)["checks"] == {"monitors_when_files": False}
+    assert to_row(none, cfg)["checks"] == {}
+    assert to_row(miss, cfg)["checks"] == {"monitors_when_files": False}
 
 
 def test_code_review_posts_only_when_asked():
@@ -177,34 +181,26 @@ def test_code_review_posts_only_when_asked():
     out = {"answer": "review text", "iterations": 3}
     t_asked = w.join_traces([agent("c1", name="CodeReviewAgent", inp=asked, output=out)], [])[0]
     t_not = w.join_traces([agent("c2", name="CodeReviewAgent", inp=not_asked, output=out)], [])[0]
-    assert w.to_row(t_asked, cfg)["checks"] == {"posted_when_asked": False}
-    assert w.to_row(t_not, cfg)["checks"] == {}
+    assert to_row(t_asked, cfg)["checks"] == {"posted_when_asked": False}
+    assert to_row(t_not, cfg)["checks"] == {}
 
 
 # ---- report ------------------------------------------------------------------------------------------------
 
 def test_report_has_a_section_per_agent_flags_proven_failures_and_keeps_raw_text_out(tmp_path):
-    rows = [w.to_row(t, CONFIGS["triage"]) for t in triage_traces()]
-    rows += [w.to_row(w.join_traces([agent(f"s{i}", {"decision": "real", "severity": "P2", "occurrences_24h": 3})],
+    rows = [to_row(t, CONFIGS["triage"]) for t in triage_traces()]
+    rows += [to_row(w.join_traces([agent(f"s{i}", {"decision": "real", "severity": "P2", "occurrences_24h": 3})],
                                     [tool(f"s{i}", "check_duplicate_pr", {}, "NO_DUPLICATE", "1")], [])[0],
                       CONFIGS["triage"]) for i in range(30)]
-    section = w.render_agent(CONFIGS["triage"], rows, w.summarize_rules(rows), "", "n/a", "", ["t2"])
-    empty = w.render_agent(CONFIGS["merge_decision"], [], {}, "", "", "", [])
-    report = w.render(dt.datetime(2026, 11, 2), dt.datetime(2026, 11, 9), [section, empty])
-    assert "## TriageAgent" in report and "## MergeDecisionAgent" in report and "No runs this week." in report
+    section = w.render_agent(CONFIGS["triage"], rows, w.summarize_rules(rows), "", "n/a", "", ["t2"], 0.95)
+    empty = w.render_agent(CONFIGS["merge_decision"], [], {}, "", "", "", [], 0.95)
+    report = w.render(dt.datetime(2026, 11, 2), dt.datetime(2026, 11, 9), [section, empty], CONFIG_DIR,
+                      "app/evals/agentstats")
+    assert "## TriageAgent" in report and "## MergeDecisionAgent" in report and "No runs in this window." in report
     assert "**Needs attention**" in report and "Circuit breaker" in report
     assert "APP_CRASHED" not in report
 
 
-def test_fetch_follows_the_cursor():
-    pages = iter([{"data": [{"id": 1}], "meta": {"cursor": "c1"}}, {"data": [{"id": 2}], "meta": {"cursor": None}}])
-    seen = []
-
-    def get(params):
-        seen.append(params.get("cursor"))
-        return next(pages)
-    rows = w.fetch_observations("AGENT", dt.datetime(2026, 1, 1), dt.datetime(2026, 1, 8), name="TriageAgent", get=get)
-    assert [r["id"] for r in rows] == [1, 2] and seen == [None, "c1"]
 
 
 # ---- diagnosis (adapter) ----------------------------------------------------------------------------------
@@ -221,7 +217,7 @@ def test_diagnosis_uses_the_accepted_submission_and_tracks_rejections():
                           ("get_file_contents", {"file_path": "a.js"}, "code"),
                           ("submit_diagnosis", {"root_cause": "real", "affected_file": "a.js"},
                            "Diagnosis accepted. Write a brief final Answer")])
-    row = w.to_row(t, cfg)
+    row = to_row(t, cfg)
     assert ADAPTERS["diagnosis"].parse_output(t)["root_cause"] == "real"
     assert row["checks"] == {"submitted_via_tool": True, "read_before_first_submit": False,
                              "diagnosis_accepted": True, "accepted_first_try": False}
@@ -231,7 +227,7 @@ def test_diagnosis_uses_the_accepted_submission_and_tracks_rejections():
 def test_diagnosis_that_ran_out_of_steps_is_a_step_limit_no_answer():
     t = diag_trace("d2", [("grep_codebase", {"pattern": "x"}, "...")] * 15,
                    output="I was unable to find an answer within the allowed number of steps.")
-    row = w.to_row(t, CONFIGS["diagnosis"])
+    row = to_row(t, CONFIGS["diagnosis"])
     assert row["no_answer"] == "step_limit" and row["checks"]["submitted_via_tool"] is False
     assert row["checks"]["read_before_first_submit"] is True       # 'before' holds vacuously with no submission
 
@@ -246,21 +242,6 @@ def test_diagnosis_judge_item_puts_the_affected_files_reads_first():
     assert '"root_cause_snippet": "s"' in item["diagnosis"]
 
 
-def test_review_helper_numbers_runs_in_sheet_order_with_links_and_no_judge_verdict(tmp_path):
-    import csv
-    (tmp_path / "review").mkdir()
-    with (tmp_path / "review" / "review.csv").open("w", newline="") as f:
-        wr = csv.DictWriter(f, fieldnames=["item", "case", "arm", "run", "link", "human_verdict", "notes"])
-        wr.writeheader()
-        wr.writerow({"item": "x|t2|1", "case": "t2", "arm": "x", "run": 1})
-        wr.writerow({"item": "x|t1|1", "case": "t1", "arm": "x", "run": 1})
-    t = {"agent": {"projectId": "p1"}}
-    link = w.trace_link(t)
-    assert link.endswith("/project/p1/traces/{case}")
-    w.write_review_helper(tmp_path, {"t1": {"event": "E1"}, "t2": {"event": "E2"}}, link, ["event"])
-    md = (tmp_path / "review" / "REVIEW.md").read_text()
-    assert md.index("## 1. `t2`") < md.index("## 2. `t1`") and "/traces/t2" in md and "E2" in md
-    assert "verdict" not in md.split("judge's verdict is deliberately not shown")[1]
 
 
 def test_trajectories_for_suggest_skip_errored_runs_and_keep_tool_order():
@@ -270,17 +251,3 @@ def test_trajectories_for_suggest_skip_errored_runs_and_keep_tool_order():
     t1 = next(t for t in traj if t["case"] == "t1")
     assert t1["agent"] == "TriageAgent" and t1["passed"] is None
     assert t1["tools"] == ["get_occurrence_count", "check_duplicate_pr"] and '"severity": "P2"' in t1["end"]
-
-
-def test_suggestions_section_runs_agentstats_suggest_against_the_configs(tmp_path, monkeypatch):
-    calls = []
-
-    def fake(*args):
-        calls.append(args)
-        return "TriageAgent  (40 runs)\n [1] MONITOR rule x\nwrote proposal.json. Accept items with ..."
-    monkeypatch.setattr(w, "_agentstats", fake)
-    assert w.suggestions(tmp_path) == "No trajectories this week."
-    (tmp_path / "trajectories.jsonl").write_text('{"agent": "TriageAgent", "tools": []}\n')
-    text = w.suggestions(tmp_path)
-    assert calls[0][0] == "suggest" and str(w.CONFIG_DIR) in calls[0]
-    assert "[1] MONITOR rule x" in text and "wrote proposal.json" not in text and "suggest-apply" in text
