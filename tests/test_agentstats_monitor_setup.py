@@ -221,6 +221,7 @@ def test_diagnosis_uses_the_accepted_submission_and_tracks_rejections():
     assert ADAPTERS["diagnosis"].parse_output(t)["root_cause"] == "real"
     assert row["checks"] == {"submitted_via_tool": True, "read_before_first_submit": False,
                              "grep_budget": True, "no_identical_repeats": True,
+                             "not_escalated": False,           # no confidence submitted: escalated
                              "diagnosis_accepted": True, "accepted_first_try": False}
     assert "no_answer" not in row and "error_type:APP_CRASHED" in row["tags"]
 
@@ -293,3 +294,21 @@ def test_rag_shadow_rules_score_hits_only_when_diagnosis_named_a_file():
     assert rows[0]["checks"] == {"returned_results": True, "diagnosed_file_retrieved": True}
     assert rows[1]["checks"] == {"returned_results": False, "diagnosed_file_retrieved": False}
     assert rows[2]["checks"] == {"returned_results": True}
+
+
+
+def test_retirements_in_the_routing_file_reach_the_models_file():
+    from agentstats_models import models
+    out = models({"cost_per_1k_tokens": {"m": {"input": 0.001, "output": 0.005}}, "retirements": {"m": "2027-01-15"}})
+    assert out["retirements"] == {"m": "2027-01-15"}
+    assert "retirements" not in models({"cost_per_1k_tokens": {}})
+
+
+def test_diagnosis_escalation_rule_reads_the_accepted_confidence():
+    cfg = CONFIGS["diagnosis"]
+    def run(conf):
+        return diag_trace("d9", [("get_file_contents", {"file_path": "a.js"}, "code"),
+                                 ("submit_diagnosis", {"root_cause": "r", "affected_file": "a.js", "confidence": conf},
+                                  "Diagnosis accepted.")])
+    assert to_row(run(0.85), cfg)["checks"]["not_escalated"] is True
+    assert to_row(run(0.55), cfg)["checks"]["not_escalated"] is False
