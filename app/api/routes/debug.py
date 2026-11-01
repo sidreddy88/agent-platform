@@ -203,6 +203,20 @@ async def debug_rag_corpus():
     }
 
 
+@router.get("/rag/code-index")
+async def debug_code_index():
+    """DiagnosisAgent's per-repo code index (app.services.code_index): ready, chunk count, last refresh, last error,
+    and whether diagnosis uses it (DIAGNOSIS_RAG) or it runs in shadow mode."""
+    from app.core.config import settings
+    from app.services.incident_loop import incident_loop
+    idx = getattr(incident_loop, "_code_index", None)
+    if idx is None:
+        return {"available": False, "reason": "no code index (RAG service unavailable: is OPENAI_API_KEY set?)"}
+    return {"available": True, "diagnosis_uses_it": bool(settings.diagnosis_rag and idx.ready
+                                                         and incident_loop._diagnosis._rag is not None),
+            "mode": "on" if settings.diagnosis_rag else "shadow", **idx.status()}
+
+
 @router.get("/rag/corpus/codebase")
 async def debug_codebase_corpus():
     """List stats for the indexed codebase collection (file paths + chunk counts)."""

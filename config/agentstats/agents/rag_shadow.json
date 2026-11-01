@@ -1,0 +1,11 @@
+{
+ "agent": "RAGShadow",
+ "description": "Shadow retrieval for DiagnosisAgent (app/services/code_index.py): what search_codebase would have returned for each incident, before diagnosis uses it (DIAGNOSIS_RAG).",
+ "rules": [
+  {"name": "returned_results", "output": "results", "min": 1,
+   "why": "retrieval found anything at all for the incident's text"},
+  {"name": "diagnosed_file_retrieved", "output": "diagnosed_file_retrieved", "in": [true],
+   "when": "input_json:diagnosed_file",
+   "why": "the file diagnosis named was among the top results: the online retrieval hit rate"}
+ ]
+}

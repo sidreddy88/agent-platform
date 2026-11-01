@@ -85,6 +85,9 @@ class Settings(BaseSettings):
 
     # Target repo for AI-generated fix PRs (owner/repo) — set the real value via .env
     fix_target_repo: str = "your-org/your-repo"
+    # DiagnosisAgent's search_codebase over the per-repo code index (app.services.code_index). Off: the index is built
+    # and checked in shadow mode only. Turn on after measuring with vs without RAG.
+    diagnosis_rag: bool = False
 
     # Root directory for persistent local repo clones (used by LocalRepoService).
     # Defaults to ~/.agent-platform/repos if unset.
