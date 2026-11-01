@@ -265,6 +265,15 @@ class IncidentLoop:
             self._rag: RAGService | None = RAGService()
         except Exception:
             self._rag = None
+        # Code index for diagnosis (shadow mode unless DIAGNOSIS_RAG=on): built from diagnosis's own clone.
+        self._code_index = None
+        if self._rag is not None:
+            try:
+                from app.services.code_index import CodeIndex
+                self._code_index = CodeIndex(self._diagnosis._owner, self._diagnosis._repo,
+                                             local_repo=self._diagnosis._local_repo)
+            except Exception as exc:
+                logger.warning("[IncidentLoop] code index unavailable: %s", exc)
         self._dedup_stats: dict[str, int] = {
             "sql_dedup": 0,
             "regression": 0,
@@ -395,9 +404,34 @@ class IncidentLoop:
         except Exception as exc:
             logger.debug("[IncidentLoop] RAG index skipped for %s: %s", incident.id, exc)
 
+    def _attach_code_index(self) -> None:
+        """With DIAGNOSIS_RAG=on and a ready index, give DiagnosisAgent its search_codebase tool (once)."""
+        idx = getattr(self, "_code_index", None)
+        if (settings.diagnosis_rag and idx is not None and idx.ready
+                and getattr(self._diagnosis, "_rag", None) is None):
+            self._diagnosis._rag = idx.rag
+            self._diagnosis._register_tools()
+            logger.info("[IncidentLoop] DiagnosisAgent now uses the code index (%s)", idx.status()["collection"])
+
+    async def _rag_shadow(self, incident: IncidentState, result: DiagnosisResult) -> None:
+        """What search_codebase would have returned for this incident, and whether it held the diagnosed file.
+        Observability only: never raises into the pipeline."""
+        try:
+            from app.services.code_index import RAGShadow, shadow_query
+            await RAGShadow(self._code_index).check(shadow_query(incident), result.affected_file)
+        except Exception as exc:
+            logger.debug("[IncidentLoop] RAG shadow check skipped for %s: %s", incident.id, exc)
+
     async def _run_diagnosis(self, incident: IncidentState, prior_context: str | None = None) -> DiagnosisResult:
         try:
+            self._attach_code_index()
             result = await self._diagnosis.diagnose(incident, prior_context=prior_context)
+            idx = getattr(self, "_code_index", None)
+            if idx is not None:
+                if idx.ready:
+                    asyncio.create_task(self._rag_shadow(incident, result))
+                if idx.refresh_due():
+                    asyncio.create_task(idx.refresh())
             return handoff_validator.validate_diagnosis(result)
         except HandoffValidationError as exc:
             logger.error("[IncidentLoop] DiagnosisResult schema invalid: %s", exc)
@@ -1427,6 +1461,8 @@ class IncidentLoop:
     async def run_forever(self) -> None:
         self._running = True
         logger.info("[IncidentLoop] Started — waiting for events")
+        if getattr(self, "_code_index", None) is not None:
+            asyncio.create_task(self._code_index.refresh())     # background: no incident waits on embedding
         while self._running:
             try:
                 event = await asyncio.wait_for(event_queue.dequeue(), timeout=5.0)

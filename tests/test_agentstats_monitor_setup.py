@@ -279,3 +279,17 @@ def test_models_file_comes_from_the_routing_prices(tmp_path):
 def test_triage_and_diagnosis_name_an_eval_set_that_exists():
     for key in ("triage", "diagnosis"):
         assert (ROOT / CONFIGS[key]["eval_set"]).exists()
+
+
+def test_rag_shadow_rules_score_hits_only_when_diagnosis_named_a_file():
+    cfg = CONFIGS["rag_shadow"]
+    hit = agent("s1", name="RAGShadow", inp={"query_chars": 80, "diagnosed_file": "a.js"},
+                output={"results": 4, "files": ["a.js"], "diagnosed_file_retrieved": True})
+    miss = agent("s2", name="RAGShadow", inp={"query_chars": 80, "diagnosed_file": "a.js"},
+                 output={"results": 0, "files": [], "diagnosed_file_retrieved": False})
+    nofile = agent("s3", name="RAGShadow", inp={"query_chars": 80, "diagnosed_file": None},
+                   output={"results": 3, "files": ["b.js"], "diagnosed_file_retrieved": None})
+    rows = [to_row(w.join_traces([a], [], [])[0], cfg) for a in (hit, miss, nofile)]
+    assert rows[0]["checks"] == {"returned_results": True, "diagnosed_file_retrieved": True}
+    assert rows[1]["checks"] == {"returned_results": False, "diagnosed_file_retrieved": False}
+    assert rows[2]["checks"] == {"returned_results": True}
