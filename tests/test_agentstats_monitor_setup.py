@@ -263,3 +263,19 @@ def test_swebench_replays_are_eval_not_production():
     assert ADAPTERS["diagnosis"].source(t) == "eval"
     fix = w.join_traces([agent("g2", name="FixGenerationAgent", inp={"error_type": "GITHUB_ISSUE"}, output={})], [], [])[0]
     assert ADAPTERS["default"].source(fix) == "eval"
+
+
+def test_models_file_comes_from_the_routing_prices(tmp_path):
+    import json as _json
+
+    from agentstats_models import main, models
+    out = models({"cost_per_1k_tokens": {"m": {"input": 0.0003, "output": 0.0012}}})
+    assert out == {"prices_per_million": {"m": {"input": 0.3, "output": 1.2}}}
+    main(["--out", str(tmp_path / "m.json")])
+    w.load_models(tmp_path / "m.json")                              # the real routing file is a valid models file
+    assert "claude-haiku-5-5" in _json.loads((tmp_path / "m.json").read_text())["prices_per_million"]
+
+
+def test_triage_and_diagnosis_name_an_eval_set_that_exists():
+    for key in ("triage", "diagnosis"):
+        assert (ROOT / CONFIGS[key]["eval_set"]).exists()

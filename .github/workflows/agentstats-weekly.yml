@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install agentstats
-        run: pip install "agentstats==0.9.0"     # same version as requirements-dev.txt
+        run: pip install "agentstats==0.10.0"     # same version as requirements-dev.txt
       - name: Weekly monitoring (all configured agents)
         env:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
@@ -41,8 +41,9 @@ jobs:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
           JUDGE: ${{ github.event_name == 'schedule' || inputs.judge }}
         run: |
+          python scripts/agentstats_models.py --out models.json     # candidate prices, from llm_routing.json
           args=(--config-dir config/agentstats/agents --adapters scripts/agentstats_adapters.py
-                --labels-dir app/evals/agentstats --days "${{ inputs.days || '7' }}" --out weekly)
+                --labels-dir app/evals/agentstats --models models.json --days "${{ inputs.days || '7' }}" --out weekly)
           if [ "$JUDGE" = "true" ]; then
             args+=(--judge --judge-model deepseek-ai/DeepSeek-V4.1-Flash
                    --judge-base-url https://api.together.xyz/v1 --judge-key-env TOGETHER_API_KEY)
