@@ -32,7 +32,9 @@ SHADOW_MIN_SCORE = 0.45         # same as search_codebase
 
 
 def collection_name(owner: str, repo: str) -> str:
-    return "code_" + re.sub(r"[^a-z0-9]+", "_", f"{owner}_{repo}".lower()).strip("_")
+    # "codeidx_", not the first build's "code_": that collection was built with per-function LLM descriptions and
+    # under the old path-only registry; this one is embedding-only and starts clean.
+    return "codeidx_" + re.sub(r"[^a-z0-9]+", "_", f"{owner}_{repo}".lower()).strip("_")
 
 
 def _norm(path: str | None) -> str:
@@ -47,7 +49,9 @@ class CodeIndex:
             local_repo = LocalRepoService(owner, repo)
         if rag is None:
             from app.services.rag import RAGService
-            rag = RAGService(collection_name=collection_name(owner, repo))
+            # Embedding-only: per-function LLM descriptions cost one call per function (2,338 Haiku calls, $0.48,
+            # for the production repo's first build); the with/without-RAG test measures this same configuration.
+            rag = RAGService(collection_name=collection_name(owner, repo), function_descriptions=False)
         self.local_repo, self.rag = local_repo, rag
         self.ready = False
         self.last_refresh: float | None = None

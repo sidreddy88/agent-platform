@@ -301,6 +301,7 @@ class RAGService:
         chroma_path: str = CHROMA_PATH,
         collection_name: str = COLLECTION_NAME,
         openai_api_key: str | None = None,
+        function_descriptions: bool | None = None,
     ) -> None:
         api_key = openai_api_key or settings.openai_api_key
         if not api_key:
@@ -308,6 +309,9 @@ class RAGService:
 
         self._openai = AsyncOpenAI(api_key=api_key)
         self._collection_name = collection_name
+        # Per-function LLM descriptions before embedding (one LLM call per function). None: the global setting.
+        self._descriptions = (settings.rag_enable_function_descriptions if function_descriptions is None
+                              else function_descriptions)
         self._collection = make_collection(collection_name, chroma_path=chroma_path)
         self._incident_collection = make_collection("incidents", chroma_path=chroma_path)
         self._index_version = self._load_index_version()
@@ -886,6 +890,7 @@ class RAGService:
         incremental updates that don't change it.
         """
         self._collection.clear()
+        self._clear_registry()
         self._index_version = self._bump_index_version()
 
     @property
@@ -962,14 +967,15 @@ class RAGService:
         relative = str(file_path.relative_to(rel_root))
 
         # ── Hash check: skip unchanged files ─────────────────────────────
-        if not self._file_changed(relative, content_hash):
+        key = self._registry_key(relative)
+        if not self._file_changed(key, content_hash):
             return 0
 
         # ── Delete stale chunks from previous indexing run ────────────────
-        old_ids = self._get_chunk_ids(relative)
+        old_ids = self._get_chunk_ids(key)
         if old_ids:
             self._collection.delete(old_ids)
-            self._mark_superseded(relative)
+            self._mark_superseded(key)
 
         # ── Chunk — routed by file type, not one strategy for everything ────
         if language in ("javascript", "typescript", "python"):
@@ -1000,7 +1006,7 @@ class RAGService:
         # Only chunks that came from _chunk_by_ast have function_name set;
         # markdown sections and line-based chunks have no single function to
         # describe, so they're embedded as plain code/text either way.
-        if settings.rag_enable_function_descriptions:
+        if self._descriptions:
             fn_chunks = [c for c in chunks if c.function_name]
             if fn_chunks:
                 llm_service = llm_gateway.get_llm_service_for("code_description")
@@ -1033,13 +1039,34 @@ class RAGService:
         ])
 
         # ── Register new chunks ───────────────────────────────────────────
-        self._register_chunks(relative, [c.chunk_id for c in chunks], content_hash)
+        self._register_chunks(key, [c.chunk_id for c in chunks], content_hash)
 
         return len(chunks)
 
     # ------------------------------------------------------------------
     # Document chunk registry helpers
     # ------------------------------------------------------------------
+
+    def _registry_key(self, relative: str) -> str:
+        """The registry's doc id for a file in this collection. Scoped by collection, so two collections holding
+        the same path (two repos, or one repo at two commits) don't make each other skip files as "unchanged".
+        The default collection keeps bare paths, so its existing registry rows stay valid."""
+        return relative if self._collection_name == COLLECTION_NAME else f"{self._collection_name}::{relative}"
+
+    def _clear_registry(self) -> None:
+        """Retire this collection's registry rows, so a rebuild after clear() re-embeds every file."""
+        from sqlalchemy import update
+
+        from app.services.database import engine, tables
+        col = tables.doc_chunk_registry.c
+        scope = (col.doc_id.like(f"{self._collection_name}::%") if self._collection_name != COLLECTION_NAME
+                 else ~col.doc_id.like("%::%"))
+        try:
+            with engine.begin() as conn:
+                conn.execute(update(tables.doc_chunk_registry).where(scope).where(col.status == "active")
+                             .values(status="superseded"))
+        except Exception as exc:
+            logger.warning("[RAG] Registry reset failed for %s: %s", self._collection_name, exc)
 
     def _file_changed(self, doc_id: str, content_hash: str) -> bool:
         """Return True if the file is new or its content hash differs from registry."""

@@ -45,7 +45,7 @@ class FakeRepo:
 
 
 def test_collection_name_is_per_repo_and_safe():
-    assert ci.collection_name("VoyageCo", "Big-App.v2") == "code_voyageco_big_app_v2"
+    assert ci.collection_name("VoyageCo", "Big-App.v2") == "codeidx_voyageco_big_app_v2"
 
 
 @pytest.mark.asyncio
