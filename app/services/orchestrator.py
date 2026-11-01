@@ -124,6 +124,11 @@ class MasterOrchestrator:
     async def run_forever(self) -> None:
         self._running = True
         logger.info("[Orchestrator] Started — draining EventQueue")
+        # Production runs this loop, not IncidentLoop.run_forever(): build diagnosis's code index here too, in the
+        # background, so the first incident doesn't wait for it (app.services.code_index).
+        idx = getattr(getattr(self, "_incident_loop", None), "_code_index", None)
+        if idx is not None:
+            asyncio.create_task(idx.refresh())
         while self._running:
             try:
                 event = await asyncio.wait_for(event_queue.dequeue(), timeout=5.0)

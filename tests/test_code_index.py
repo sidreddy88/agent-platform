@@ -134,3 +134,36 @@ async def test_a_diagnosis_schedules_the_shadow_check_and_a_due_refresh(monkeypa
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert seen == ["a.js"] and rag.indexed                        # shadow ran; refresh ran in the background
+
+
+def test_one_index_per_repo_is_shared_across_incident_loops(monkeypatch):
+    monkeypatch.setattr(ci, "_SHARED", {})
+    monkeypatch.setattr(ci, "CodeIndex", lambda owner, repo, local_repo=None: SimpleNamespace(owner=owner, repo=repo))
+    a, b = ci.shared("o", "r"), ci.shared("o", "r")
+    assert a is b and ci.shared("o", "other") is not a
+
+
+@pytest.mark.asyncio
+async def test_the_orchestrator_starts_the_index_build(monkeypatch):
+    """Production runs Orchestrator.run_forever(), not IncidentLoop.run_forever(): the refresh must start there."""
+    from app.services.orchestrator import MasterOrchestrator
+    started = []
+
+    async def refresh():
+        started.append(True)
+    orch = MasterOrchestrator.__new__(MasterOrchestrator)
+    orch._incident_loop = SimpleNamespace(_code_index=SimpleNamespace(refresh=refresh))
+
+    async def stop_soon():
+        await asyncio.sleep(0.05)
+        orch._running = False
+    async def nothing():
+        await asyncio.sleep(10)
+    monkeypatch.setattr("app.services.orchestrator.event_queue.dequeue", nothing)
+    async def empty_queue(coro, timeout):                         # what an idle queue does: time out
+        coro.close()
+        await asyncio.sleep(0.01)
+        raise asyncio.TimeoutError
+    monkeypatch.setattr("app.services.orchestrator.asyncio.wait_for", empty_queue)
+    await asyncio.gather(orch.run_forever(), stop_soon())
+    assert started == [True]

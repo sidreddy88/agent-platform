@@ -85,6 +85,18 @@ class CodeIndex:
                 "last_refresh": self.last_refresh, "last_error": self.last_error}
 
 
+_SHARED: dict[tuple[str, str], CodeIndex] = {}
+
+
+def shared(owner: str, repo: str, local_repo: Any = None) -> CodeIndex:
+    """One CodeIndex per repo per process. Production runs the Orchestrator, which builds its own IncidentLoop,
+    and the module-level incident_loop singleton builds another: both must use (and report) the same index."""
+    key = (owner, repo)
+    if key not in _SHARED:
+        _SHARED[key] = CodeIndex(owner, repo, local_repo=local_repo)
+    return _SHARED[key]
+
+
 class RAGShadow:
     """Shadow retrieval for one diagnosis: what search_codebase would have returned for the incident, and whether it
     contained the file diagnosis named. One trace per call (agent name RAGShadow) for the weekly report."""
