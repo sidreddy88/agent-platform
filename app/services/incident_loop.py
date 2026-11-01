@@ -269,9 +269,9 @@ class IncidentLoop:
         self._code_index = None
         if self._rag is not None:
             try:
-                from app.services.code_index import CodeIndex
-                self._code_index = CodeIndex(self._diagnosis._owner, self._diagnosis._repo,
-                                             local_repo=self._diagnosis._local_repo)
+                from app.services.code_index import shared
+                self._code_index = shared(self._diagnosis._owner, self._diagnosis._repo,
+                                          local_repo=self._diagnosis._local_repo)
             except Exception as exc:
                 logger.warning("[IncidentLoop] code index unavailable: %s", exc)
         self._dedup_stats: dict[str, int] = {
