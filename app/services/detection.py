@@ -572,6 +572,9 @@ class DetectionService:
                 await broadcast({"type": msg_type, "event": pending_event_store.serialize(pe)})
                 if is_new:
                     logger.info("[%s] Pending approval: %s", event.severity, event.title)
+                    if getattr(settings, "auto_triage_on_detection", False):
+                        from app.services.auto_triage import auto_triage
+                        auto_triage.schedule(pe)
                 else:
                     logger.debug("[%s] Duplicate (%dx): %s", event.severity, pe.occurrences, event.title)
             except Exception:

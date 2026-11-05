@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     # frequency at which a given error class repeats in the target app.
     detection_poll_interval_seconds: int = 300
 
+    # Triage every new pending event as soon as detection finds it, before anyone approves it. Triage is cheap
+    # (~$0.0006 a run) and only classifies; diagnosis and fixes still wait for approval. Without it triage ran only
+    # on approved events, so production triage (and everything learning from its traces) stalled when nobody
+    # approved (2026-11: 14 events detected in a day, 0 triaged).
+    auto_triage_on_detection: bool = True
+
     # CloudWatch log filter patterns for application-level error detection.
     # JSON array: [{"log_group": "/ecs/...", "pattern": "NoSuchKey",
     #               "error_type": "S3_NO_SUCH_KEY", "service": "target-app"}]

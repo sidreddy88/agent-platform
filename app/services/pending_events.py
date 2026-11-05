@@ -23,6 +23,8 @@ class PendingEvent:
     handling: str = "unknown"  # "caught" | "uncaught" | "unknown"
     handling_evidence: str = ""  # short snippet that drove the classification
     category: str = "error"   # "error" | "non_error" — routes the dashboard tabs
+    # Set by auto-triage (app.services.auto_triage) right after detection; empty until it finishes.
+    triage: Dict[str, Any] = field(default_factory=dict)
     _event: Any = field(default=None, repr=False)
 
 
@@ -310,6 +312,7 @@ class PendingEventStore:
             "handling": pe.handling,
             "handling_evidence": pe.handling_evidence,
             "category": pe.category,
+            "triage": pe.triage,
         }
 
 
