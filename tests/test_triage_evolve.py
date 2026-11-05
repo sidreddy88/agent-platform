@@ -67,8 +67,8 @@ def test_a_correct_answer_passes_with_cost_steps_and_a_hidden_label(monkeypatch)
 def test_a_skipped_occurrence_lookup_is_reported_to_the_proposer(monkeypatch):
     _script(monkeypatch, _full_run(call_occurrences=False))
     r = run()
-    assert r["passed"]                                  # the label matched, but the evidence says how
-    assert "did not call get_occurrence_count" in r["detail"]
+    assert not r["passed"]                              # the label matched, but the gate's rule wasn't met
+    assert r["submitted"] and "did not call get_occurrence_count" in r["detail"]
 
 
 def test_a_wrong_severity_fails(monkeypatch):

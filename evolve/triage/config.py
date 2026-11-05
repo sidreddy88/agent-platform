@@ -50,7 +50,8 @@ SAFETY = [
     "answering with only the JSON object",
 ]
 TASK_CONTRACT = ("The decision and severity match the case's label (or one of its accepted alternatives), from "
-                 "the event text and the two tools' results, and the answer is a parseable JSON object.")
+                 "the event text and the two tools' results; the agent called check_duplicate_pr, and get_occurrence_count "
+                 "when the event has a log group; and the answer is a parseable JSON object.")
 COMMAND = [sys.executable, str(HERE / "run_case.py"), "{harness}", "{case}"]
 GRADE_COMMAND = [sys.executable, str(HERE / "run_case.py"), "--grade", "{case}", "{output}"]
 
@@ -87,7 +88,7 @@ def build(run_dir, budget_usd: float = 5.0, rounds: int = 3) -> Optimizer:
     held = [c["id"] for c in _ids(HELDOUT)]
     cfg = OptimizerConfig(evolve_cases=evolve, guard_cases=[], final_cases=held, final_trials=2,
                           budget_usd=budget_usd, max_rounds=rounds, trials=2, calibration_trials=2,
-                          default_case_cost_usd=0.001,     # measured: $0.0006 per case on Haiku 5.5
+                          default_case_cost_usd=float(os.environ.get('CASE_COST_USD', '0.001')),  # measured: $0.0006/case Haiku 5.5, $0.0055 Haiku 4.5
                           cost_band=True, parallel_lanes=4,
                           case_lanes={c: c for c in evolve + held}, smoke_cases=evolve[:3],
                           anchors=anchors.load(HERE / "anchors.jsonl"))
