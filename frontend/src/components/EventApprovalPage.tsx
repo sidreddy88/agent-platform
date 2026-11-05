@@ -131,6 +131,11 @@ export function EventApprovalPage({ events }: Props) {
                         ? handling
                       </span>
                     )}
+                    {ev.triage?.decision && (
+                      <span style={triageBadge(ev.triage.decision)} title={`Auto-triage: ${ev.triage.reasoning ?? ""}`}>
+                        {ev.triage.decision === "real" ? `${ev.triage.severity ?? ""} real` : ev.triage.decision}
+                      </span>
+                    )}
                     {(ev.occurrences ?? 1) > 1 && (
                       <span style={occurrenceBadge} title="Identical errors collapsed into this entry">
                         ×{ev.occurrences}
@@ -277,6 +282,14 @@ const occurrenceBadge: React.CSSProperties = {
   fontSize: 11, color: "#fbbf24", fontWeight: 700,
   background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.35)",
   borderRadius: 4, padding: "2px 8px",
+};
+
+const triageBadge = (kind: string): React.CSSProperties => {
+  const color = kind === "real" ? "#f59e0b" : "#94a3b8";
+  return {
+    fontSize: 11, color, fontWeight: 700, background: "transparent",
+    border: `1px solid ${color}`, borderRadius: 4, padding: "2px 8px",
+  };
 };
 
 const handlingBadge = (kind: "caught" | "uncaught" | "unknown"): React.CSSProperties => {

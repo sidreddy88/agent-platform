@@ -305,6 +305,15 @@ export interface PendingEvent {
   handling?: "caught" | "uncaught" | "unknown";
   handling_evidence?: string;
   category?: "crash" | "error" | "non_error";
+  // Auto-triage result (filled in shortly after detection); empty until it finishes.
+  triage?: {
+    decision?: "real" | "noise" | "duplicate";
+    severity?: string;
+    occurrences_24h?: number;
+    duplicate_pr?: string | null;
+    reasoning?: string;
+    triaged_at?: string;
+  };
 }
 
 export type FailureCategory =
