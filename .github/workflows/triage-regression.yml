@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEVANT: '^(app/agents/(triage|base)\.py|app/agents/harness/__init__\.py|app/services/llm\.py|config/llm_routing\.json|scripts/(triage_gate|eval_triage_regression)\.py|app/evals/triage_(heldout\.jsonl|gate_.*)|\.github/workflows/triage-regression\.yml)$'
+  RELEVANT: '^(app/agents/(triage|base)\.py|app/agents/harness/(__init__\.py|triage/.*)|app/services/llm\.py|config/llm_routing\.json|scripts/(triage_gate|eval_triage_regression)\.py|app/evals/triage_(heldout\.jsonl|gate_.*)|\.github/workflows/triage-regression\.yml)$'
 
 jobs:
   regression:

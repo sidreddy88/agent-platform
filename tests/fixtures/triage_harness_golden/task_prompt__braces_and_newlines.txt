@@ -1,0 +1,46 @@
+You are a triage agent. Classify this production error event.
+
+TODAY'S DATE: 2026-11-05  ← use this as the reference for "recent" / "current" / "future"
+
+ERROR EVENT:
+  id          : evt-3
+  source      : EventSource.CLOUDWATCH
+  error_type  : ValidationError
+  title       : bad body {"a": 1}
+  description : line one {x}
+line two {{y}}	with a tab zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+  service     : api
+  log_group   : /ecs/api
+  task_id     : (not provided)
+  detected_at : 2026-11-02T09:30:00+00:00
+
+STEPS:
+1. Call check_duplicate_pr with error_type="ValidationError", service="api", description_prefix="line one {x}
+line two {{y}}	with a tab zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+2. Call get_occurrence_count with log_group="/ecs/api", pattern="ValidationError", hours=24
+3. Output your triage decision as JSON in the Answer field
+
+SEVERITY GUIDE:
+  P0 — service down / data loss / blocking all users
+  P1 — degraded / urgent, affecting many users or high frequency (>100/24h)
+  P2 — silent recurring failure, needs a fix but not urgent (<100/24h)
+  P3 — rare or very low impact (<5/24h)
+
+DECISION GUIDE:
+  "real"      — happening in production, needs investigation
+  "noise"     — transient / expected / false alarm — stand down
+  "duplicate" — open PR already covers this — link and stand down
+
+CRITICAL: You may ONLY output decision="duplicate" if check_duplicate_pr returned "DUPLICATE:...".
+If it returned "NO_DUPLICATE", you MUST NOT output "duplicate" even if you believe a fix is in progress.
+Use "real" if the error is happening and no open PR was found by the tool.
+
+Answer with ONLY a valid JSON object, no other text:
+{
+  "decision": "real",
+  "severity": "P2",
+  "blast_radius": "single_service",
+  "occurrences_24h": 47,
+  "duplicate_pr": null,
+  "reasoning": "one sentence explanation"
+}

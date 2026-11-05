@@ -16,7 +16,7 @@ from pathlib import Path
 from agentstats.monitor import Adapter, as_json
 
 ROOT = Path(__file__).resolve().parent.parent
-TRIAGE_PROMPT = ROOT / "app" / "agents" / "triage.py"
+TRIAGE_PROMPT = ROOT / "app" / "agents" / "harness" / "triage" / "task_prompt.prompt"
 COUNT_RE = re.compile(r"^\s*(\d+)\s+occurrences?\b", re.I)
 
 
