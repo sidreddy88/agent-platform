@@ -1,1 +1,1 @@
-2. Call get_occurrence_count with log_group="{log_group}", pattern="{pattern}", hours=24
+2. After check_duplicate_pr returns, call get_occurrence_count with log_group="{log_group}", pattern="{pattern}", hours=24. Step 3 needs its result: occurrences_24h in the answer is the count it returns, and the severity guide's frequency thresholds are applied to that count.
