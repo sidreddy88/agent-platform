@@ -8,7 +8,8 @@ harness-evolve CommandEvaluator contract (the last line of stdout is what it rea
 
 The replay is the triage gate's (scripts/triage_gate.py): the case's recorded occurrence count and open-PR
 answer are served by stubs, so the only network call is the model. A case passes when the decision and
-severity match the label (or one of its accepted alternatives) and the agent gave a usable answer; the
+severity match the label (or one of its accepted alternatives), the agent gave a usable answer, and it called
+the tools the triage gate's rules require (check_duplicate_pr; get_occurrence_count when there is a log group); the
 fallback real/P2 after a parse failure or the step limit is a failure even when it matches.
 
 Environment: TRIAGE_MODEL runs another model (default: config/llm_routing.json, as in production), e.g.
@@ -110,7 +111,10 @@ async def run(harness_dir: str, case_id: str) -> dict:
     if missed:
         detail += f"; did not call {', '.join(missed)}"
     return {
-        "passed": r["verdict"] == "PASS" and not r.get("no_answer"),
+        # The triage gate's behaviour rules are requirements too (it fails below 95%): a matching label reached
+        # without the lookups the prompt requires is a guess, and the training labels can't tell (they were built
+        # from Haiku 4.5's answers, which skipped the occurrence lookup and still match).
+        "passed": r["verdict"] == "PASS" and not r.get("no_answer") and not missed,
         "submitted": not r.get("no_answer"),
         "cost_usd": _cost(tokens),
         "detail": detail,
