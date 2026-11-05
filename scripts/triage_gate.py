@@ -47,7 +47,13 @@ POLICY = ROOT / "app" / "evals" / "triage_gate_policy.toml"
 # "is the baseline stale?" is a content question (robust to squash merges), not a commit-history one.
 INPUTS = ["app/agents/triage.py", "app/agents/base.py", "app/services/llm.py", "app/agents/harness/__init__.py",
           "app/services/ipi_guard.py", "app/services/output_validator.py", "config/llm_routing.json",
-          "app/evals/triage_heldout.jsonl", "scripts/eval_triage_regression.py"]
+          "app/evals/triage_heldout.jsonl", "scripts/eval_triage_regression.py",
+          # The harness files (prompt, tool descriptions, settings). A new file there must be listed too
+          # (tests/test_triage_harness.py checks). Absent files are skipped, so adding these paths didn't change
+          # the hash of a tree that predates them (the committed baseline stays valid).
+          "app/agents/harness/triage/task_prompt.prompt", "app/agents/harness/triage/occurrence_with_log_group.prompt",
+          "app/agents/harness/triage/occurrence_no_log_group.prompt", "app/agents/harness/triage/tool_descriptions.json",
+          "app/agents/harness/triage/settings.json"]
 
 
 def inputs_hash(ref: str | None = None) -> str:
@@ -58,10 +64,14 @@ def inputs_hash(ref: str | None = None) -> str:
     for path in INPUTS:
         if ref:
             r = subprocess.run(["git", "show", f"{ref}:{path}"], capture_output=True, cwd=ROOT)
-            data = r.stdout if r.returncode == 0 else b"<absent>"
+            if r.returncode != 0:
+                continue
+            data = r.stdout
         else:
             f = ROOT / path
-            data = f.read_bytes() if f.exists() else b"<absent>"
+            if not f.exists():
+                continue
+            data = f.read_bytes()
         h.update(path.encode() + b"\0" + data + b"\0")
     return h.hexdigest()[:16]
 

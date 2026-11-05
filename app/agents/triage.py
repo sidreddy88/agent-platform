@@ -24,8 +24,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.agents.base import BaseAgent
+from app.agents.harness import Harness, load_harness
 from app.core.config import settings
 from app.models.events import ErrorEvent
 from app.services.aws import AWSError, AWSService
@@ -123,13 +125,31 @@ class TriageAgent(BaseAgent):
         print(result.decision, result.severity, result.occurrences_24h)
     """
 
+    @property
+    def _harness(self) -> Harness:
+        """The loaded harness. Falls back to the default one when __init__ never ran (tests build agents with
+        TriageAgent.__new__ and wire only what they need)."""
+        harness = self.__dict__.get("_harness_loaded")
+        if harness is None:
+            harness = self.__dict__["_harness_loaded"] = load_harness("triage")
+        return harness
+
+    @_harness.setter
+    def _harness(self, value: Harness) -> None:
+        self.__dict__["_harness_loaded"] = value
+
     def __init__(
         self,
         aws: AWSService | None = None,
         store=None,
         llm: LLMService | None = None,
         model: str | None = None,
+        harness_dir: str | Path | None = None,
     ) -> None:
+        # Prompt text, tool descriptions and the turn budget live in a harness directory
+        # (app/agents/harness/triage/ by default), not in string literals here: that directory is the
+        # harness optimizer's edit surface. harness_dir / HARNESS_DIR_TRIAGE point at a candidate.
+        self._harness = load_harness("triage", harness_dir)
         # temperature=0.0: this classification has one right answer given the
         # facts (decision + severity, not open-ended reasoning), and running
         # the regression eval found real sample-to-sample drift at the
@@ -145,6 +165,7 @@ class TriageAgent(BaseAgent):
         # No target harness docs for triage: measured, see the class docstring. (BaseAgent loads them for every
         # agent; a per-agent switch there can come when another agent is measured with and without.)
         self._harness_docs = ""
+        self._max_iterations = self._harness.setting("max_iterations")
         self._aws = aws or AWSService()
         self._store = store or _default_store
         self._register_tools()
@@ -185,24 +206,10 @@ class TriageAgent(BaseAgent):
             except AWSError as exc:
                 return f"Could not fetch CloudWatch logs: {exc}. Treat occurrence count as unknown."
 
-        self.register_tool(
-            "check_duplicate_pr",
-            _check_duplicate_pr,
-            (
-                "Check if an open PR already exists for this specific error. "
-                "Returns DUPLICATE (with PR URL) or NO_DUPLICATE. "
-                "Input: {error_type: string, service: string, description_prefix: string (first 100 chars of description)}"
-            ),
-        )
-        self.register_tool(
-            "get_occurrence_count",
-            _get_occurrence_count,
-            (
-                "Count how many times an error pattern appeared in CloudWatch logs over the last N hours. "
-                "Use hours=24 for blast radius / severity assessment. "
-                "Input: {log_group: string, pattern: string, hours: integer (default 24)}"
-            ),
-        )
+        self.register_tool("check_duplicate_pr", _check_duplicate_pr,
+                           self._harness.tool_description("check_duplicate_pr"))
+        self.register_tool("get_occurrence_count", _get_occurrence_count,
+                           self._harness.tool_description("get_occurrence_count"))
 
     async def triage(self, event: ErrorEvent) -> TriageResult:
         """Run triage on an ErrorEvent. Returns a TriageResult."""
@@ -211,10 +218,9 @@ class TriageAgent(BaseAgent):
         error_type = event.error_type or event.title
 
         occurrence_instruction = (
-            f'2. Call get_occurrence_count with log_group="{log_group}", '
-            f'pattern="{pattern}", hours=24'
+            self._harness.render("occurrence_with_log_group", log_group=log_group, pattern=pattern)
             if log_group
-            else "2. Skip get_occurrence_count — no log_group available"
+            else self._harness.render("occurrence_no_log_group")
         )
 
         from datetime import date
@@ -236,50 +242,21 @@ class TriageAgent(BaseAgent):
         scan_for_injection(event.title or "", source="cloudwatch-logs")
         scan_for_injection(event.description or "", source="cloudwatch-logs")
 
-        prompt = f"""You are a triage agent. Classify this production error event.
-
-TODAY'S DATE: {today}  ← use this as the reference for "recent" / "current" / "future"
-
-ERROR EVENT:
-  id          : {event.id}
-  source      : {event.source}
-  error_type  : {error_type}
-  title       : {event.title}
-  description : {event.description}
-  service     : {event.service}
-  log_group   : {log_group or '(not provided)'}
-  task_id     : {event.task_id or '(not provided)'}
-  detected_at : {event.detected_at.isoformat()}
-
-STEPS:
-1. Call check_duplicate_pr with error_type="{error_type}", service="{event.service}", description_prefix="{event.description[:100]}"
-{occurrence_instruction}
-3. Output your triage decision as JSON in the Answer field
-
-SEVERITY GUIDE:
-  P0 — service down / data loss / blocking all users
-  P1 — degraded / urgent, affecting many users or high frequency (>100/24h)
-  P2 — silent recurring failure, needs a fix but not urgent (<100/24h)
-  P3 — rare or very low impact (<5/24h)
-
-DECISION GUIDE:
-  "real"      — happening in production, needs investigation
-  "noise"     — transient / expected / false alarm — stand down
-  "duplicate" — open PR already covers this — link and stand down
-
-CRITICAL: You may ONLY output decision="duplicate" if check_duplicate_pr returned "DUPLICATE:...".
-If it returned "NO_DUPLICATE", you MUST NOT output "duplicate" even if you believe a fix is in progress.
-Use "real" if the error is happening and no open PR was found by the tool.
-
-Answer with ONLY a valid JSON object, no other text:
-{{
-  "decision": "real",
-  "severity": "P2",
-  "blast_radius": "single_service",
-  "occurrences_24h": 47,
-  "duplicate_pr": null,
-  "reasoning": "one sentence explanation"
-}}"""
+        prompt = self._harness.render(
+            "task_prompt",
+            today=today,
+            id=event.id,
+            source=event.source,
+            error_type=error_type,
+            title=event.title,
+            description=event.description,
+            service=event.service,
+            log_group=log_group or "(not provided)",
+            task_id=event.task_id or "(not provided)",
+            detected_at=event.detected_at.isoformat(),
+            description_prefix=event.description[:100],
+            occurrence_instruction=occurrence_instruction,
+        )
 
         result = await self.run(prompt)
         triage_result = _parse_triage_result(result.answer)

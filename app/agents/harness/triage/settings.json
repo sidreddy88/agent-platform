@@ -1,0 +1,6 @@
+{
+ "_doc": {
+  "max_iterations": "ReAct turn budget for one triage"
+ },
+ "max_iterations": 10
+}

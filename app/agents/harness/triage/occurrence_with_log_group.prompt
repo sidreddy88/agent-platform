@@ -1,0 +1,1 @@
+2. Call get_occurrence_count with log_group="{log_group}", pattern="{pattern}", hours=24

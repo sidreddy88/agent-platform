@@ -1,0 +1,4 @@
+{
+ "check_duplicate_pr": "Check if an open PR already exists for this specific error. Returns DUPLICATE (with PR URL) or NO_DUPLICATE. Input: {error_type: string, service: string, description_prefix: string (first 100 chars of description)}",
+ "get_occurrence_count": "Count how many times an error pattern appeared in CloudWatch logs over the last N hours. Use hours=24 for blast radius / severity assessment. Input: {log_group: string, pattern: string, hours: integer (default 24)}"
+}
