@@ -1,8 +1,8 @@
 {
-  "main_sha": "c88aa58642a0b235a532e9dbe5048622cbc4df6c",
-  "inputs_hash": "36c5560b9fc30edf",
+  "main_sha": "96902eefc729ddd8dec9aa1726da54a124e25622",
+  "inputs_hash": "3e4af139516729e7",
   "trials": 4,
   "cases_file": "app/evals/triage_heldout.jsonl",
   "model": "claude-haiku-5-5",
-  "measured_at": "2026-11-05T18:47:29+00:00"
+  "measured_at": "2026-11-05T20:08:08+00:00"
 }
