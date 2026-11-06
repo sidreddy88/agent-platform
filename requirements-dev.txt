@@ -5,7 +5,7 @@ pytest>=8.3.3
 pytest-asyncio>=0.24.0
 
 # agentstats: the triage and diagnosis gates, weekly monitoring (agentstats monitor) and their tests.
-agentstats==0.12.0
+agentstats==0.13.0
 
 # harness-evolve: proposes and tests triage harness changes (evolve/triage/). No dependencies of its own.
 harness-evolve==0.3.0
