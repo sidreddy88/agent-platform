@@ -16,6 +16,8 @@ Environment:
     PROPOSER_PRICES   "in,out" $ per million tokens, if litellm doesn't know the model's price
     TRIAGE_MODEL      the agent's model (default: production's, from config/llm_routing.json)
     N_EVOLVE          evolve cases (default 60)
+    TRIAGE_PRODUCTION_FINDINGS  what this week's production monitoring found (counts only; set by the weekly job),
+                      shown to the proposer as production context
     ANTHROPIC_API_KEY for the agent
 """
 from __future__ import annotations
@@ -58,7 +60,9 @@ GRADE_COMMAND = [sys.executable, str(HERE / "run_case.py"), "--grade", "{case}",
 PROFILE = AgentProfile.build(
     name="triage", harness_root=HARNESS, agent_description=AGENT_DESCRIPTION, safety_mechanisms=SAFETY,
     constraints="Edits must help on any production error event, not on particular error types, services or cases.",
-    production_context="Runs on every production alert; one wrong 'noise' or 'duplicate' hides a real bug.",
+    production_context=("Runs on every production alert; one wrong 'noise' or 'duplicate' hides a real bug."
+                        + (f" This week in production: {os.environ['TRIAGE_PRODUCTION_FINDINGS']}"
+                           if os.environ.get("TRIAGE_PRODUCTION_FINDINGS") else "")),
     gaming_examples="E.g. telling the agent to always answer real/P2, the most common label.",
     setting_bounds={"max_iterations": (4, 15)}, grader=TrajectoryGrader(), task_contract=TASK_CONTRACT)
 

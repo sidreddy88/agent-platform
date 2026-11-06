@@ -1,0 +1,121 @@
+name: triage-evolve-weekly
+
+# Weekly self-improvement for TriageAgent (step 4 of the production loop). Reads last week's production triage traces
+# (agentstats monitor, rules only, no judge, free); if a behaviour rule or the usable-answer rate fell below the
+# triage gate's floor over enough runs, runs harness-evolve on the labelled triage cases (hard cap $10) and, if it
+# accepts an edit that holds on held-out cases, opens a DRAFT PR changing app/agents/harness/triage/. Never merges.
+#
+# The PR needs a token other than GITHUB_TOKEN for the triage gate to run on it (GitHub doesn't trigger workflows
+# from GITHUB_TOKEN events). Set SELF_IMPROVE_PR_TOKEN: a fine-grained PAT for this repo with Contents and Pull
+# requests write. Without it the PR is still opened; close and reopen it to start the gate.
+
+on:
+  schedule:
+    - cron: "0 16 * * 1"          # Mondays, 16:00 UTC (two hours after agentstats-weekly)
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days of production traces to read"
+        default: "7"
+      force:
+        description: "Run the optimizer even if production gave no reason to (costs up to the cap)"
+        type: boolean
+        default: false
+      budget:
+        description: "Hard cap in USD for the optimizer run"
+        default: "10"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: triage-evolve-weekly
+  cancel-in-progress: false
+
+jobs:
+  evolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SELF_IMPROVE_PR_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -r requirements-dev.txt
+
+      - name: Last week's production triage (rules only, no judge)
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: https://us.cloud.langfuse.com
+        run: |
+          agentstats monitor --config-dir config/agentstats/agents --agents triage \
+            --adapters scripts/agentstats_adapters.py --labels-dir app/evals/agentstats \
+            --days "${{ inputs.days || '7' }}" --out weekly
+          python scripts/triage_evolve_weekly.py decide weekly/triage/rules.json --out decision.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Decide
+        id: decide
+        run: |
+          run=$(python -c "import json; print(str(json.load(open('decision.json'))['run']).lower())")
+          if [ "${{ inputs.force }}" = "true" ]; then run=true; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          findings=$(python -c "import json; print('; '.join(json.load(open('decision.json'))['findings']))")
+          echo "findings=$findings" >> "$GITHUB_OUTPUT"
+
+      - name: harness-evolve (hard cap)
+        if: steps.decide.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LANGFUSE_PUBLIC_KEY: ""
+          LANGFUSE_SECRET_KEY: ""
+          PROPOSER_MODEL: anthropic/claude-sonnet-5-5
+          TRIAGE_PRODUCTION_FINDINGS: ${{ steps.decide.outputs.findings }}
+        run: |
+          harness-evolve check evolve/triage/config.py --budget "${{ inputs.budget || '10' }}" --rounds 3
+          harness-evolve run evolve/triage/config.py --run-dir runs/weekly --budget "${{ inputs.budget || '10' }}" --rounds 3
+          harness-evolve status runs/weekly | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-evolve-weekly
+          path: |
+            decision.json
+            weekly/triage/rules.json
+            runs/weekly/
+          retention-days: 90
+
+      - name: Apply an accepted edit
+        id: apply
+        if: steps.decide.outputs.run == 'true'
+        run: |
+          python scripts/triage_evolve_weekly.py apply runs/weekly --decision decision.json --body-out pr.md \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          if git diff --quiet -- app/agents/harness/triage tests/fixtures/triage_harness_golden; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open a draft PR
+        if: steps.apply.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SELF_IMPROVE_PR_TOKEN || github.token }}
+        run: |
+          branch="self-improve/triage-$(date -u +%Y-%m-%d)-${GITHUB_RUN_ID}"
+          git config user.name "triage-evolve-weekly"
+          git config user.email "triage-evolve-weekly@users.noreply.github.com"
+          git switch -c "$branch"
+          git add app/agents/harness/triage tests/fixtures/triage_harness_golden
+          git commit -m "Triage harness: weekly self-improvement proposal ($(date -u +%F))"
+          git push origin "$branch"
+          gh label create self-improvement --color 0e8a16 --description "Proposed by the weekly self-improvement job" --force
+          gh pr create --draft --base main --head "$branch" --label self-improvement \
+            --title "Triage harness: weekly self-improvement proposal ($(date -u +%F))" --body-file pr.md
