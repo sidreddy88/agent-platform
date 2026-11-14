@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import uuid
 from pathlib import Path
 
 from app.agents.base import AgentResult, BaseAgent
 from app.services import cost_meter, workergate
+from app.services.llm import LLMService
 
 WRITES = {"create_user", "add_to_group", "assign_app", "suspend_user"}
 
@@ -29,8 +31,8 @@ async def _not_local(**_: object) -> str:
 class IdentityWorker(BaseAgent):
     role = ""
 
-    def __init__(self, tenant: str, obo: str, task_id: str | None = None) -> None:
-        super().__init__()
+    def __init__(self, tenant: str, obo: str, task_id: str | None = None, model: str | None = None) -> None:
+        super().__init__(llm=LLMService(model=model) if model else None)
         self.wg_tenant, self.wg_worker, self.wg_obo = tenant, self.role, obo
         self.task_id = task_id or uuid.uuid4().hex[:12]
         self.wg_evidence: list[dict] = []
@@ -61,10 +63,19 @@ def main(cls: type[IdentityWorker]) -> None:
     p.add_argument("--tenant", required=True)
     p.add_argument("--obo", required=True, help="user the worker acts for")
     p.add_argument("--task-id", help="rerun an earlier task (after an approval or a crash)")
+    p.add_argument("--model", help="override the default model (for model-switch evals)")
+    p.add_argument("--json", action="store_true", help="print one JSON line instead (for evals)")
     p.add_argument("request")
     a = p.parse_args()
-    w = cls(a.tenant, a.obo, a.task_id)
+    w = cls(a.tenant, a.obo, a.task_id, a.model)
     result, status = asyncio.run(w.handle(a.request))
+    if a.json:
+        m = w._wg_meter.summary()
+        print(json.dumps({"status": status, "answer": result.answer, "task_id": w.task_id, "models": m["models"],
+                          "cost_usd": m["cost_usd"], "input_tokens": m["tokens"]["input"],
+                          "output_tokens": m["tokens"]["output"], "steps": len(result.steps),
+                          "tool_calls": len(w.wg_evidence), "evidence": w.wg_evidence}, default=str))
+        return
     for s in result.steps:
         print(f"[{s.iteration}] {s.action or 'answer'} {s.action_input if s.action else ''}")
     print(f"\nANSWER: {result.answer}\n\nEVIDENCE (from governance):")

@@ -36,6 +36,7 @@ from typing import Iterator
 PRICES_PER_MTOK: dict[str, tuple[float, ...]] = {
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
+    "claude-haiku-5-5": (0.10, 0.50),    # as in config/llm_routing.json; was missing, so triage cost read as unknown
     "claude-opus-5": (5.00, 25.00),      # harness optimizer's proposer and critic
     "claude-sonnet-5": (2.00, 10.00),    # routing.diagnosis.model (production + evals via the gateway)
     # Open-weight models on Together AI, for the open-model scout: serverless
