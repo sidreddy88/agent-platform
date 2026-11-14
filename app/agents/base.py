@@ -182,6 +182,18 @@ def _parse(text: str) -> dict[str, str]:
     }
 
 
+def _cut_after_first_action(text: str) -> str:
+    """Drop everything after the first Action's JSON input (invented Observations, later
+    Actions, a premature Answer). Unchanged when the reply is an Answer, per _parse's rule."""
+    parsed = _parse(text)
+    ai_pos = text.find("Action Input:")
+    if "answer" in parsed or ai_pos == -1:
+        return text
+    block = _extract_json_block(text[ai_pos:])
+    end = text.find(block, ai_pos)
+    return text if block == "{}" and end == -1 else text[: end + len(block)]
+
+
 # ---------------------------------------------------------------------------
 # BaseAgent
 # ---------------------------------------------------------------------------
@@ -267,6 +279,15 @@ class BaseAgent:
         # DiagnosisAgent has evidence it needs more room; every other agent
         # keeps the original default unless it opts in too.
         self._max_iterations: int = MAX_ITERATIONS
+        # Opt-in: keep only the first Action of each reply in the history. Found
+        # on the first live run of the identity Access worker: in ONE reply the
+        # model wrote get_user, an invented Observation, an invented assign_app
+        # "success", an invented verifying get_user, and an Answer. Only the first
+        # get_user ran, but the whole reply stayed in the history, so on the next
+        # turn the model rejected the REAL observation as "not from a tool I
+        # called" and trusted its own invention. Off by default: turning it on for
+        # the incident agents changes measured behaviour and should be compared first.
+        self._discard_after_first_action: bool = False
 
     @staticmethod
     def _load_harness_docs() -> str:
@@ -340,6 +361,11 @@ class BaseAgent:
                          Action Input dict (or raw string if JSON parse fails).
             description: One-line description shown to Claude in the system prompt.
         """
+        if os.environ.get("WORKERGATE_URL"):
+            # Governance mode: the call goes through worker-gate (identity, policy,
+            # scoped token, audit) instead of running `fn` locally. Unset = unchanged.
+            from app.services.workergate import via_gateway
+            fn = via_gateway(self, name)
         self._tools[name] = (fn, description)
 
     def tool(self, name: str, description: str) -> Callable[[ToolFn], ToolFn]:
@@ -392,6 +418,8 @@ class BaseAgent:
                 _total_input_tokens += self._llm.last_input_tokens
                 _total_output_tokens += self._llm.last_output_tokens
 
+                if getattr(self, "_discard_after_first_action", False):
+                    raw = _cut_after_first_action(raw)
                 # Append assistant turn so Claude sees its own prior reasoning
                 messages.append({"role": "assistant", "content": raw})
 
