@@ -65,5 +65,22 @@ async def test_flag_set_routes_through_governance(monkeypatch):
     agent.task_id = "t1"
     agent.register_tool("suspend_user", local_tool, "d")
     out = await agent._tools["suspend_user"][0](user="bob")
-    assert sent == [("call", {"tool": "suspend_user", "args": {"user": "bob"}, "task_id": "t1"})]
+    assert sent == [("call", {"tool": "suspend_user", "args": {"user": "bob"}, "spent_usd": 0.0, "task_id": "t1"})]
     assert out.startswith("DENIED by governance (authorize)")
+    assert agent.wg_evidence[0]["outcome"] == "denied"
+
+
+def _worker(evidence, answered=True):
+    from app.agents.base import AgentResult, Step
+    from app.agents.identity.base import IdentityWorker
+    w = IdentityWorker.__new__(IdentityWorker)
+    w.wg_evidence = evidence
+    return w.status(AgentResult(answer="x", steps=[Step(iteration=1, answer="x" if answered else "")], iterations=1))
+
+
+def test_status_done_only_when_every_write_verified():
+    ok = {"tool": "assign_app", "outcome": "ok", "verified": True}
+    assert _worker([ok]) == "done"
+    assert _worker([ok, {"tool": "assign_app", "outcome": "unverified", "verified": False}]) == "needs_review"
+    assert _worker([{"tool": "suspend_user", "outcome": "pending_approval", "verified": None}]) == "waiting_approval"
+    assert _worker([], answered=False) == "needs_review"  # ran out of turns

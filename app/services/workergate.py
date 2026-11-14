@@ -66,20 +66,34 @@ async def list_tools(agent: Any) -> list[dict]:
 
 def _observation(res: dict) -> str:
     """Turn governance's answer into the text the model sees."""
-    if res["outcome"] == "ok":
-        return res["result"]
-    if res["outcome"] == "denied":
+    o = res["outcome"]
+    if o == "ok":
+        return res["result"] + ("\n(governance read the change back: verified)" if res.get("verified") else "")
+    if o == "denied":
         return f"DENIED by governance ({res['stopped_at']}): {res['reason']}. Do not retry this call."
-    if res["outcome"] == "infra_error":
+    if o == "pending_approval":
+        return (f"PENDING: a human must approve this first (approval {res['approval_id']}: {res['reason']}). "
+                f"Stop now and report that approval {res['approval_id']} is pending. Do not retry.")
+    if o == "unverified":
+        return ("UNVERIFIED: the tool said it worked, but governance read the record back and the change is not "
+                "there. Do not report this as done.")
+    if o == "infra_error":
         return f"Error: tool unavailable ({res['reason']})."
     return f"Error: {res['result']}"
 
 
 def via_gateway(agent: Any, name: str):
-    """A tool function that sends the call for `name` through governance."""
+    """A tool function that sends the call for `name` through governance. Each outcome is also kept on
+    `agent.wg_evidence`, so whether the task is done is decided from governance's record, not the model's answer."""
     async def call(**kwargs: Any) -> str:
-        [res] = await _gate(agent, "call", {"tool": name, "args": kwargs,
+        meter = getattr(agent, "_wg_meter", None)
+        spent = (meter.summary().get("cost_usd") or 0.0) if meter else 0.0
+        [res] = await _gate(agent, "call", {"tool": name, "args": kwargs, "spent_usd": spent,
                                             "task_id": getattr(agent, "task_id", "") or ""})
+        if not hasattr(agent, "wg_evidence"):
+            agent.wg_evidence = []
+        agent.wg_evidence.append({"tool": name, "args": kwargs} | {k: res.get(k) for k in
+                                 ("outcome", "verified", "approval_id", "replayed")})
         return _observation(res)
     call.__name__ = f"via_gateway_{name}"
     return call
