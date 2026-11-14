@@ -14,6 +14,7 @@ A worker's identity comes from three attributes on the agent:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -52,11 +53,17 @@ async def worker_token(agent: Any) -> str:
 
 async def _gate(agent: Any, tool: str, args: dict) -> list:
     headers = {"Authorization": f"Bearer {await worker_token(agent)}"}
-    async with streamablehttp_client(os.environ["WORKERGATE_URL"], headers=headers) as (r, w, _):
-        async with ClientSession(r, w) as s:
-            await s.initialize()
-            res = await s.call_tool(tool, args)
-    return [json.loads(c.text) for c in res.content if c.type == "text"]
+
+    async def go() -> list:
+        async with streamablehttp_client(os.environ["WORKERGATE_URL"], headers=headers) as (r, w, _):
+            async with ClientSession(r, w) as s:
+                await s.initialize()
+                res = await s.call_tool(tool, args)
+        return [json.loads(c.text) for c in res.content if c.type == "text"]
+
+    # our own deadline: if the gateway dies mid-call, the MCP client logs the dropped connection but leaves the
+    # call waiting (minutes). A retry with the same task id is safe: governance runs a write at most once.
+    return await asyncio.wait_for(go(), float(os.environ.get("WORKERGATE_TIMEOUT", "30")))
 
 
 async def list_tools(agent: Any) -> list[dict]:

@@ -84,3 +84,25 @@ def test_status_done_only_when_every_write_verified():
     assert _worker([ok, {"tool": "assign_app", "outcome": "unverified", "verified": False}]) == "needs_review"
     assert _worker([{"tool": "suspend_user", "outcome": "pending_approval", "verified": None}]) == "waiting_approval"
     assert _worker([], answered=False) == "needs_review"  # ran out of turns
+
+
+@pytest.mark.asyncio
+async def test_a_hung_gateway_times_out_instead_of_hanging_the_worker(monkeypatch):
+    import asyncio
+    import contextlib
+
+    from app.services import workergate
+
+    @contextlib.asynccontextmanager
+    async def never_answers(*a, **k):
+        await asyncio.Event().wait()  # like a gateway that died mid-call: no reply, ever
+        yield
+    monkeypatch.setenv("WORKERGATE_URL", "http://127.0.0.1:1/mcp")
+    monkeypatch.setenv("WORKERGATE_TIMEOUT", "0.1")
+    monkeypatch.setattr(workergate, "streamablehttp_client", never_answers)
+
+    async def token(agent):
+        return "t"
+    monkeypatch.setattr(workergate, "worker_token", token)
+    with pytest.raises(asyncio.TimeoutError):
+        await workergate._gate(object(), "list_tools", {})
