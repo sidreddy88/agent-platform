@@ -95,8 +95,14 @@ def via_gateway(agent: Any, name: str):
     async def call(**kwargs: Any) -> str:
         meter = getattr(agent, "_wg_meter", None)
         spent = (meter.summary().get("cost_usd") or 0.0) if meter else 0.0
-        [res] = await _gate(agent, "call", {"tool": name, "args": kwargs, "spent_usd": spent,
-                                            "task_id": getattr(agent, "task_id", "") or ""})
+
+        async def send() -> dict:
+            [res] = await _gate(agent, "call", {"tool": name, "args": kwargs, "spent_usd": spent,
+                                                "task_id": getattr(agent, "task_id", "") or ""})
+            return res
+        # a durable worker records each call (and waits for approvals) instead of only sending it
+        hook = getattr(agent, "wg_durable_call", None)
+        res = await hook(name, kwargs, send) if hook else await send()
         if not hasattr(agent, "wg_evidence"):
             agent.wg_evidence = []
         agent.wg_evidence.append({"tool": name, "args": kwargs} | {k: res.get(k) for k in

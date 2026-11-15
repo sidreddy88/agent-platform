@@ -106,3 +106,63 @@ async def test_a_hung_gateway_times_out_instead_of_hanging_the_worker(monkeypatc
     monkeypatch.setattr(workergate, "worker_token", token)
     with pytest.raises(asyncio.TimeoutError):
         await workergate._gate(object(), "list_tools", {})
+
+
+class _ScriptedModel:
+    """Turn 1 reads the sign-in log; turn 2 suspends a user it picks at random (a model isn't deterministic);
+    turn 3 answers. `calls` counts real model calls."""
+
+    def __init__(self, rng):
+        self.rng, self.calls, self.last_input_tokens, self.last_output_tokens = rng, 0, 10, 5
+
+    async def complete(self, messages, system=None, **kw):
+        self.calls += 1
+        turn = sum(m["role"] == "assistant" for m in messages)
+        if turn == 0:
+            return 'Thought: check the log\nAction: get_signin_log\nAction Input: {"user": "dave"}'
+        if turn == 1:
+            who = self.rng.choice(["dave", "dave-admin", "DAVE"])
+            return f'Thought: compromised\nAction: suspend_user\nAction Input: {{"user": "{who}"}}'
+        return "Thought: done\nAnswer: suspended"
+
+
+@pytest.mark.asyncio
+async def test_durable_resume_acts_on_the_approved_call_without_asking_the_model_again(monkeypatch, tmp_path):
+    import random
+
+    from app.agents.identity.secops import SecOpsWorker
+    monkeypatch.setenv("WORKERGATE_URL", "http://gate.invalid/mcp")
+    monkeypatch.setenv("WG_JOURNAL", str(tmp_path / "journal.db"))
+    approved, sent = set(), []
+
+    async def fake_list_tools(agent):
+        return [{"name": n, "description": n} for n in ("get_signin_log", "suspend_user")]
+
+    async def fake_gate(agent, tool, args):
+        call = (args["tool"], args["args"].get("user"))
+        sent.append(call)
+        if args["tool"] == "suspend_user" and (args["task_id"], *call) not in approved:  # per task, like the gateway
+            return [{"outcome": "pending_approval", "approval_id": "ap1", "reason": "destructive", "result": None}]
+        return [{"outcome": "ok", "result": "{}", "verified": args["tool"] == "suspend_user"}]
+
+    monkeypatch.setattr(workergate, "list_tools", fake_list_tools)
+    monkeypatch.setattr(workergate, "_gate", fake_gate)
+    picks = set()
+    for seed in range(8):  # the model's pick varies by seed: the resume must never re-pick
+        sent.clear()
+        w = SecOpsWorker("acme", "sec-lead", task_id=f"t{seed}")
+        w._llm = model = _ScriptedModel(random.Random(seed))
+        result, status = await w.handle("alert for dave")
+        assert status == "waiting_approval" and model.calls == 2
+        user = sent[-1][1]
+        picks.add(user)
+        approved.add((f"t{seed}", "suspend_user", user))  # a person approves exactly what they were shown
+        sent.clear()
+
+        w2 = SecOpsWorker("acme", "sec-lead", task_id=f"t{seed}")  # a new process, same task
+        w2._llm = model2 = _ScriptedModel(random.Random(seed + 1000))  # would pick differently if asked
+        result, status = await w2.handle("alert for dave", {"approval:ap1": {"decision": "approved"}})
+        assert status == "done" and result.answer == "suspended"
+        assert sent == [("suspend_user", user)]  # only the approved call, nothing re-read, nothing re-picked
+        assert model2.calls == 1  # only the turn after the approval; turns 1-2 came from the journal
+    assert len(picks) > 1, "the model never varied, so the test proved nothing"
