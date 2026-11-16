@@ -169,7 +169,7 @@ class IdentityWorker(BaseAgent):
         writes = getattr(self, "_writes", WRITES)
         # ok means governance read a downstream write back (verified True); its own tools (memory) have none (None)
         bad = [e for e in self.wg_evidence if e["tool"] in writes
-               and not (e["outcome"] == "ok" and e["verified"] is not False)]
+               and not (e["outcome"] in ("ok", "shadow") and e["verified"] is not False)]
         stopped = result.steps and not result.steps[-1].answer
         return "needs_review" if bad or stopped else "done"
 

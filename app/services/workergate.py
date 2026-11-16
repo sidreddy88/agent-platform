@@ -81,6 +81,9 @@ def _observation(res: dict) -> str:
     if o == "pending_approval":
         return (f"PENDING: a human must approve this first (approval {res['approval_id']}: {res['reason']}). "
                 f"Stop now and report that approval {res['approval_id']} is pending. Do not retry.")
+    if o == "shadow":
+        return ("SHADOW MODE: governance recorded this as what you would do; nothing was changed. Continue as if it "
+                "had succeeded, and say in your answer that this ran in shadow mode.")
     if o == "unverified":
         return ("UNVERIFIED: the tool said it worked, but governance read the record back and the change is not "
                 "there. Do not report this as done.")
