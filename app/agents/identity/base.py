@@ -23,7 +23,7 @@ import os
 import uuid
 from pathlib import Path
 
-from app.agents.base import AgentResult, BaseAgent
+from app.agents.base import _THOUGHT_RE, AgentResult, BaseAgent
 from app.services import cost_meter, workergate
 from app.services.llm import LLMService
 
@@ -34,6 +34,23 @@ async def _not_local(**_: object) -> str:
     raise RuntimeError("identity tools only run through governance")  # replaced by the register_tool hook
 
 
+class _ReasonLLM:
+    """The model, unchanged, except that it remembers the Thought of its last reply: the next tool call sends it to
+    governance as its stated reason (recorded in the audit as the model's claim)."""
+
+    def __init__(self, llm) -> None:
+        self._llm, self.last_thought = llm, ""
+
+    def __getattr__(self, name: str):
+        return getattr(self._llm, name)
+
+    async def complete(self, *a, **kw) -> str:
+        out = await self._llm.complete(*a, **kw)
+        m = _THOUGHT_RE.search(out or "")
+        self.last_thought = m.group(1).strip() if m else ""
+        return out
+
+
 class _JournaledLLM:
     """The model as a journaled step: its first answer for a turn is recorded, every resume gets that answer back.
     Only the messages and system prompt are checked on replay (a tracing handle differs per run)."""
@@ -41,6 +58,7 @@ class _JournaledLLM:
     def __init__(self, llm, ctx) -> None:
         self._llm, self._ctx = llm, ctx
         self.last_input_tokens = self.last_output_tokens = 0
+        self.last_thought = ""
 
     def __getattr__(self, name: str):
         return getattr(self._llm, name)
@@ -49,6 +67,8 @@ class _JournaledLLM:
         before = self._ctx.replayed
         out = await self._ctx.astep("llm", lambda m, s: self._llm.complete(messages=m, system=s, **kw),
                                     messages, system)
+        m = _THOUGHT_RE.search(out or "")
+        self.last_thought = m.group(1).strip() if m else ""  # sent with the next tool call as its stated reason
         replayed = self._ctx.replayed > before  # a replayed turn cost nothing
         self.last_input_tokens = 0 if replayed else self._llm.last_input_tokens
         self.last_output_tokens = 0 if replayed else self._llm.last_output_tokens
@@ -72,16 +92,31 @@ class IdentityWorker(BaseAgent):
     async def handle(self, request: str, signals: dict | None = None) -> tuple[AgentResult, str]:
         if not workergate.enabled():
             raise RuntimeError(f"{type(self).__name__} needs WORKERGATE_URL: all its tools live behind governance")
-        for t in await workergate.list_tools(self):
-            self.register_tool(t["name"], _not_local, t["description"])
+        tools = await workergate.list_tools(self)
+        # what counts as a write comes from governance's reviewed classes, not a list kept here
+        self._writes = {t["name"] for t in tools if t.get("class") in ("write", "destructive")} or WRITES
+        for t in tools:
+            if t["name"] != "report_outcome":  # the harness reports the outcome itself, not the model
+                self.register_tool(t["name"], _not_local, t["description"])
         prompt = (Path(__file__).parent / "harness" / self.role / "task.prompt").read_text()
         text = prompt.format(tenant=self.wg_tenant, obo=self.wg_obo, request=request)
         with cost_meter.metered() as self._wg_meter:
             if os.environ.get("WG_JOURNAL"):
                 result = await self._run_durably(text, signals or {})
             else:
-                result = await self.run(text)
-        return result, self.status(result)
+                real, self._llm = self._llm, _ReasonLLM(self._llm)
+                try:
+                    result = await self.run(text)
+                finally:
+                    self._llm = real
+        status = self.status(result)
+        if status != "waiting_approval":  # an ending, not a pause
+            await workergate.report_outcome(self, status, result.answer or "")
+        return result, status
+
+    @property
+    def wg_why(self) -> str:
+        return getattr(self._llm, "last_thought", "")
 
     async def _run_durably(self, text: str, signals: dict) -> AgentResult:
         from journaled import Engine
@@ -131,7 +166,10 @@ class IdentityWorker(BaseAgent):
     def status(self, result: AgentResult) -> str:
         if getattr(self, "_waiting_for", None) or any(e["outcome"] == "pending_approval" for e in self.wg_evidence):
             return "waiting_approval"
-        bad = [e for e in self.wg_evidence if e["tool"] in WRITES and not (e["outcome"] == "ok" and e["verified"])]
+        writes = getattr(self, "_writes", WRITES)
+        # ok means governance read a downstream write back (verified True); its own tools (memory) have none (None)
+        bad = [e for e in self.wg_evidence if e["tool"] in writes
+               and not (e["outcome"] == "ok" and e["verified"] is not False)]
         stopped = result.steps and not result.steps[-1].answer
         return "needs_review" if bad or stopped else "done"
 

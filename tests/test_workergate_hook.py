@@ -65,7 +65,8 @@ async def test_flag_set_routes_through_governance(monkeypatch):
     agent.task_id = "t1"
     agent.register_tool("suspend_user", local_tool, "d")
     out = await agent._tools["suspend_user"][0](user="bob")
-    assert sent == [("call", {"tool": "suspend_user", "args": {"user": "bob"}, "spent_usd": 0.0, "task_id": "t1"})]
+    assert sent == [("call", {"tool": "suspend_user", "args": {"user": "bob"}, "spent_usd": 0.0, "task_id": "t1",
+                              "why": ""})]
     assert out.startswith("DENIED by governance (authorize)")
     assert agent.wg_evidence[0]["outcome"] == "denied"
 
@@ -163,6 +164,7 @@ async def test_durable_resume_acts_on_the_approved_call_without_asking_the_model
         w2._llm = model2 = _ScriptedModel(random.Random(seed + 1000))  # would pick differently if asked
         result, status = await w2.handle("alert for dave", {"approval:ap1": {"decision": "approved"}})
         assert status == "done" and result.answer == "suspended"
-        assert sent == [("suspend_user", user)]  # only the approved call, nothing re-read, nothing re-picked
+        # only the approved call, nothing re-read, nothing re-picked; then the ending goes into the audit
+        assert sent == [("suspend_user", user), ("report_outcome", None)]
         assert model2.calls == 1  # only the turn after the approval; turns 1-2 came from the journal
     assert len(picks) > 1, "the model never varied, so the test proved nothing"
