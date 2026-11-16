@@ -81,6 +81,9 @@ def _observation(res: dict) -> str:
     if o == "pending_approval":
         return (f"PENDING: a human must approve this first (approval {res['approval_id']}: {res['reason']}). "
                 f"Stop now and report that approval {res['approval_id']} is pending. Do not retry.")
+    if o == "shadow":
+        return ("SHADOW MODE: governance recorded this as what you would do; nothing was changed. Continue as if it "
+                "had succeeded, and say in your answer that this ran in shadow mode.")
     if o == "unverified":
         return ("UNVERIFIED: the tool said it worked, but governance read the record back and the change is not "
                 "there. Do not report this as done.")
@@ -89,14 +92,28 @@ def _observation(res: dict) -> str:
     return f"Error: {res['result']}"
 
 
+async def report_outcome(agent: Any, status: str, summary: str) -> None:
+    """How the task ended, into governance's audit beside what governance saw it do."""
+    await _gate(agent, "call", {"tool": "report_outcome", "args": {"status": status, "summary": summary[:2000]},
+                                "task_id": getattr(agent, "task_id", "") or ""})
+
+
 def via_gateway(agent: Any, name: str):
     """A tool function that sends the call for `name` through governance. Each outcome is also kept on
     `agent.wg_evidence`, so whether the task is done is decided from governance's record, not the model's answer."""
     async def call(**kwargs: Any) -> str:
         meter = getattr(agent, "_wg_meter", None)
         spent = (meter.summary().get("cost_usd") or 0.0) if meter else 0.0
-        [res] = await _gate(agent, "call", {"tool": name, "args": kwargs, "spent_usd": spent,
-                                            "task_id": getattr(agent, "task_id", "") or ""})
+
+        async def send() -> dict:
+            # the model's own reason for this call goes into the audit, labelled as its claim
+            [res] = await _gate(agent, "call", {"tool": name, "args": kwargs, "spent_usd": spent,
+                                                "task_id": getattr(agent, "task_id", "") or "",
+                                                "why": (getattr(agent, "wg_why", "") or "")[:500]})
+            return res
+        # a durable worker records each call (and waits for approvals) instead of only sending it
+        hook = getattr(agent, "wg_durable_call", None)
+        res = await hook(name, kwargs, send) if hook else await send()
         if not hasattr(agent, "wg_evidence"):
             agent.wg_evidence = []
         agent.wg_evidence.append({"tool": name, "args": kwargs} | {k: res.get(k) for k in
